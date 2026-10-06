@@ -372,8 +372,9 @@ flowchart TB
     classDef machine fill:#f8fafc,stroke:#64748b,color:#0f172a
 ```
 
-Read [vm-runtime disk setup](../app/vm-runtime/src/disk.rs),
-[virtio-scsi device model](../app/vm-support/src/virtio_scsi.rs) and
+Read [vm-runtime I/O setup](../app/vm-runtime/src/io_devices.rs),
+[virtio-mmio device model](../app/vm-support/src/virtio_mmio.rs),
+[network configuration](../app/vm-support/src/virtio_net.rs), and
 [asynchronous backend control](../app/vm-support/src/io_backend.rs).
 [The runtime supervisor](../app/vm-runtime/src/supervisor.rs) services deferred
 MMIO and backend replies without holding the vCPU in a synchronous RPC.

@@ -3,7 +3,7 @@
 
 //! Bounded guest service, control requests, and quiescent terminal reporting.
 
-use crate::{disk, error::Error, runtime::publish_status};
+use crate::{error::Error, io_devices, runtime::publish_status};
 use hyper_os::handle::{ByteChannelObject, VirtualCpuObject, VirtualMachineObject};
 use hyper_os::wait::{ObjectSignals, WaitSet};
 use hyper_service::vm as vm_contract;
@@ -13,7 +13,7 @@ pub(super) fn supervise_guest(
     vcpus: &[hyper_os::OwnedHandle<VirtualCpuObject>],
     control: &hyper_os::channel::ByteChannel<'_>,
     console: &mut hyper_vm_runtime::console::Console,
-    mut disk: Option<&mut disk::Disk>,
+    mut devices: Option<&mut io_devices::IoDevices>,
 ) -> Result<(), Error> {
     let waits = WaitSet::new(6 + vcpus.len()).map_err(Error::OperatingSystem)?;
     let control_wait = waits
@@ -32,9 +32,9 @@ pub(super) fn supervise_guest(
         .map_err(Error::OperatingSystem)?;
     let mut control_consumed = false;
     loop {
-        if let Some(disk) = disk.as_mut() {
-            disk.service(vcpus)?;
-            disk.prepare_wait(&waits, vcpus)?;
+        if let Some(devices) = devices.as_mut() {
+            devices.service(vcpus)?;
+            devices.prepare_wait(&waits, vcpus)?;
         }
         console.service().map_err(Error::OperatingSystem)?;
         console
@@ -46,13 +46,13 @@ pub(super) fn supervise_guest(
         }
         let observation = waits
             .wait(
-                disk.as_ref()
-                    .map_or(hyper_os::DEADLINE_INFINITE, |disk| disk.deadline()),
+                devices
+                    .as_ref()
+                    .map_or(hyper_os::DEADLINE_INFINITE, |devices| devices.deadline()),
             )
             .map_err(Error::OperatingSystem)?;
-        if disk
-            .as_ref()
-            .is_some_and(|disk| disk.owns(observation.registration))
+        if let Some(devices) = devices.as_ref()
+            && devices.observe(observation.registration, observation.signals)?
         {
             continue;
         }

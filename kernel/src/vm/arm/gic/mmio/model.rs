@@ -35,9 +35,13 @@ impl RegisterState {
             ServiceRegister::DistributorControl | ServiceRegister::DistributorControlV2 => {
                 self.distributor_control as u64
             }
-            ServiceRegister::DistributorTypeV2 => 1 | (((count - 1) as u64) << 5),
+            ServiceRegister::DistributorTypeV2 => {
+                ((super::INTERRUPT_COUNT / 32 - 1) as u64) | (((count - 1) as u64) << 5)
+            }
             ServiceRegister::PeripheralId2V2 => 0x20,
-            ServiceRegister::DistributorType => 1 | (15 << 19),
+            ServiceRegister::DistributorType => {
+                ((super::INTERRUPT_COUNT / 32 - 1) as u64) | (15 << 19)
+            }
             // GICD_TYPER2 is optional and explicitly unimplemented.
             ServiceRegister::DistributorType2 => 0,
             ServiceRegister::DistributorImplementer | ServiceRegister::RedistributorImplementer => {

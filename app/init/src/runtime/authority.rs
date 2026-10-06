@@ -176,9 +176,9 @@ impl AuthorityInventory {
                 return builder
                     .add_handle_move(handle, purpose, offer)
                     .map_err(|failure| {
-                        let (_, handle) = failure.into_parts();
+                        let (error, handle) = failure.into_parts();
                         *slot = Some(handle);
-                        LaunchError::OperatingSystem
+                        LaunchError::service_resources(error)
                     });
             }
             (BootstrapAuthority::VmProvisioningChannel, CapabilityOperation::Move)
@@ -207,7 +207,7 @@ impl AuthorityInventory {
             }
             _ => return Err(LaunchError::UnsupportedAuthority),
         }
-        .map_err(|_| LaunchError::OperatingSystem)
+        .map_err(LaunchError::service_resources)
     }
 
     fn move_channel_into_builder(
@@ -229,9 +229,9 @@ impl AuthorityInventory {
         match builder.add_handle_move(channel, purpose, RightsOffer::Exact(rights)) {
             Ok(()) => Ok(()),
             Err(failure) => {
-                let (_, channel) = failure.into_parts();
+                let (error, channel) = failure.into_parts();
                 *slot = Some(channel);
-                Err(LaunchError::OperatingSystem)
+                Err(LaunchError::service_resources(error))
             }
         }
     }
@@ -250,9 +250,9 @@ impl AuthorityInventory {
         match builder.add_handle_move(channel, purpose, RightsOffer::Exact(rights)) {
             Ok(()) => Ok(()),
             Err(failure) => {
-                let (_, channel) = failure.into_parts();
+                let (error, channel) = failure.into_parts();
                 self.vm_mut()?.vm_provisioning_channel = Some(channel);
-                Err(LaunchError::OperatingSystem)
+                Err(LaunchError::service_resources(error))
             }
         }
     }
@@ -270,10 +270,10 @@ impl AuthorityInventory {
         let file = self
             .root_directory
             .open(VM_RUNTIME_IMAGE, requested)
-            .map_err(|_| LaunchError::OperatingSystem)?;
+            .map_err(LaunchError::service_operation)?;
         builder
             .add_handle_move(file.into_handle(), purpose, RightsOffer::Exact(rights))
-            .map_err(|_| LaunchError::OperatingSystem)
+            .map_err(|failure| LaunchError::service_resources(failure.into_parts().0))
     }
 
     fn move_vm_manager_connection_into_builder(
@@ -290,9 +290,9 @@ impl AuthorityInventory {
         match builder.add_handle_move(channel, purpose, RightsOffer::Exact(rights)) {
             Ok(()) => Ok(()),
             Err(failure) => {
-                let (_, channel) = failure.into_parts();
+                let (error, channel) = failure.into_parts();
                 self.vm_mut()?.vm_manager_connection_channel = Some(channel);
-                Err(LaunchError::OperatingSystem)
+                Err(LaunchError::service_resources(error))
             }
         }
     }

@@ -22,9 +22,16 @@ const MAX_BUS_RANGES: usize = 8;
 const MAX_RANGE_CELLS: usize = 64;
 const MAX_INTERRUPT_CELLS: usize = 16;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum AddressSpace {
+    Physical,
+    PciMemory(u32),
+}
+
 #[derive(Clone, Copy)]
 struct RegisterList {
     entries: [PhysicalRange; MAX_NODE_REGIONS],
+    spaces: [AddressSpace; MAX_NODE_REGIONS],
     length: usize,
 }
 
@@ -32,19 +39,24 @@ impl RegisterList {
     const fn new() -> Self {
         Self {
             entries: [PhysicalRange::EMPTY; MAX_NODE_REGIONS],
+            spaces: [AddressSpace::Physical; MAX_NODE_REGIONS],
             length: 0,
         }
     }
 
-    fn as_slice(&self) -> &[PhysicalRange] {
-        &self.entries[..self.length]
+    fn iter(&self) -> impl Iterator<Item = (PhysicalRange, AddressSpace)> + '_ {
+        self.entries[..self.length]
+            .iter()
+            .copied()
+            .zip(self.spaces.iter().copied())
     }
 
-    fn push(&mut self, range: PhysicalRange) -> Result<(), Error> {
+    fn push(&mut self, range: PhysicalRange, space: AddressSpace) -> Result<(), Error> {
         if self.length == MAX_NODE_REGIONS {
             return Err(Error::TooManyRegions);
         }
         self.entries[self.length] = range;
+        self.spaces[self.length] = space;
         self.length += 1;
         Ok(())
     }
@@ -52,6 +64,8 @@ impl RegisterList {
 
 #[derive(Clone, Copy)]
 struct BusRange {
+    child_space: AddressSpace,
+    parent_space: AddressSpace,
     child_start: u64,
     parent_start: u64,
     size: u64,
@@ -59,6 +73,8 @@ struct BusRange {
 
 impl BusRange {
     const EMPTY: Self = Self {
+        child_space: AddressSpace::Physical,
+        parent_space: AddressSpace::Physical,
         child_start: 0,
         parent_start: 0,
         size: 0,
@@ -82,6 +98,9 @@ struct NodeState {
     register_size_cells: u32,
     is_memory: bool,
     is_cpu: bool,
+    is_pci: bool,
+    register_pci: bool,
+    pcie_handoff: crate::platform::bcm2712::PciWindow,
     cpu_hardware_id: Option<u64>,
     is_reserved_region: bool,
     no_map: bool,
@@ -109,6 +128,9 @@ impl NodeState {
         register_size_cells: 1,
         is_memory: false,
         is_cpu: false,
+        is_pci: false,
+        register_pci: false,
+        pcie_handoff: crate::platform::bcm2712::PciWindow::EMPTY,
         cpu_hardware_id: None,
         is_reserved_region: false,
         no_map: false,
@@ -146,6 +168,7 @@ pub(super) struct CompletedNode {
     resource_error: Option<Error>,
     registers: [PhysicalRange; MAX_NODE_REGIONS],
     register_count: usize,
+    pci_memory: Option<(u64, PhysicalRange)>,
     interrupt_cells: [u32; MAX_INTERRUPT_CELLS],
     interrupt_cell_count: usize,
 }
@@ -157,6 +180,7 @@ impl CompletedNode {
             enabled: self.enabled,
             resource_error: self.resource_error,
             registers: &self.registers[..self.register_count],
+            pci_memory: self.pci_memory,
             interrupt_cells: &self.interrupt_cells[..self.interrupt_cell_count],
         }
     }
@@ -256,6 +280,7 @@ fn begin_node(
         id: node_id,
         register_address_cells: address_cells,
         register_size_cells: size_cells,
+        register_pci: *depth != 0 && nodes[*depth - 1].is_pci,
         is_memory: name == "memory" || name.starts_with("memory@"),
         is_cpu: name == "cpu" || name.starts_with("cpu@"),
         is_reserved_region: reserved_child,
@@ -299,13 +324,18 @@ fn finish_node(
             resource_error: Some(error),
             registers: [PhysicalRange::EMPTY; MAX_NODE_REGIONS],
             register_count: 0,
+            pci_memory: None,
             interrupt_cells: [0; MAX_INTERRUPT_CELLS],
             interrupt_cell_count: 0,
         });
     }
     let (translated_registers, translated_count) = translated_registers(&node, ancestors)?;
+    let pci_memory = pci_memory_window(&node, ancestors)?;
     if !node.disabled {
         discover_node_resources(&node, discovered, ancestors)?;
+        if let Some((_, range)) = pci_memory {
+            insert_region(&mut discovered.mmio, range)?;
+        }
     }
 
     Ok(CompletedNode {
@@ -314,6 +344,7 @@ fn finish_node(
         resource_error: None,
         registers: translated_registers,
         register_count: translated_count,
+        pci_memory,
         interrupt_cells: node.raw_interrupts,
         interrupt_cell_count: node.raw_interrupt_cells,
     })
@@ -325,8 +356,8 @@ fn translated_registers(
 ) -> Result<([PhysicalRange; MAX_NODE_REGIONS], usize), Error> {
     let mut translated_registers = [PhysicalRange::EMPTY; MAX_NODE_REGIONS];
     let mut translated_count = 0usize;
-    for &range in node.registers.as_slice() {
-        match translate_range(range, ancestors) {
+    for (range, space) in node.registers.iter() {
+        match translate_range(range, space, ancestors) {
             Ok(range) => {
                 translated_registers[translated_count] = range;
                 translated_count += 1;
@@ -351,8 +382,8 @@ fn discover_node_resources(
     if kind == NodeRegionKind::None {
         return Ok(());
     }
-    for &range in node.registers.as_slice() {
-        let range = match translate_range(range, ancestors) {
+    for (range, space) in node.registers.iter() {
+        let range = match translate_range(range, space, ancestors) {
             Ok(range) => range,
             Err(Error::UntranslatedAddress) if kind == NodeRegionKind::Mmio => continue,
             Err(error) => return Err(error),
@@ -413,6 +444,7 @@ fn insert_region<const CAPACITY: usize>(
 }
 
 fn apply_property(node: &mut NodeState, name: &str, value: &[u8]) -> Result<(), Error> {
+    node.pcie_handoff.property(name, value);
     match name {
         "#address-cells" => {
             node.child_address_cells = decode_u32(value).map_err(|_| Error::BadStructure)?;
@@ -423,6 +455,7 @@ fn apply_property(node: &mut NodeState, name: &str, value: &[u8]) -> Result<(), 
         "device_type" => {
             node.is_memory |= c_string_equals(value, "memory");
             node.is_cpu |= c_string_equals(value, "cpu");
+            node.is_pci |= c_string_equals(value, "pci");
         }
         // The DT specification defines only "ok" and "okay" as available.
         // Treat reserved, failed, disabled, and unknown states conservatively.
@@ -500,11 +533,11 @@ fn decode_ranges(node: &mut NodeState) -> Result<(), Error> {
         return Ok(());
     }
 
-    let Ok(child_cells) = supported_cells(node.child_address_cells, false) else {
+    let Ok(child_cells) = address_cells(node.child_address_cells, node.is_pci) else {
         node.ranges_supported = false;
         return Ok(());
     };
-    let Ok(parent_cells) = supported_cells(node.register_address_cells, false) else {
+    let Ok(parent_cells) = address_cells(node.register_address_cells, node.register_pci) else {
         node.ranges_supported = false;
         return Ok(());
     };
@@ -526,20 +559,45 @@ fn decode_ranges(node: &mut NodeState) -> Result<(), Error> {
         }
         let parent_offset = child_cells;
         let size_offset = child_cells + parent_cells;
-        let child_start = read_cell_words(tuple, child_cells)?;
-        let parent_start = read_cell_words(&tuple[parent_offset..], parent_cells)?;
+        let Some((child_start, child_space)) = read_address(tuple, child_cells)? else {
+            continue;
+        };
+        let Some((parent_start, parent_space)) =
+            read_address(&tuple[parent_offset..], parent_cells)?
+        else {
+            continue;
+        };
         let size = read_cell_words(&tuple[size_offset..], size_cells)?;
         if size == 0 {
             continue;
         }
         child_start.checked_add(size).ok_or(Error::BadStructure)?;
         parent_start.checked_add(size).ok_or(Error::BadStructure)?;
+        // PCI prefetch/type bits describe windows in the same memory address
+        // space, not independent aliases that may overlap ambiguously.
+        if node.ranges[..node.range_count].iter().any(|prior| {
+            let same_space = match (child_space, prior.child_space) {
+                (AddressSpace::PciMemory(_), AddressSpace::PciMemory(_)) => true,
+                (left, right) => left == right,
+            };
+            same_space
+                && child_start < prior.child_start + prior.size
+                && prior.child_start < child_start + size
+        }) {
+            return Err(Error::BadStructure);
+        }
         node.ranges[node.range_count] = BusRange {
+            child_space,
+            parent_space,
             child_start,
             parent_start,
             size,
         };
         node.range_count += 1;
+    }
+    // A nonempty table containing only unsupported spaces is not identity.
+    if node.range_count == 0 {
+        node.ranges_supported = false;
     }
     Ok(())
 }
@@ -554,6 +612,7 @@ fn read_cell_words(cells: &[u32], count: usize) -> Result<u64, Error> {
 
 fn translate_range(
     mut range: PhysicalRange,
+    mut space: AddressSpace,
     ancestors: &[NodeState],
 ) -> Result<PhysicalRange, Error> {
     // The root has no parent address space. Every lower ancestor represents a
@@ -568,7 +627,8 @@ fn translate_range(
         let mapping = bus.ranges[..bus.range_count]
             .iter()
             .find(|mapping| {
-                mapping.child_start <= range.start()
+                mapping.child_space == space
+                    && mapping.child_start <= range.start()
                     && range.end() <= mapping.child_start + mapping.size
             })
             .ok_or(Error::UntranslatedAddress)?;
@@ -577,8 +637,60 @@ fn translate_range(
             .checked_add(range.start() - mapping.child_start)
             .ok_or(Error::BadStructure)?;
         range = PhysicalRange::new(translated, range.size()).ok_or(Error::BadStructure)?;
+        space = mapping.parent_space;
     }
-    Ok(range)
+    if space == AddressSpace::Physical {
+        Ok(range)
+    } else {
+        Err(Error::UntranslatedAddress)
+    }
+}
+
+fn address_cells(value: u32, pci: bool) -> Result<usize, Error> {
+    if (1..=2).contains(&value) || (value == 3 && pci) {
+        Ok(value as usize)
+    } else {
+        Err(Error::UnsupportedCells)
+    }
+}
+
+/// PCI's first address cell is a space/type tag, not the top 32 address bits.
+/// Configuration and port-I/O addresses never become CPU MMIO capabilities.
+fn read_address(cells: &[u32], count: usize) -> Result<Option<(u64, AddressSpace)>, Error> {
+    if count != 3 {
+        return read_cell_words(cells, count).map(|value| Some((value, AddressSpace::Physical)));
+    }
+    let tag = *cells.first().ok_or(Error::Truncated)?;
+    if !matches!((tag >> 24) & 3, 2 | 3) || tag & 0x00ff_ffff != 0 {
+        return Ok(None);
+    }
+    read_cell_words(&cells[1..], 2).map(|value| Some((value, AddressSpace::PciMemory(tag))))
+}
+
+fn pci_memory_window(
+    node: &NodeState,
+    ancestors: &[NodeState],
+) -> Result<Option<(u64, PhysicalRange)>, Error> {
+    if node.disabled || !node.ranges_supported {
+        return Ok(None);
+    }
+    let mut windows = node.ranges[..node.range_count].iter().filter_map(|range| {
+        let AddressSpace::PciMemory(tag) = range.child_space else {
+            return None;
+        };
+        node.pcie_handoff
+            .mapping_size(tag, range.child_start, range.size)
+            .map(|size| (range, size))
+    });
+    let Some((window, size)) = windows.next() else {
+        return Ok(None);
+    };
+    if windows.next().is_some() {
+        return Err(Error::BadStructure);
+    }
+    let range = PhysicalRange::new(window.parent_start, size).ok_or(Error::BadStructure)?;
+    translate_range(range, window.parent_space, ancestors)
+        .map(|range| Some((window.child_start, range)))
 }
 
 fn supported_cells(value: u32, allow_zero: bool) -> Result<usize, Error> {
@@ -595,7 +707,9 @@ fn parse_registers(node: &mut NodeState, value: &[u8]) -> Result<(), Error> {
         usize::try_from(node.register_address_cells).map_err(|_| Error::UnsupportedCells)?;
     let size_cells =
         usize::try_from(node.register_size_cells).map_err(|_| Error::UnsupportedCells)?;
-    if !(1..=2).contains(&address_cells) || size_cells > 2 {
+    if self::address_cells(node.register_address_cells, node.register_pci).is_err()
+        || size_cells > 2
+    {
         return if node.is_memory || node.is_reserved_region {
             Err(Error::UnsupportedCells)
         } else {
@@ -611,10 +725,19 @@ fn parse_registers(node: &mut NodeState, value: &[u8]) -> Result<(), Error> {
     }
 
     for tuple in value.chunks_exact(tuple_bytes) {
-        let start = read_cells(tuple, address_cells)?;
+        let mut words = [0; 3];
+        for (word, bytes) in words
+            .iter_mut()
+            .zip(tuple[..address_cells * 4].chunks_exact(4))
+        {
+            *word = read_u32(bytes, 0)?;
+        }
+        let Some((start, space)) = read_address(&words, address_cells)? else {
+            continue;
+        };
         let size = read_cells(&tuple[address_cells * 4..], size_cells)?;
         if let Some(range) = PhysicalRange::new(start, size) {
-            node.registers.push(range)?;
+            node.registers.push(range, space)?;
         }
     }
     Ok(())

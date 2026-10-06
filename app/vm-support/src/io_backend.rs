@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Nonblocking configuration owner for one vhost-scsi backend.
+//! Nonblocking configuration owner for one virtio device backend.
 //!
 //! The caller multiplexes mailbox, VM lifetime, console and vCPU observations.
 //! A control request never blocks that event loop, and a guest MMIO instruction
 //! is completed only after the exact backend transaction is acknowledged.
 
 use crate::io_protocol::{self, Command, Reply, Request, Status};
-use crate::virtio_scsi::{self, BackendOperation, Device, Transaction};
+use crate::virtio_mmio::{self, BackendOperation, Device, DeviceKind, Transaction};
 use hyper_os::guest_io::{Mailbox, Notification, Operation};
 use hyper_os::vm::{MmioCompletion, MmioOperation, MmioRequest};
 use std::num::NonZeroU64;
@@ -17,7 +17,7 @@ use std::num::NonZeroU64;
 pub enum Error {
     Native(hyper_os::Error),
     Protocol(io_protocol::Error),
-    Device(virtio_scsi::Error),
+    Device(virtio_mmio::Error),
     BackendRejected(Status),
     Disconnected,
     InvalidState,
@@ -96,12 +96,21 @@ impl NotificationControl for Notification {
 pub struct RemoteNotification<T> {
     channel: T,
     pending: Option<([u8; 16], bool)>,
+    kind: DeviceKind,
 }
 impl<T> RemoteNotification<T> {
     pub fn new(channel: T) -> Self {
         Self {
             channel,
             pending: None,
+            kind: DeviceKind::Scsi,
+        }
+    }
+    pub fn network(channel: T) -> Self {
+        Self {
+            channel,
+            pending: None,
+            kind: DeviceKind::Network,
         }
     }
 }
@@ -113,6 +122,7 @@ impl<T: ControlTransport> NotificationControl for RemoteNotification<T> {
         let mut request = [0; 16];
         request[..8].copy_from_slice(b"HIONOT01");
         request[8..12].copy_from_slice(&(operation as u32).to_le_bytes());
+        request[12..16].copy_from_slice(&(self.kind as u32).to_le_bytes());
         self.pending = Some((request, false));
         self.poll()
     }
@@ -133,7 +143,10 @@ impl<T: ControlTransport> NotificationControl for RemoteNotification<T> {
         }
         let mut reply = [0; 16];
         match self.channel.receive(&mut reply) {
-            Ok(16) if &reply[..8] == b"HIONOTR1" && reply[12..] == [0; 4] => {
+            Ok(16)
+                if &reply[..8] == b"HIONOTR1"
+                    && reply[12..] == (self.kind as u32).to_le_bytes() =>
+            {
                 let epoch = u32::from_le_bytes(
                     reply[8..12]
                         .try_into()
@@ -194,6 +207,7 @@ impl OperationDeadline {
 }
 
 pub struct Backend<T = Mailbox, N = Notification> {
+    kind: DeviceKind,
     mailbox: T,
     notification: N,
     device: Option<Device>,
@@ -216,6 +230,7 @@ impl<T: ControlTransport, N: NotificationControl> Backend<T, N> {
         device_id: NonZeroU64,
     ) -> Result<Self, Error> {
         Ok(Self {
+            kind: DeviceKind::Scsi,
             mailbox,
             notification,
             device: None,
@@ -237,6 +252,30 @@ impl<T: ControlTransport, N: NotificationControl> Backend<T, N> {
                 guest: None,
             }),
         })
+    }
+
+    /// A second endpoint shares the memory binding and serialized control lane,
+    /// while keeping its own configuration model, notification epoch and MMIO ID.
+    pub fn network(
+        mailbox: T,
+        notification: N,
+        memory: (u64, u64),
+        mmio_base: u64,
+        device_id: NonZeroU64,
+        binding: NonZeroU64,
+    ) -> Result<Self, Error> {
+        let mut backend = Self::new(mailbox, notification, memory, mmio_base, device_id)?;
+        backend.kind = DeviceKind::Network;
+        backend.binding = binding.get();
+        if let Some(pending) = backend.pending.as_mut() {
+            pending.request.binding = binding.get();
+            pending.request.command = Command::NetworkHello;
+        }
+        Ok(backend)
+    }
+
+    pub fn device_id(&self) -> NonZeroU64 {
+        self.device_id
     }
 
     /// Preserve outstanding queue ownership and expose failure to the guest.
@@ -396,12 +435,19 @@ impl<T: ControlTransport, N: NotificationControl> Backend<T, N> {
                     if reply.status != Status::Success {
                         return Err(Error::BackendRejected(reply.status));
                     }
+                    let features = reply.features.ok_or(Error::InvalidState)?;
                     self.device = Some(
-                        Device::new(
-                            reply.features.ok_or(Error::InvalidState)?,
-                            self.memory_base,
-                            self.memory_size,
-                        )
+                        match self.kind {
+                            DeviceKind::Scsi => {
+                                Device::new(features, self.memory_base, self.memory_size)
+                            }
+                            DeviceKind::Network => Device::network(
+                                features,
+                                self.memory_base,
+                                self.memory_size,
+                                reply.network.ok_or(Error::InvalidState)?,
+                            ),
+                        }
                         .map_err(Error::Device)?,
                     );
                     self.pending = None;
@@ -454,7 +500,12 @@ impl<T: ControlTransport, N: NotificationControl> Backend<T, N> {
                             binding: self.binding,
                             epoch: 0,
                             transaction: self.next_transaction,
-                            command: Command::Device(transaction.operation),
+                            command: match self.kind {
+                                DeviceKind::Scsi => Command::Device(transaction.operation),
+                                DeviceKind::Network => {
+                                    Command::NetworkDevice(transaction.operation)
+                                }
+                            },
                         },
                         phase: Phase::Disable { started: false },
                         guest: Some((transaction, completion)),

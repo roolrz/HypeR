@@ -206,10 +206,21 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_COMPATIBLE UINT64_C(2)
 #define HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_REGISTERS UINT64_C(3)
 #define HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_PROPERTY UINT64_C(4)
+#define HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_PROPERTY_NAMES UINT64_C(5)
 #define HYPER_NATIVE_DEVICE_PROFILE_VIRTIO_MMIO_SCSI UINT64_C(1)
 #define HYPER_NATIVE_DEVICE_PROFILE_USERSPACE UINT64_C(2)
+#define HYPER_NATIVE_DEVICE_PROFILE_VIRTIO_MMIO_NET UINT64_C(3)
+#define HYPER_NATIVE_DEVICE_PROFILE_PCI_FUNCTION UINT64_C(4)
+#define HYPER_NATIVE_DEVICE_PCI_APERTURE_SIZE UINT64_C(8388608)
+#define HYPER_NATIVE_DEVICE_RESOURCE_PCI_ECAM UINT64_C(256)
+#define HYPER_NATIVE_DEVICE_RESOURCE_PCI_MSI UINT64_C(257)
+#define HYPER_NATIVE_DEVICE_RESOURCE_PCI_BAR0 UINT64_C(512)
+#define HYPER_NATIVE_DEVICE_RESOURCE_MEMORY_64 UINT64_C(1)
+#define HYPER_NATIVE_DEVICE_RESOURCE_PREFETCHABLE UINT64_C(2)
+#define HYPER_NATIVE_DEVICE_ASSIGNMENT_MAX_DEVICES UINT64_C(4)
 #define HYPER_NATIVE_DEVICE_IDENTITY_COMPATIBLE UINT64_C(1)
 #define HYPER_NATIVE_DEVICE_IDENTITY_FDT_PATH UINT64_C(2)
+#define HYPER_NATIVE_DEVICE_IDENTITY_PCI_ID UINT64_C(3)
 #define HYPER_NATIVE_IO_MAX_CLIENTS UINT64_C(9)
 #define HYPER_NATIVE_GUEST_NOTIFICATION_DISCONNECT UINT64_C(3)
 #define HYPER_NATIVE_GUEST_DYNAMIC_ALIAS_OFFSET UINT64_C(68719476736)
@@ -288,6 +299,8 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_SIZE UINT64_C(4096)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_INTERRUPT UINT64_C(33)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_TIMER_INTERRUPT UINT64_C(27)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_INTERRUPT_COUNT UINT64_C(256)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_DEVICE_INTERRUPT_BASE UINT64_C(40)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_RISCV64_REFERENCE UINT64_C(2)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_RISCV64_REFERENCE_GUEST_RAM_BASE UINT64_C(2147483648)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_RISCV64_REFERENCE_DTB_OFFSET UINT64_C(65536)
@@ -550,20 +563,20 @@ static inline uint64_t hyper_native_failure_result_mask(
 #define HYPER_NATIVE_DEVICE_PROFILE_INFO_MIN_SIZE UINT64_C(32)
 typedef struct hyper_native_device_profile_info_t {
     uint32_t profile;
-    uint32_t reserved0;
+    uint32_t interrupt_count;
     uint32_t resource_count;
-    uint32_t reserved1;
-    uint64_t reserved2;
-    uint64_t reserved3;
+    uint32_t pci_identity;
+    uint64_t dma_bus_offset;
+    uint64_t aperture_size;
 } hyper_native_device_profile_info_t;
 HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_device_profile_info_t) == 32, "device_profile_info size");
 HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_device_profile_info_t) == 8, "device_profile_info alignment");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, profile) == 0, "device_profile_info.profile offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, reserved0) == 4, "device_profile_info.reserved0 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, interrupt_count) == 4, "device_profile_info.interrupt_count offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, resource_count) == 8, "device_profile_info.resource_count offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, reserved1) == 12, "device_profile_info.reserved1 offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, reserved2) == 16, "device_profile_info.reserved2 offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, reserved3) == 24, "device_profile_info.reserved3 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, pci_identity) == 12, "device_profile_info.pci_identity offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, dma_bus_offset) == 16, "device_profile_info.dma_bus_offset offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, aperture_size) == 24, "device_profile_info.aperture_size offset");
 
 #define HYPER_NATIVE_DEVICE_FIRMWARE_QUERY_MIN_SIZE UINT64_C(24)
 typedef struct hyper_native_device_firmware_query_t {
@@ -612,18 +625,18 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_bundle_entry_t, offset) == 
 #define HYPER_NATIVE_DEVICE_RESOURCE_INFO_MIN_SIZE UINT64_C(32)
 typedef struct hyper_native_device_resource_info_t {
     uint32_t kind;
-    uint32_t reserved;
+    uint32_t flags;
     uint64_t offset;
     uint64_t length;
-    uint64_t reserved2;
+    uint64_t bus_address;
 } hyper_native_device_resource_info_t;
 HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_device_resource_info_t) == 32, "device_resource_info size");
 HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_device_resource_info_t) == 8, "device_resource_info alignment");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_resource_info_t, kind) == 0, "device_resource_info.kind offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_resource_info_t, reserved) == 4, "device_resource_info.reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_resource_info_t, flags) == 4, "device_resource_info.flags offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_resource_info_t, offset) == 8, "device_resource_info.offset offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_resource_info_t, length) == 16, "device_resource_info.length offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_resource_info_t, reserved2) == 24, "device_resource_info.reserved2 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_resource_info_t, bus_address) == 24, "device_resource_info.bus_address offset");
 
 #define HYPER_NATIVE_PHYSICAL_DEVICE_INFO_MIN_SIZE UINT64_C(16)
 typedef struct hyper_native_physical_device_info_t {

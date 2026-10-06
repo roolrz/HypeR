@@ -303,18 +303,12 @@ impl VmRegistry {
     fn quiescent_physical(
         &self,
         id: VmId,
-    ) -> Result<
-        Option<
-            crate::kernel::object::KernelRef<
-                crate::kernel::device::assigned::PhysicalDevice,
-                crate::kernel::object::VmDeviceBinding,
-            >,
-        >,
-        Error,
-    > {
+    ) -> Result<crate::kernel::device::assigned::AssignmentOwners, Error> {
         let slot = usize::try_from(id.slot).map_err(|_| Error::StaleIdentity)?;
         match self.slots.get(slot) {
-            Some(VmSlot::QuiescentHeld { owner }) if owner.id() == id => Ok(owner.physical_owner()),
+            Some(VmSlot::QuiescentHeld { owner }) if owner.id() == id => {
+                Ok(owner.physical_owners())
+            }
             _ => Err(Error::StaleIdentity),
         }
     }

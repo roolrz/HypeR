@@ -35,26 +35,53 @@ make
 make run
 ```
 
+The build imports the matching protocol version 3 appliance from
+[`scripts/io-vm.lock.json`](../scripts/io-vm.lock.json), verifies its immutable
+GHCR digest and caches it locally. See [appliance requirements](io-vm.md#protocol-version-3-appliance-requirement)
+for the package boundary and default QEMU deployment.
+`make run` uses the already packaged appliance and needs no package argument.
+
+The kernel's early boot log includes its crate version, Git revision and UTC
+build time, for example `HypeR version 0.1.0-0123456789ab-dirty (built
+2026-10-06T00:00:00Z)`. Uncommitted changes and untracked source files add the
+`-dirty` suffix; a source archive without Git metadata reports `unknown`.
+Incremental `make` builds refresh the identity when source state changes and
+retain the timestamp when the kernel is not recompiled. `SOURCE_DATE_EPOCH`
+can supply a fixed Unix timestamp for reproducible builds. The I/O VM prints
+its own appliance revision and build time independently of Linux's release.
+
 `make` builds the Rust std-based init, direction-attenuated Console workers,
 session manager, capability-scoped shell, VM manager, and isolated VM runtime
 only through the assembled SDK under `target/sdk/aarch64`. It also downloads
 the checksum-pinned AArch64 Linux inputs and, on first build, packages the guest
-FIT and root disk into the board disk. Later builds preserve that disk.
-`make run` only starts existing artifacts; `make rebuild` repacks the whole disk. The applications do not
-include private kernel or SDK source paths. Native applications are dynamic
-PIEs by default and share the capability-loaded `libhyper.so` runtime through
-the in-tree AArch64 ELF interpreter. SDK consumers can select a self-contained
+FIT and root disk into the board disk. Later builds preserve that disk,
+including its VM definitions, Alpine FIT and root filesystem. Changes to
+`boards/qemu.json` or the guest `/init` do not update those existing files.
+`make run` only starts existing artifacts. `make rebuild` repacks the whole
+disk and resets its data. See
+[updating existing deployments](board-storage.md#updating-existing-deployments)
+before changing a persistent deployment.
+
+The applications do not include private kernel or SDK source paths. Native
+applications are dynamic PIEs by default and share the capability-loaded
+`libhyper.so` runtime through the in-tree AArch64 ELF interpreter. SDK consumers
+can select a self-contained
 static PIE backed by the matching `libhyper.a` with `HYPER_LINK_MODE=static`.
 Pass `INITRAMFS=/path/to/archive.cpio` to test another Native userspace image.
 
 The default AArch64 board profile retains the HypeR shell and starts a resident
-Linux I/O VM with its assigned QEMU virtio-scsi disk. Its Native owner is
-`io-runtime`, visible in `ps`. It mounts the configuration volume at `/data`
-and provides disks to configured guest VMs. The persistent disk is
+Linux I/O VM with its assigned QEMU virtio-scsi disk and virtio-net uplink. Its
+Native owner is `io-runtime`, visible in `ps`. It mounts the configuration
+volume at `/data` and provides disk and network backends to configured guest VMs. Linux creates
+the bridge and connects each guest TAP automatically; QEMU user networking
+supplies DHCP and NAT. After `vmm start alpine`, use `vmm console alpine` to
+enter the guest. Alpine starts DHCP in the background and renews its lease;
+an absent DHCP server does not block its shell. The persistent disk is
 `target/board/qemu/disk.img`; `BOARD_IMAGE` selects another board disk.
 
 For an idle-backend diagnostic without mounted Native storage, build with
-`make RUN_PROFILE=io`, then launch with `make run RUN_PROFILE=io`. Its separate
+`make RUN_PROFILE=io`,
+then launch with `make run RUN_PROFILE=io`. Its separate
 64 MiB disk is created once during the build. Set `IO_VM_DISK=/path/to/disk.img`
 on both commands to select another diagnostic disk. See [I/O VM](io-vm.md).
 

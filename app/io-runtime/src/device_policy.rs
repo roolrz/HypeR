@@ -16,6 +16,7 @@ pub struct Policy {
 enum Identity {
     Compatible(String),
     Path(String),
+    PciId { vendor: u16, device: u16 },
 }
 
 #[derive(Deserialize)]
@@ -26,6 +27,8 @@ struct Selector {
     compatible: Option<String>,
     #[serde(default, deserialize_with = "identity_field")]
     path: Option<String>,
+    #[serde(rename = "pci-id", default, deserialize_with = "identity_field")]
+    pci_id: Option<String>,
 }
 
 fn identity_field<'de, D: serde::Deserializer<'de>>(
@@ -39,32 +42,40 @@ fn identity_field<'de, D: serde::Deserializer<'de>>(
 enum ProfileName {
     #[serde(rename = "virtio-mmio-scsi")]
     VirtioScsi,
+    #[serde(rename = "virtio-mmio-net")]
+    VirtioNet,
     #[serde(rename = "bcm2712-sdhci")]
     Sdhci,
+    #[serde(rename = "pci-function")]
+    PciFunction,
 }
 
 impl TryFrom<Selector> for Policy {
     type Error = String;
 
     fn try_from(selector: Selector) -> Result<Self, Self::Error> {
-        let identity = match (selector.compatible, selector.path) {
-            (Some(value), None) => Identity::Compatible(value),
-            (None, Some(value))
-                if value.starts_with('/')
+        let identity = match (selector.compatible, selector.path, selector.pci_id) {
+            (Some(value), None, None) if !matches!(selector.profile, ProfileName::PciFunction) => {
+                validate_text(&value)?;
+                Identity::Compatible(value)
+            }
+            (None, Some(value), None)
+                if !matches!(selector.profile, ProfileName::PciFunction)
+                    && value.starts_with('/')
                     && !value
                         .split('/')
                         .skip(1)
                         .any(|part| matches!(part, "" | "." | "..")) =>
             {
+                validate_text(&value)?;
                 Identity::Path(value)
             }
-            _ => return Err("device requires exactly one canonical firmware identity".into()),
+            (None, None, Some(value)) if matches!(selector.profile, ProfileName::PciFunction) => {
+                let (vendor, device) = parse_pci_id(&value)?;
+                Identity::PciId { vendor, device }
+            }
+            _ => return Err("device requires exactly one identity matching its profile".into()),
         };
-        let (Identity::Compatible(text) | Identity::Path(text)) = &identity;
-        if text.is_empty() || text.len() > 512 || text.bytes().any(|byte| byte <= 32 || byte == 127)
-        {
-            return Err("invalid firmware identity".into());
-        }
         Ok(Self {
             profile: selector.profile,
             identity,
@@ -72,11 +83,36 @@ impl TryFrom<Selector> for Policy {
     }
 }
 
+fn validate_text(text: &str) -> Result<(), String> {
+    if text.is_empty() || text.len() > 512 || text.bytes().any(|byte| byte <= 32 || byte == 127) {
+        return Err("invalid firmware identity".into());
+    }
+    Ok(())
+}
+
+fn parse_pci_id(text: &str) -> Result<(u16, u16), String> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 9
+        || bytes[4] != b':'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(index, byte)| index != 4 && !matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err("PCI identity must be canonical vvvv:dddd hexadecimal".into());
+    }
+    let vendor = u16::from_str_radix(&text[..4], 16).map_err(|_| "invalid PCI vendor")?;
+    let device = u16::from_str_radix(&text[5..], 16).map_err(|_| "invalid PCI device")?;
+    Ok((vendor, device))
+}
+
 impl Policy {
     pub const fn profile(&self) -> Profile {
         match self.profile {
             ProfileName::VirtioScsi => Profile::VirtioMmioScsi,
+            ProfileName::VirtioNet => Profile::VirtioMmioNet,
             ProfileName::Sdhci => Profile::Userspace,
+            ProfileName::PciFunction => Profile::PciFunction,
         }
     }
 
@@ -84,6 +120,10 @@ impl Policy {
         match &self.identity {
             Identity::Compatible(value) => FirmwareIdentity::Compatible(value),
             Identity::Path(value) => FirmwareIdentity::FdtPath(value),
+            Identity::PciId { vendor, device } => FirmwareIdentity::PciId {
+                vendor: *vendor,
+                device: *device,
+            },
         }
     }
 }
@@ -116,6 +156,50 @@ mod tests {
                 ))
                 .is_err()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod pci_tests {
+    use super::*;
+
+    #[test]
+    fn pci_identity_is_typed_and_cannot_be_confused_with_firmware_paths() {
+        let policy: Policy =
+            serde_json::from_str(r#"{"profile":"pci-function","pci-id":"1de4:0001"}"#).unwrap();
+        assert_eq!(policy.profile(), Profile::PciFunction);
+        assert!(matches!(
+            policy.identity(),
+            FirmwareIdentity::PciId {
+                vendor: 0x1de4,
+                device: 1
+            }
+        ));
+        for value in [
+            "",
+            "1DE4:0001",
+            "1de4:1",
+            "1de4-0001",
+            " 1de4:0001",
+            "1de4:00010",
+            "zzzz:0001",
+        ] {
+            assert!(
+                serde_json::from_str::<Policy>(&format!(
+                    r#"{{"profile":"pci-function","pci-id":"{value}"}}"#
+                ))
+                .is_err()
+            );
+        }
+        for value in [
+            r#"{"profile":"pci-function","compatible":"pci1de4,1"}"#,
+            r#"{"profile":"pci-function","path":"/pcie/rp1"}"#,
+            r#"{"profile":"pci-function","pci-id":null}"#,
+            r#"{"profile":"pci-function","pci-id":"1de4:0001","path":"/pcie/rp1"}"#,
+            r#"{"profile":"virtio-mmio-net","pci-id":"1de4:0001"}"#,
+        ] {
+            assert!(serde_json::from_str::<Policy>(value).is_err());
         }
     }
 }

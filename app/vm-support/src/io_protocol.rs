@@ -4,10 +4,11 @@
 //! Versioned control records shared with the independently built I/O appliance.
 //! No pointers, file descriptors or Rust layout cross this boundary.
 
-use crate::virtio_scsi::{BackendOperation, QUEUE_MAX, QUEUES, VERSION_1};
+use crate::virtio_mmio::{BackendOperation, DeviceKind, QUEUE_MAX, QUEUES, VERSION_1};
+use crate::virtio_net;
 
 const MAGIC: u32 = 0x314f_4948;
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 const HEADER: usize = 40;
 pub const MAX_RECORD: usize = 256;
 
@@ -22,6 +23,7 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
     Hello,
+    NetworkHello,
     Prepare {
         alias: u64,
         guest_base: u64,
@@ -30,17 +32,29 @@ pub enum Command {
     },
     Release,
     Device(BackendOperation),
+    NetworkDevice(BackendOperation),
 }
 
 impl Command {
     const fn opcode(self) -> u16 {
         match self {
             Self::Hello => 1,
+            Self::NetworkHello => 7,
             Self::Prepare { .. } => 5,
             Self::Release => 6,
             Self::Device(BackendOperation::Activate { .. }) => 2,
             Self::Device(BackendOperation::Reset) => 3,
             Self::Device(BackendOperation::StopQueue { .. }) => 4,
+            Self::NetworkDevice(BackendOperation::Activate { .. }) => 8,
+            Self::NetworkDevice(BackendOperation::Reset) => 9,
+            Self::NetworkDevice(BackendOperation::StopQueue { .. }) => 10,
+        }
+    }
+
+    pub const fn device_kind(self) -> DeviceKind {
+        match self {
+            Self::NetworkHello | Self::NetworkDevice(_) => DeviceKind::Network,
+            _ => DeviceKind::Scsi,
         }
     }
 }
@@ -59,8 +73,13 @@ impl Request {
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let command = match u16_at(bytes, 6)? {
             1 => Command::Hello,
+            7 => Command::NetworkHello,
             3 => Command::Device(BackendOperation::Reset),
+            9 => Command::NetworkDevice(BackendOperation::Reset),
             4 => Command::Device(BackendOperation::StopQueue {
+                queue: u32_at(bytes, 40)?,
+            }),
+            10 => Command::NetworkDevice(BackendOperation::StopQueue {
                 queue: u32_at(bytes, 40)?,
             }),
             5 => Command::Prepare {
@@ -70,17 +89,22 @@ impl Request {
                 mapping_token: u64_at(bytes, 64)?,
             },
             6 => Command::Release,
-            2 => {
-                let mut queues = [crate::virtio_scsi::Queue {
+            opcode @ (2 | 8) => {
+                let mut queues = [crate::virtio_mmio::Queue {
                     size: 0,
                     descriptor: 0,
                     available: 0,
                     used: 0,
                     ready: false,
                 }; QUEUES];
-                for (index, queue) in queues.iter_mut().enumerate() {
+                let count = if opcode == 2 {
+                    QUEUES
+                } else {
+                    virtio_net::QUEUES
+                };
+                for (index, queue) in queues[..count].iter_mut().enumerate() {
                     let offset = 48 + index * 32;
-                    *queue = crate::virtio_scsi::Queue {
+                    *queue = crate::virtio_mmio::Queue {
                         size: u32_at(bytes, offset)?,
                         descriptor: u64_at(bytes, offset + 8)?,
                         available: u64_at(bytes, offset + 16)?,
@@ -88,10 +112,15 @@ impl Request {
                         ready: u32_at(bytes, offset)? != 0,
                     };
                 }
-                Command::Device(BackendOperation::Activate {
+                let operation = BackendOperation::Activate {
                     features: u64_at(bytes, 40)?,
                     queues,
-                })
+                };
+                if opcode == 2 {
+                    Command::Device(operation)
+                } else {
+                    Command::NetworkDevice(operation)
+                }
             }
             _ => return Err(Error::InvalidRecord),
         };
@@ -113,10 +142,18 @@ impl Request {
             return Err(Error::InvalidIdentity);
         }
         let length = match self.command {
-            Command::Hello | Command::Release | Command::Device(BackendOperation::Reset) => HEADER,
+            Command::Hello
+            | Command::NetworkHello
+            | Command::Release
+            | Command::Device(BackendOperation::Reset)
+            | Command::NetworkDevice(BackendOperation::Reset) => HEADER,
             Command::Prepare { .. } => 72,
             Command::Device(BackendOperation::Activate { .. }) => 48 + QUEUES * 32,
-            Command::Device(BackendOperation::StopQueue { .. }) => 48,
+            Command::NetworkDevice(BackendOperation::Activate { .. }) => {
+                48 + virtio_net::QUEUES * 32
+            }
+            Command::Device(BackendOperation::StopQueue { .. })
+            | Command::NetworkDevice(BackendOperation::StopQueue { .. }) => 48,
         };
         output.fill(0);
         output[0..4].copy_from_slice(&MAGIC.to_le_bytes());
@@ -147,11 +184,19 @@ impl Request {
                 output[56..64].copy_from_slice(&length.to_le_bytes());
                 output[64..72].copy_from_slice(&mapping_token.to_le_bytes());
             }
-            Command::Device(BackendOperation::Activate { features, queues }) => {
-                output[40..48].copy_from_slice(&features.to_le_bytes());
-                for (queue, chunk) in queues
+            Command::Device(BackendOperation::Activate { features, queues })
+            | Command::NetworkDevice(BackendOperation::Activate { features, queues }) => {
+                let count = self.command.device_kind().queue_count();
+                if queues[count..]
                     .iter()
-                    .zip(output[48..48 + QUEUES * 32].chunks_exact_mut(32))
+                    .any(|queue| *queue != crate::virtio_mmio::Queue::default())
+                {
+                    return Err(Error::InvalidRecord);
+                }
+                output[40..48].copy_from_slice(&features.to_le_bytes());
+                for (queue, chunk) in queues[..count]
+                    .iter()
+                    .zip(output[48..length].chunks_exact_mut(32))
                 {
                     if !queue.ready {
                         continue;
@@ -162,7 +207,8 @@ impl Request {
                     chunk[24..32].copy_from_slice(&queue.used.to_le_bytes());
                 }
             }
-            Command::Device(BackendOperation::StopQueue { queue }) => {
+            Command::Device(BackendOperation::StopQueue { queue })
+            | Command::NetworkDevice(BackendOperation::StopQueue { queue }) => {
                 output[40..44].copy_from_slice(&queue.to_le_bytes());
             }
             _ => {}
@@ -187,16 +233,18 @@ pub enum Status {
 pub struct Reply {
     pub status: Status,
     pub features: Option<u64>,
+    pub network: Option<virtio_net::Configuration>,
 }
 
 impl Reply {
     /// Accept only the exact outstanding operation, including its epoch. A
     /// stale successful reply must never authorize queue or DMA memory reuse.
     pub fn decode(bytes: &[u8], request: Request) -> Result<Self, Error> {
-        let expected = if request.command == Command::Hello {
-            64
-        } else {
-            48
+        let successful = u32_at(bytes, 40)? == 0;
+        let expected = match request.command {
+            Command::Hello if successful => 64,
+            Command::NetworkHello if successful => 80,
+            _ => 48,
         };
         if bytes.len() != expected
             || u32_at(bytes, 0)? != MAGIC
@@ -223,20 +271,37 @@ impl Reply {
             5 => Status::QuiescenceFailed,
             _ => return Err(Error::InvalidRecord),
         };
-        let features = if request.command == Command::Hello {
-            let features = u64_at(bytes, 48)?;
-            if status != Status::Success
-                || features & VERSION_1 == 0
-                || u32_at(bytes, 56)? != QUEUES as u32
-                || u32_at(bytes, 60)? != QUEUE_MAX
-            {
+        let features =
+            if successful && matches!(request.command, Command::Hello | Command::NetworkHello) {
+                let features = u64_at(bytes, 48)?;
+                if status != Status::Success
+                    || features & VERSION_1 == 0
+                    || u32_at(bytes, 56)? != request.command.device_kind().queue_count() as u32
+                    || u32_at(bytes, 60)? != QUEUE_MAX
+                {
+                    return Err(Error::UnsupportedBackend);
+                }
+                Some(features)
+            } else {
+                None
+            };
+        let network = if successful && request.command == Command::NetworkHello {
+            let config = virtio_net::Configuration {
+                mac: field(bytes, 64)?,
+                mtu: u16_at(bytes, 70)?,
+            };
+            if !config.valid() || bytes[72..80] != [0; 8] {
                 return Err(Error::UnsupportedBackend);
             }
-            Some(features)
+            Some(config)
         } else {
             None
         };
-        Ok(Self { status, features })
+        Ok(Self {
+            status,
+            features,
+            network,
+        })
     }
 }
 

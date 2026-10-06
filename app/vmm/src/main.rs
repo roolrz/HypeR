@@ -126,6 +126,13 @@ fn write_response(
                     },
                     machine.image
                 )?;
+                if let Some(network) = &machine.network {
+                    writeln!(
+                        output,
+                        "  network: {}; MAC: {}; I/O client: {}",
+                        network.network, network.mac, network.client
+                    )?;
+                }
                 for placement in &machine.placement {
                     writeln!(
                         output,

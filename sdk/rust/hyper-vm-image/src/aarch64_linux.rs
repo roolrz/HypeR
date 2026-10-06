@@ -19,8 +19,9 @@ pub const REFERENCE_GUEST_RAM_BASE: u64 =
 /// Guest-physical address at which the runtime publishes the generated DTB.
 pub const REFERENCE_DTB_ADDRESS: u64 = REFERENCE_GUEST_RAM_BASE
     + hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_DTB_OFFSET;
-/// Memory reserved for the generated DTB when validating payload overlap.
-pub const REFERENCE_DTB_RESERVED_SIZE: u64 = 16 * 1024;
+/// Memory reserved for the generated DTB when validating payload overlap,
+/// including a bounded firmware subtree for a whole assigned PCI function.
+pub const REFERENCE_DTB_RESERVED_SIZE: u64 = 128 * 1024;
 
 /// A validated raw Linux image and the complete guest-physical range which it
 /// reserves while running.
@@ -418,7 +419,10 @@ mod tests {
         let source = Source::image(0x0008_0000, 0x0018_0000);
         let image = reference_image(Source::payload(0x4008_0000));
         let layout = validate_reference(&source, image);
-        assert!(matches!(layout, Ok(layout) if layout.kernel().occupied_end() == 0x4020_0000));
+        assert!(
+            matches!(layout, Ok(layout) if layout.kernel().occupied_end() == 0x4020_0000
+            && layout.device_tree().end() - layout.device_tree().start() == 128 * 1024)
+        );
     }
 
     #[test]

@@ -13,9 +13,9 @@ const FDT_PROP: u32 = 3;
 const FDT_END: u32 = 9;
 const HEADER_SIZE: usize = 40;
 const RESERVATION_SIZE: usize = 16;
-const GIC_PHANDLE: u32 = 1;
-const UART_CLOCK_PHANDLE: u32 = 2;
-const APB_CLOCK_PHANDLE: u32 = 3;
+const GIC_PHANDLE: u32 = 0xffff_0001;
+const UART_CLOCK_PHANDLE: u32 = 0xffff_0002;
+const APB_CLOCK_PHANDLE: u32 = 0xffff_0003;
 const GIC_DISTRIBUTOR_BASE: u64 =
     hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_DISTRIBUTOR_BASE;
 const GIC_DISTRIBUTOR_SIZE: u64 =
@@ -251,6 +251,9 @@ pub fn build_aarch64_linux_with_io(
             },
         ],
     )?;
+    if let Some(pci) = devices.pci {
+        pci.append_msi(&mut builder)?;
+    }
     builder.end_node()?;
 
     builder.begin_node("timer")?;

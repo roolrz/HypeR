@@ -126,14 +126,15 @@ backend.
 An independent, trusted Linux I/O VM is an architectural foundation of HypeR's
 physical I/O design. It provides reusable Linux device drivers and exports
 services to Native userspace and business guests. It runs as a guest under
-HypeR; it is not the host kernel. Storage already uses this path; networking
-remains a roadmap target.
+HypeR; it is not the host kernel. Storage and guest networking use this path.
+Native networking retains a reserved endpoint without an active link.
 
 The selected I/O VM interface families are virtio-scsi for storage, virtio-net
-for networking, and vfio-user for general device backends. Virtio-scsi is
-implemented; virtio-net and vfio-user are architectural targets, not currently
-available interfaces. Additional device models require a concrete use case
-and an explicit design review; universal device coverage is not a goal.
+for networking, and vfio-user for general device backends. Virtio-scsi and
+virtio-net are implemented with Linux vhost-scsi/LIO and vhost-net/TAP;
+vfio-user remains an architectural target. Additional device models require a
+concrete use case and an explicit design review; universal device coverage is
+not a goal.
 The vfio-user target requires a cross-VM transport, memory-authorization and
 device-lifecycle design before protocol compatibility can be claimed. It does
 not imply automatic forwarding of arbitrary Linux-driven physical devices.
@@ -151,6 +152,12 @@ DMA admission and translation, and safe revocation/retirement. Delegating a
 driver does not delegate these ownership guarantees, and userspace placement
 alone does not establish DMA isolation on hardware without suitable support.
 The current Linux I/O VM is trusted.
+
+On Pi 5, HypeR owns the BCM2712 PCIe transport, resource claims and MSI routing.
+The complete RP1 PCI function belongs to the I/O VM; Linux owns its interrupt
+controller, clocks, GPIO, Ethernet MAC and PHY drivers. RP1 peripherals cannot
+be split between owners. This path has no IOMMU DMA isolation, and physical
+networking and DMA retirement still require hardware qualification.
 
 This decision does not move the VFS out of the kernel. Namespace semantics,
 file handles and VFS policy remain kernel responsibilities; filesystem and

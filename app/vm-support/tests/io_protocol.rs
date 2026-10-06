@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::virtio_scsi::Queue;
+use crate::virtio_mmio::Queue;
 
 fn reset() -> Request {
     Request {
@@ -124,6 +124,86 @@ fn hello_rejects_incompatible_queue_contract() -> Result<(), Error> {
     assert_eq!(
         Reply::decode(&bytes, request),
         Err(Error::UnsupportedBackend)
+    );
+    Ok(())
+}
+
+#[test]
+fn rejected_hello_preserves_backend_status_without_capability_fields() -> Result<(), Error> {
+    for command in [Command::Hello, Command::NetworkHello] {
+        let request = Request { command, ..reset() };
+        let mut bytes = [0; MAX_RECORD];
+        request.encode(&mut bytes)?;
+        bytes[8..12].copy_from_slice(&48u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&1u32.to_le_bytes());
+        bytes[40..44].copy_from_slice(&1u32.to_le_bytes());
+        let reply = Reply::decode(&bytes[..48], request)?;
+        assert_eq!(reply.status, Status::Unsupported);
+        assert_eq!(reply.features, None);
+        assert_eq!(reply.network, None);
+    }
+    Ok(())
+}
+
+#[test]
+fn network_protocol_has_independent_opcodes_and_exact_configuration() -> Result<(), Error> {
+    let hello = Request {
+        command: Command::NetworkHello,
+        ..reset()
+    };
+    let mut bytes = [0; MAX_RECORD];
+    hello.encode(&mut bytes)?;
+    bytes[8..12].copy_from_slice(&80u32.to_le_bytes());
+    bytes[12..16].copy_from_slice(&1u32.to_le_bytes());
+    bytes[48..56].copy_from_slice(&VERSION_1.to_le_bytes());
+    bytes[56..60].copy_from_slice(&2u32.to_le_bytes());
+    bytes[60..64].copy_from_slice(&QUEUE_MAX.to_le_bytes());
+    bytes[64..70].copy_from_slice(&[2, 0x48, 0x59, 0, 0, 1]);
+    bytes[70..72].copy_from_slice(&1500u16.to_le_bytes());
+    assert_eq!(
+        Reply::decode(&bytes[..80], hello)?
+            .network
+            .map(|config| config.mac),
+        Some([2, 0x48, 0x59, 0, 0, 1])
+    );
+    bytes[72] = 1;
+    assert_eq!(
+        Reply::decode(&bytes[..80], hello),
+        Err(Error::UnsupportedBackend)
+    );
+    let mut queues = [Queue::default(); QUEUES];
+    for (index, queue) in queues[..2].iter_mut().enumerate() {
+        *queue = Queue {
+            size: 128,
+            descriptor: 0x4000_0000 + index as u64 * 0x10000,
+            available: 0x4000_1000 + index as u64 * 0x10000,
+            used: 0x4000_2000 + index as u64 * 0x10000,
+            ready: true,
+        };
+    }
+    let activation = Request {
+        command: Command::NetworkDevice(BackendOperation::Activate {
+            features: VERSION_1,
+            queues,
+        }),
+        ..reset()
+    };
+    assert_eq!(activation.encode(&mut bytes)?, 112);
+    assert_eq!(Request::decode(&bytes[..112])?, activation);
+    assert_eq!(u16_at(&bytes, 6)?, 8);
+    let mut storage_reply = reply(reset(), 0)?;
+    let net_reset = Request {
+        command: Command::NetworkDevice(BackendOperation::Reset),
+        ..reset()
+    };
+    assert_eq!(
+        Reply::decode(&storage_reply, net_reset),
+        Err(Error::MismatchedReply)
+    );
+    storage_reply[6..8].copy_from_slice(&9u16.to_le_bytes());
+    assert_eq!(
+        Reply::decode(&storage_reply, net_reset)?.status,
+        Status::Success
     );
     Ok(())
 }

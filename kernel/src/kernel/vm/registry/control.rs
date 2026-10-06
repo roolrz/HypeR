@@ -125,9 +125,7 @@ impl QuiescentControl {
                 "quiescent physical owner lookup failed: {error:?}"
             )),
         };
-        if let Some(physical) = physical
-            && physical.object().quiesce().is_err()
-        {
+        if physical.quiesce_all().is_err() {
             // The exact quiescent owner, all imported pages and the device
             // claim remain retained. A reset timeout never permits reuse.
             return Err(RetirementFailure {

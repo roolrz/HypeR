@@ -95,6 +95,7 @@ impl FleetManager {
             image: definition.image.clone(),
             autostart: definition.autostart,
             disk: definition.disk.clone(),
+            network: definition.network.clone(),
             state,
         }
     }
@@ -148,6 +149,7 @@ impl ObservedVm {
             image: self.image.clone(),
             autostart: true,
             disk: None,
+            network: None,
             read_only: true,
             placement: Vec::new(),
             vcpus: None,

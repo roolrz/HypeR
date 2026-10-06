@@ -8,6 +8,7 @@ use hyper_os::capability_channel::{CapabilityChannel, CapabilityReceiveSlot};
 use hyper_os::fs::File;
 use hyper_os::handle::{ByteChannelObject, FileObject};
 use hyper_service::vm as vm_contract;
+use hyper_vm_manager::FleetConfiguration;
 use hyper_vm_policy::fleet;
 use std::io::Read;
 use std::mem::MaybeUninit;
@@ -29,6 +30,14 @@ impl FleetManager {
         if message.capability_count() != request.capability_count() {
             return Err(hyper_os::Error::InvalidResponse);
         }
+        if request == vm_contract::ProvisionRequest::ConfigurationUnavailable {
+            // This explicit terminal request carries no file or result writer.
+            // Dropping an unavailable broker cannot invent an empty namespace:
+            // the restricted state rejects all later VM admission requests.
+            self.configuration = FleetConfiguration::Unavailable;
+            eprintln!("HypeR vm-manager: initial fleet configuration unavailable");
+            return Ok(());
+        }
         let config = slots[0]
             .take::<FileObject>()?
             .ok_or(hyper_os::Error::MissingHandle)?;
@@ -46,8 +55,12 @@ impl FleetManager {
             self.install_definitions(config.machines)
         })();
         let response = match &admitted {
-            Ok(()) => vm_contract::ProvisionResult::Configured,
+            Ok(()) => {
+                self.configuration = FleetConfiguration::Configured;
+                vm_contract::ProvisionResult::Configured
+            }
             Err(error) => {
+                self.configuration = FleetConfiguration::Unavailable;
                 eprintln!("HypeR vm-manager: fleet configuration rejected: {error}");
                 vm_contract::ProvisionResult::Rejected
             }
@@ -55,7 +68,9 @@ impl FleetManager {
         // A fresh endpoint has room for this single result. Neither endpoint
         // survives configuration, and init acquires no guest-lifecycle authority.
         result.as_byte_channel().try_send(&response.encode())?;
-        admitted.map_err(|_| hyper_os::Error::InvalidResponse)
+        // A rejected fleet owns no published definitions. Keep the service
+        // alive for list/diagnostic requests instead of failing Native init.
+        Ok(())
     }
 }
 

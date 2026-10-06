@@ -20,6 +20,8 @@ pub struct Definition {
     pub autostart: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<Disk>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<Network>,
 }
 /// Explicit per-instance policy, stored in JSON rather than the image bundle.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -95,16 +97,34 @@ pub struct Disk {
     pub client: u32,
     pub volume: String,
 }
+
+/// A board-authorized network endpoint; client zero is reserved for Native.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Network {
+    pub client: u32,
+    pub network: String,
+    pub mac: String,
+}
+
+impl Network {
+    pub fn mac_bytes(&self) -> Result<[u8; 6], String> {
+        hyper_service::io::parse_mac(&self.mac).ok_or_else(|| {
+            "network MAC must be a canonical locally administered unicast address".into()
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=127).contains(&self.client) || !hyper_service::io::valid_name(&self.network) {
+            return Err("network requires a guest client and a valid network name".into());
+        }
+        self.mac_bytes()?;
+        Ok(())
+    }
+}
 impl Disk {
     pub fn validate(&self) -> Result<(), String> {
-        if !(1..=127).contains(&self.client)
-            || self.volume.is_empty()
-            || self.volume.len() > 32
-            || !self
-                .volume
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
-        {
+        if !(1..=127).contains(&self.client) || !hyper_service::io::valid_volume(&self.volume) {
             return Err("disk requires a client index from 1 to 127 and a volume name of 1 to 32 letters, digits, '-' or '_'".into());
         }
         Ok(())
@@ -133,6 +153,69 @@ impl Definition {
         self.configuration.image_configuration()?;
         if let Some(disk) = &self.disk {
             disk.validate()?;
+        }
+        if let Some(network) = &self.network {
+            network.validate()?;
+            if self
+                .disk
+                .as_ref()
+                .is_some_and(|disk| disk.client != network.client)
+            {
+                return Err("disk and network must share one I/O client".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn io_connection(&self) -> Result<Option<hyper_service::io::Connection<'_>>, String> {
+        self.validate()?;
+        let client = self
+            .disk
+            .as_ref()
+            .map(|disk| disk.client)
+            .or_else(|| self.network.as_ref().map(|network| network.client));
+        client
+            .map(|client| {
+                Ok(hyper_service::io::Connection {
+                    client,
+                    volume: self.disk.as_ref().map(|disk| disk.volume.as_str()),
+                    network: self
+                        .network
+                        .as_ref()
+                        .map(|network| network.network.as_str()),
+                    mac: self
+                        .network
+                        .as_ref()
+                        .map(Network::mac_bytes)
+                        .transpose()?
+                        .unwrap_or([0; 6]),
+                })
+            })
+            .transpose()
+    }
+
+    /// Reject authority collisions both within a fleet and during later creates.
+    pub fn check_conflicts(&self, other: &Self) -> Result<(), String> {
+        if self.name == other.name {
+            return Err(format!("duplicate VM name '{}'", self.name));
+        }
+        if let (Some(connection), Some(previous)) = (self.io_connection()?, other.io_connection()?)
+            && connection.client == previous.client
+        {
+            return Err(format!(
+                "I/O client {} is already assigned",
+                connection.client
+            ));
+        }
+        if let (Some(disk), Some(previous)) = (&self.disk, &other.disk)
+            && disk.volume == previous.volume
+        {
+            return Err(format!("duplicate exclusive disk volume '{}'", disk.volume));
+        }
+        if let (Some(network), Some(previous)) = (&self.network, &other.network)
+            && network.mac == previous.mac
+        {
+            return Err(format!("network MAC '{}' is already assigned", network.mac));
         }
         Ok(())
     }
@@ -184,19 +267,8 @@ pub fn validate_definitions(definitions: &[Definition]) -> Result<(), String> {
     }
     for (index, definition) in definitions.iter().enumerate() {
         definition.validate()?;
-        if let Some(disk) = &definition.disk
-            && definitions[..index]
-                .iter()
-                .filter_map(|other| other.disk.as_ref())
-                .any(|other| other.client == disk.client || other.volume == disk.volume)
-        {
-            return Err(format!("duplicate exclusive disk volume '{}'", disk.volume));
-        }
-        if definitions[..index]
-            .iter()
-            .any(|other| other.name == definition.name)
-        {
-            return Err(format!("duplicate VM name '{}'", definition.name));
+        for other in &definitions[..index] {
+            definition.check_conflicts(other)?;
         }
     }
     Ok(())
@@ -278,6 +350,8 @@ pub struct Summary {
     pub autostart: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<Disk>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<Network>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

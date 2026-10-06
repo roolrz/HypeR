@@ -377,6 +377,21 @@ pub(crate) fn update_saved_guest_device_interrupt(
         .map_err(Into::into)
 }
 
+/// MSI delivery is a pending event, independent of the guest's trigger setting.
+/// Publishing a transient level would lose the event when the guest has not
+/// configured its SPI yet. Mutation and target selection share one model lock.
+pub(crate) fn inject_saved_guest_device_interrupt(
+    interrupts: &VmInterruptController,
+    interrupt: GicInterruptId,
+) -> Result<(), Error> {
+    interrupts
+        .with(|controller| {
+            let target = controller.target(interrupt)?;
+            controller.inject(interrupt, target)
+        })
+        .map_err(Into::into)
+}
+
 /// Reconciles saved interrupt-model work into the active local vGIC bank.
 pub(crate) fn reconcile_active_interrupts(
     context: &mut VcpuContext,

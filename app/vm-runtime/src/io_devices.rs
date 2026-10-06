@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! One disk's slow configuration channel and direct notification route.
+//! Shared guest grant, serialized device configuration and direct notifications.
 
 use crate::error::Error;
 use hyper_os::capability_channel::{
@@ -13,14 +13,28 @@ use hyper_os::handle::{
 };
 use hyper_os::wait::{ObjectSignals, RegistrationId, WaitSet};
 use hyper_service::io;
-use hyper_vm_support::io_backend::{Backend, OperationDeadline, RemoteNotification};
+use hyper_vm_runtime::io_backends::IoBackends;
+use hyper_vm_support::io_backend::{
+    Backend, Error as BackendError, OperationDeadline, RemoteNotification,
+};
 use std::mem::MaybeUninit;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
-pub(super) struct Disk {
+type IoBackend = Backend<
+    Arc<OwnedHandle<ByteChannelObject>>,
+    RemoteNotification<Arc<OwnedHandle<ByteChannelObject>>>,
+>;
+
+fn backend_failure(stage: &str, error: BackendError) -> Error {
+    eprintln!("HypeR vm-runtime: I/O {stage} failed: {error:?}");
+    Error::InvalidControl
+}
+
+pub(super) struct IoDevices {
     _session: CapabilityChannel,
-    backend: Backend<
+    channel: Arc<OwnedHandle<ByteChannelObject>>,
+    backends: IoBackends<
         Arc<OwnedHandle<ByteChannelObject>>,
         RemoteNotification<Arc<OwnedHandle<ByteChannelObject>>>,
     >,
@@ -34,7 +48,8 @@ pub(super) fn bind(
     memory: &OwnedHandle<GuestMemoryObject>,
     base: u64,
     length: u64,
-) -> Result<(OwnedHandle<VirtualMachineObject>, Disk), Error> {
+    devices: u32,
+) -> Result<(OwnedHandle<VirtualMachineObject>, IoDevices), Error> {
     #[cfg(feature = "startup-profile")]
     let started = std::time::Instant::now();
     let deadline = hyper_os::time::deadline_after(std::time::Duration::from_secs(60))
@@ -60,10 +75,10 @@ pub(super) fn bind(
         .map_err(Error::OperatingSystem)?;
     #[cfg(feature = "startup-profile")]
     eprintln!(
-        "HypeR startup profile: disk memory sent at {} us",
+        "HypeR startup profile: I/O memory sent at {} us",
         started.elapsed().as_micros()
     );
-    let mut bytes = [MaybeUninit::uninit(); 32];
+    let mut bytes = [MaybeUninit::uninit(); io::BOUND_BYTES];
     let mut slots = [
         CapabilityReceiveSlot::new::<VirtualMachineObject>(rights),
         CapabilityReceiveSlot::new::<ByteChannelObject>(io::MAILBOX_RIGHTS),
@@ -71,18 +86,13 @@ pub(super) fn bind(
     let message = session
         .receive(deadline, &mut bytes, &mut slots)
         .map_err(Error::OperatingSystem)?;
-    if message.capability_count() != 2
-        || message.bytes().len() != io::BOUND_MESSAGE.len() + 8
-        || !message.bytes().starts_with(io::BOUND_MESSAGE)
-    {
+    if message.capability_count() != 2 {
         return Err(Error::InvalidControl);
     }
-    let identity = NonZeroU64::new(u64::from_le_bytes(
-        message.bytes()[io::BOUND_MESSAGE.len()..]
-            .try_into()
-            .map_err(|_| Error::InvalidControl)?,
-    ))
-    .ok_or(Error::InvalidControl)?;
+    let binding = io::Binding::decode(message.bytes())
+        .filter(|binding| binding.devices == devices)
+        .ok_or(Error::InvalidControl)?;
+    let generation = NonZeroU64::new(binding.generation).ok_or(Error::InvalidControl)?;
     let machine = slots[0]
         .take::<VirtualMachineObject>()
         .map_err(Error::OperatingSystem)?
@@ -94,19 +104,63 @@ pub(super) fn bind(
     let channel = Arc::new(channel);
     #[cfg(feature = "startup-profile")]
     eprintln!(
-        "HypeR startup profile: disk bound at {} us",
+        "HypeR startup profile: I/O bound at {} us",
         started.elapsed().as_micros()
     );
-    let mut backend = Backend::new(
-        channel.clone(),
-        RemoteNotification::new(channel),
-        (base, length),
-        io::FRONTEND_MMIO,
-        identity,
-    )
-    .map_err(|_| Error::InvalidControl)?;
+    let mut backends = Vec::with_capacity(2);
+    for device in [io::DISK, io::NETWORK] {
+        let Some(identity) = binding.device_id(device) else {
+            continue;
+        };
+        let identity = NonZeroU64::new(identity).ok_or(Error::InvalidControl)?;
+        let mut backend = if device == io::DISK {
+            Backend::new(
+                channel.clone(),
+                RemoteNotification::new(channel.clone()),
+                (base, length),
+                io::FRONTEND_MMIO,
+                identity,
+            )
+        } else {
+            Backend::network(
+                channel.clone(),
+                RemoteNotification::network(channel.clone()),
+                (base, length),
+                io::FRONTEND_NET_MMIO,
+                identity,
+                generation,
+            )
+        }
+        .map_err(|error| backend_failure("construction", error))?;
+        // The same lane carries both Hello exchanges. Finish one before even
+        // constructing a sibling's pending transaction.
+        initialize(&mut backend, deadline)?;
+        backends.push(backend);
+    }
+    let backends =
+        IoBackends::new(backends).map_err(|error| backend_failure("publication", error))?;
+    #[cfg(feature = "startup-profile")]
+    eprintln!(
+        "HypeR startup profile: I/O ready at {} us",
+        started.elapsed().as_micros()
+    );
+    Ok((
+        machine,
+        IoDevices {
+            _session: session,
+            channel,
+            backends,
+            registrations: Vec::new(),
+            deadline: OperationDeadline::default(),
+        },
+    ))
+}
+
+fn initialize(backend: &mut IoBackend, deadline: u64) -> Result<(), Error> {
     while !backend.ready() {
-        backend.progress().map_err(|_| Error::InvalidControl)?;
+        backend
+            .progress()
+            .map_err(|error| backend_failure("initialization", error))?;
         if backend.ready() {
             break;
         }
@@ -115,6 +169,7 @@ pub(super) fn bind(
             .as_nanoseconds()
             >= deadline
         {
+            eprintln!("HypeR vm-runtime: I/O initialization deadline expired");
             return Err(Error::InvalidControl);
         }
         let signals = ObjectSignals::<ByteChannelObject>::READABLE
@@ -133,27 +188,20 @@ pub(super) fn bind(
         )
         .map_err(Error::OperatingSystem)?;
     }
-    #[cfg(feature = "startup-profile")]
-    eprintln!(
-        "HypeR startup profile: disk ready at {} us",
-        started.elapsed().as_micros()
-    );
-    Ok((
-        machine,
-        Disk {
-            _session: session,
-            backend,
-            registrations: Vec::new(),
-            deadline: OperationDeadline::default(),
-        },
-    ))
+    Ok(())
 }
 
-impl Disk {
+impl IoDevices {
     pub(super) fn service(&mut self, cpus: &[OwnedHandle<VirtualCpuObject>]) -> Result<(), Error> {
-        if let Some(completion) = self.backend.progress().map_err(|_| Error::InvalidControl)? {
+        if let Some(completion) = self
+            .backends
+            .progress()
+            .map_err(|error| backend_failure("progress", error))?
+        {
             hyper_os::vm::complete_mmio(
-                cpus[completion.vcpu].as_handle_ref(),
+                cpus.get(completion.vcpu)
+                    .ok_or(Error::InvalidControl)?
+                    .as_handle_ref(),
                 completion.id,
                 completion.result,
             )
@@ -163,15 +211,15 @@ impl Disk {
         // A readable console or unrelated vCPU cannot extend this deadline.
         self.update_deadline()?;
         for (index, cpu) in cpus.iter().enumerate() {
-            if self.backend.busy() {
+            if self.backends.busy() {
                 break;
             }
             if let Some(request) =
                 hyper_os::vm::pending_mmio(cpu.as_handle_ref()).map_err(Error::OperatingSystem)?
-                && let Some(completion) = self
-                    .backend
-                    .mmio(index, request)
-                    .map_err(|_| Error::InvalidControl)?
+                && let Some(completion) = self.backends.mmio(index, request).map_err(|error| {
+                    eprintln!("HypeR vm-runtime: I/O MMIO vCPU={index} request={request:?}");
+                    backend_failure("MMIO", error)
+                })?
             {
                 hyper_os::vm::complete_mmio(cpu.as_handle_ref(), completion.id, completion.result)
                     .map_err(Error::OperatingSystem)?;
@@ -182,18 +230,18 @@ impl Disk {
     }
 
     fn update_deadline(&mut self) -> Result<(), Error> {
-        if !self.backend.busy() {
+        if !self.backends.busy() {
             return self
                 .deadline
                 .observe(false, 0)
-                .map_err(|_| Error::InvalidControl);
+                .map_err(|error| backend_failure("idle deadline", error));
         }
         let now = hyper_os::time::monotonic_now()
             .map_err(Error::OperatingSystem)?
             .as_nanoseconds();
         self.deadline
-            .observe(self.backend.busy(), now)
-            .map_err(|_| Error::InvalidControl)
+            .observe(true, now)
+            .map_err(|error| backend_failure("operation deadline", error))
     }
 
     pub(super) fn deadline(&self) -> u64 {
@@ -210,17 +258,17 @@ impl Disk {
         }
         let signals = ObjectSignals::<ByteChannelObject>::READABLE
             .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED);
-        let signals = if self.backend.wants_write() {
+        let signals = if self.backends.wants_write() {
             signals.union(ObjectSignals::<ByteChannelObject>::WRITABLE)
         } else {
             signals
         };
         self.registrations.push(
             waits
-                .add(self.backend.mailbox().as_handle_ref(), signals)
+                .add(self.channel.as_handle_ref(), signals)
                 .map_err(Error::OperatingSystem)?,
         );
-        if !self.backend.busy() {
+        if !self.backends.busy() {
             for cpu in cpus {
                 self.registrations.push(
                     waits
@@ -234,7 +282,25 @@ impl Disk {
         }
         Ok(())
     }
-    pub(super) fn owns(&self, registration: RegistrationId) -> bool {
-        self.registrations.contains(&registration)
+    pub(super) fn observe(
+        &self,
+        registration: RegistrationId,
+        signals: u64,
+    ) -> Result<bool, Error> {
+        if self.registrations.first() == Some(&registration) {
+            if ObjectSignals::<ByteChannelObject>::PEER_CLOSED.is_present_in(signals) {
+                // Closure is terminal for both devices. Runtime retirement
+                // still owns guest/grant quiescence.
+                return Err(backend_failure("channel", BackendError::Disconnected));
+            }
+            if ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(signals) {
+                // Signal publication can lag consumption. Recheck the queue;
+                // the backend owner never steals a pending transaction's reply.
+                self.backends
+                    .check_idle_channel()
+                    .map_err(|error| backend_failure("idle channel", error))?;
+            }
+        }
+        Ok(self.registrations.contains(&registration))
     }
 }

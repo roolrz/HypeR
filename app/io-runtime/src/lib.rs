@@ -15,6 +15,12 @@ pub mod admission_policy;
 
 pub mod broker_exchange;
 
+mod firmware;
+
 pub mod sdhci;
+
+pub mod rp1;
+
+pub mod pci;
 
 pub mod guest_log;

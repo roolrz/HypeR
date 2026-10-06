@@ -50,8 +50,9 @@ struct ClientBinding {
     identity: u64,
     channel: OwnedHandle<ByteChannelObject>,
     mapping: vm::GuestMapping,
-    notification: Notification,
-    epoch: u32,
+    notifications: [Option<Notification>; 2],
+    devices: u32,
+    epochs: [u32; 2],
     reply: Option<Vec<u8>>,
     prepare_sent: bool,
     phase: BindingPhase,
@@ -73,6 +74,7 @@ enum BindingPhase {
     Retire,
     TryRelease,
     Reset,
+    ResetNetwork,
     Release,
     FinalRelease,
     Disconnect,
@@ -136,11 +138,17 @@ impl Broker {
                         size: 4096,
                         irq: 41 + index * 2,
                     },
-                    notification: MmioDevice {
+                    notification: slot.policy.volume.as_ref().map(|_| MmioDevice {
                         base: 0x0a02_0000 + u64::from(index) * 0x20000,
                         size: 4096,
                         irq: 42 + index * 2,
-                    },
+                    }),
+                    network_notification: slot.policy.network.as_ref().map(|_| MmioDevice {
+                        base: io::NETWORK_NOTIFICATION_BASE
+                            + u64::from(index) * io::NETWORK_NOTIFICATION_STRIDE,
+                        size: 4096,
+                        irq: io::NETWORK_NOTIFICATION_IRQ_BASE + index,
+                    }),
                 }
             })
             .collect()
@@ -346,8 +354,15 @@ impl Broker {
     fn admit(&mut self, guest: &mut InstalledGuest, admission: listener::Admission) -> Result<()> {
         let descriptions = self.descriptions();
         let Some(index) = self.slots.iter().position(|slot| {
-            slot.policy.id == admission.client && slot.policy.volume == admission.volume
+            slot.policy.id == admission.client
+                && slot.policy.volume == admission.volume
+                && slot.policy.network == admission.network
+                && slot.policy.mac == admission.mac
         }) else {
+            eprintln!(
+                "HypeR io-runtime: rejected client {}: requested volume {:?}, network {:?}, MAC {:02x?} does not match the board I/O policy; check the VM configuration in /data/vms.json",
+                admission.client, admission.volume, admission.network, admission.mac
+            );
             let _ = vm::request_stop(admission.machine.as_handle_ref());
             return Ok(());
         };
@@ -364,7 +379,7 @@ impl Broker {
         let Some(generation) = slot
             .generation
             .checked_add(1)
-            .filter(|_| slot.binding.is_none())
+            .filter(|value| *value < io::NETWORK_DEVICE_ID_BIT && slot.binding.is_none())
         else {
             let _ = vm::request_stop(admission.machine.as_handle_ref());
             return Ok(());
@@ -372,26 +387,39 @@ impl Broker {
         let identity = NonZeroU64::new(generation).ok_or("invalid binding generation")?;
         let description = descriptions[index];
         // Allocate the reply channel before creating routes or exposing a token.
-        let mut notification = None;
+        let mut notifications: [Option<Notification>; 2] = [None, None];
         let mut stage = "create reply channel";
         let resources = (|| -> hyper_os::Result<_> {
             let channels = hyper_os::channel::create_pair()?;
-            stage = "register frontend MMIO";
-            vm::register_mmio(
-                admission.machine.as_handle_ref(),
-                io::FRONTEND_MMIO,
-                4096,
-                identity,
-            )?;
-            stage = "create notification route";
-            notification = Some(Notification::create(
-                admission.machine.as_handle_ref(),
-                guest.machine.as_handle_ref(),
-                io::FRONTEND_MMIO,
-                description.notification.base,
-                io::FRONTEND_IRQ,
-                description.notification.irq,
-            )?);
+            for (index, endpoint) in [description.notification, description.network_notification]
+                .into_iter()
+                .enumerate()
+            {
+                let Some(endpoint) = endpoint else {
+                    continue;
+                };
+                let (base, irq, cookie) = if index == 0 {
+                    (io::FRONTEND_MMIO, io::FRONTEND_IRQ, identity)
+                } else {
+                    (
+                        io::FRONTEND_NET_MMIO,
+                        io::FRONTEND_NET_IRQ,
+                        NonZeroU64::new(identity.get() | io::NETWORK_DEVICE_ID_BIT)
+                            .ok_or(hyper_os::Error::InvalidResponse)?,
+                    )
+                };
+                stage = "register frontend MMIO";
+                vm::register_mmio(admission.machine.as_handle_ref(), base, 4096, cookie)?;
+                stage = "create notification route";
+                notifications[index] = Some(Notification::create(
+                    admission.machine.as_handle_ref(),
+                    guest.machine.as_handle_ref(),
+                    base,
+                    endpoint.base,
+                    irq,
+                    endpoint.irq,
+                )?);
+            }
             stage = "map backend guest memory";
             let mapping = vm::map_shared_guest_memory(
                 guest.machine.as_handle_ref(),
@@ -404,9 +432,14 @@ impl Broker {
             Ok(resources) => resources,
             Err(error) => {
                 let _ = vm::request_stop(admission.machine.as_handle_ref());
-                if let Some(notification) = notification {
-                    notification.disconnect().map_err(show)?;
+                let mut disconnected = Ok(());
+                for notification in notifications.into_iter().flatten() {
+                    let result = notification.disconnect().map_err(show);
+                    if disconnected.is_ok() {
+                        disconnected = result;
+                    }
                 }
+                disconnected?;
                 eprintln!(
                     "HypeR io-runtime: rejected client {} setup ({stage}): {error}",
                     admission.client
@@ -420,8 +453,9 @@ impl Broker {
             identity: identity.get(),
             channel,
             mapping,
-            notification: notification.ok_or("missing notification")?,
-            epoch: 1,
+            notifications,
+            devices: slot.policy.devices(),
+            epochs: [1; 2],
             reply: None,
             prepare_sent: false,
             phase: BindingPhase::Hello,

@@ -23,6 +23,10 @@
         "memory-bytes": 268435456,
         "vcpus": 2,
         "bootargs": "console=ttyAMA0 earlycon=pl011,mmio32,0x09000000 rdinit=/init loglevel=7 hyper.root=/dev/sda"
+      },
+      "network": {
+        "network": "default",
+        "mac": "02:48:59:00:00:01"
       }
     }
   ],
@@ -38,6 +42,17 @@
     "io-device": {
       "profile": "virtio-mmio-scsi",
       "compatible": "virtio,mmio"
-    }
+    },
+    "network-device": {
+      "profile": "virtio-mmio-net",
+      "compatible": "virtio,mmio"
+    },
+    "networks": [
+      {
+        "name": "default",
+        "bridge": "hbr0",
+        "uplink": "eth0"
+      }
+    ]
   }
 }

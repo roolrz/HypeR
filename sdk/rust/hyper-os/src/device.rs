@@ -11,7 +11,7 @@ use crate::{Error, Result, Status};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Info {
-    /// Virtio device identifier, or zero for a userspace-managed device.
+    /// Virtio device identifier, or zero for a non-virtio device.
     pub device_id: u32,
     /// Virtio transport version, or zero when no kernel transport is identified.
     pub transport_version: u32,
@@ -48,12 +48,27 @@ pub enum Profile {
     VirtioMmioScsi = hyper_abi::HYPER_NATIVE_DEVICE_PROFILE_VIRTIO_MMIO_SCSI as u32,
     /// Register semantics and IRQ acknowledgement are owned by userspace.
     Userspace = hyper_abi::HYPER_NATIVE_DEVICE_PROFILE_USERSPACE as u32,
+    VirtioMmioNet = hyper_abi::HYPER_NATIVE_DEVICE_PROFILE_VIRTIO_MMIO_NET as u32,
+    /// One PCI function behind a mediated configuration space and MSI controller.
+    PciFunction = hyper_abi::HYPER_NATIVE_DEVICE_PROFILE_PCI_FUNCTION as u32,
 }
+
+/// Maximum physical controllers assigned to one VM, sharing its DMA lifetime.
+pub const MAX_ASSIGNED_DEVICES: usize =
+    hyper_abi::HYPER_NATIVE_DEVICE_ASSIGNMENT_MAX_DEVICES as usize;
+
+/// Resource kinds and attributes returned by device inspection.
+pub const RESOURCE_PCI_ECAM: u32 = hyper_abi::HYPER_NATIVE_DEVICE_RESOURCE_PCI_ECAM as u32;
+pub const RESOURCE_PCI_MSI: u32 = hyper_abi::HYPER_NATIVE_DEVICE_RESOURCE_PCI_MSI as u32;
+pub const RESOURCE_PCI_BAR0: u32 = hyper_abi::HYPER_NATIVE_DEVICE_RESOURCE_PCI_BAR0 as u32;
+pub const RESOURCE_MEMORY_64: u32 = hyper_abi::HYPER_NATIVE_DEVICE_RESOURCE_MEMORY_64 as u32;
+pub const RESOURCE_PREFETCHABLE: u32 = hyper_abi::HYPER_NATIVE_DEVICE_RESOURCE_PREFETCHABLE as u32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirmwareIdentity<'a> {
     Compatible(&'a str),
     FdtPath(&'a str),
+    PciId { vendor: u16, device: u16 },
 }
 
 /// Claims a unique profile/firmware match. Ambiguous selectors fail instead of
@@ -63,6 +78,7 @@ pub fn claim_matching(
     profile: Profile,
     identity: FirmwareIdentity<'_>,
 ) -> Result<OwnedHandle<PhysicalDeviceObject>> {
+    let pci_id;
     let (kind, text) = match identity {
         FirmwareIdentity::Compatible(text) => (
             hyper_abi::HYPER_NATIVE_DEVICE_IDENTITY_COMPATIBLE as u32,
@@ -72,6 +88,13 @@ pub fn claim_matching(
             hyper_abi::HYPER_NATIVE_DEVICE_IDENTITY_FDT_PATH as u32,
             text,
         ),
+        FirmwareIdentity::PciId { vendor, device } => {
+            pci_id = encode_pci_identity(vendor, device);
+            (
+                hyper_abi::HYPER_NATIVE_DEVICE_IDENTITY_PCI_ID as u32,
+                core::str::from_utf8(&pci_id).map_err(|_| Error::InvalidResponse)?,
+            )
+        }
     };
     // SAFETY: Authority and identity remain borrowed throughout this call.
     let result = unsafe {
@@ -93,95 +116,19 @@ pub fn claim_matching(
     )
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProfileInfo {
-    pub profile: Profile,
-    pub resource_count: u32,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ResourceInfo {
-    pub kind: u32,
-    pub offset: u64,
-    pub length: u64,
-}
+#[path = "device/profile.rs"]
+mod profile;
+pub use profile::{ProfileInfo, ResourceInfo, profile_info, resource_info};
 
-pub fn profile_info(device: HandleRef<'_, PhysicalDeviceObject>) -> Result<ProfileInfo> {
-    let mut record = hyper_abi::HyperNativeDeviceProfileInfo {
-        profile: 0,
-        resource_count: 0,
-        reserved0: 0,
-        reserved1: 0,
-        reserved2: 0,
-        reserved3: 0,
-    };
-    // SAFETY: Typed handle and initialized output remain live throughout the call.
-    let result = unsafe {
-        hyper_sys::device_profile_info(
-            device.raw().get(),
-            &mut record,
-            core::mem::size_of_val(&record),
-        )
-    };
-    crate::validate_info_result(result, hyper_abi::HYPER_NATIVE_DEVICE_PROFILE_INFO_MIN_SIZE)?;
-    let profile = match record.profile {
-        1 => Profile::VirtioMmioScsi,
-        2 => Profile::Userspace,
-        _ => return Err(Error::InvalidResponse),
-    };
-    if record.resource_count == 0
-        || record.resource_count > 8
-        || record.reserved0 != 0
-        || record.reserved1 != 0
-        || record.reserved2 != 0
-        || record.reserved3 != 0
-    {
-        return Err(Error::InvalidResponse);
+fn encode_pci_identity(vendor: u16, device: u16) -> [u8; 9] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [b':'; 9];
+    for (start, value) in [(0, vendor), (5, device)] {
+        for digit in 0..4 {
+            bytes[start + digit] = HEX[usize::from((value >> ((3 - digit) * 4)) & 15)];
+        }
     }
-    Ok(ProfileInfo {
-        profile,
-        resource_count: record.resource_count,
-    })
-}
-
-pub fn resource_info(
-    device: HandleRef<'_, PhysicalDeviceObject>,
-    index: u32,
-) -> Result<ResourceInfo> {
-    let mut record = hyper_abi::HyperNativeDeviceResourceInfo {
-        kind: 0,
-        reserved: 0,
-        offset: 0,
-        length: 0,
-        reserved2: 0,
-    };
-    // SAFETY: Typed handle and initialized output remain live throughout the call.
-    let result = unsafe {
-        hyper_sys::device_resource_info(
-            device.raw().get(),
-            index,
-            &mut record,
-            core::mem::size_of_val(&record),
-        )
-    };
-    crate::validate_info_result(
-        result,
-        hyper_abi::HYPER_NATIVE_DEVICE_RESOURCE_INFO_MIN_SIZE,
-    )?;
-    if record.reserved != 0
-        || record.reserved2 != 0
-        || record.length == 0
-        || record
-            .offset
-            .checked_add(record.length)
-            .is_none_or(|end| end > 65536)
-    {
-        return Err(Error::InvalidResponse);
-    }
-    Ok(ResourceInfo {
-        kind: record.kind,
-        offset: record.offset,
-        length: record.length,
-    })
+    bytes
 }
 
 pub fn info(device: HandleRef<'_, PhysicalDeviceObject>) -> Result<Info> {
@@ -251,8 +198,11 @@ pub fn dma_extent(
     })
 }
 
-/// Binds the claimed device before sealing a VM. The kernel owns physical reset
-/// and retains the VM's DMA backing until hardware quiescence is established.
+/// Binds the claimed device before sealing a VM. `base` selects the inspected
+/// aperture and `irq` the first of the inspected interrupt range. Non-PCI
+/// assignments reserve one virtual interrupt even for a userspace profile with
+/// no physical interrupt. The kernel retains DMA backing until hardware
+/// quiescence is proven.
 pub fn assign(
     pending: HandleRef<'_, PendingVirtualMachineObject>,
     device: HandleRef<'_, PhysicalDeviceObject>,
@@ -281,6 +231,12 @@ pub use firmware::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pci_identity_is_fixed_width_lowercase() {
+        assert_eq!(encode_pci_identity(0x1de4, 1), *b"1de4:0001");
+        assert_eq!(encode_pci_identity(0xffff, 0x10af), *b"ffff:10af");
+    }
 
     #[test]
     fn device_info_accepts_userspace_and_virtio_identity() {

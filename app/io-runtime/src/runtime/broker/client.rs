@@ -16,7 +16,7 @@ use hyper_os::vm;
 use hyper_os::wait::{ObjectSignals, WaitItem};
 use hyper_service::io;
 use hyper_vm_support::io_protocol::{Command, MAX_RECORD, Reply, Request, Status};
-use hyper_vm_support::virtio_scsi::BackendOperation;
+use hyper_vm_support::virtio_mmio::BackendOperation;
 
 pub(super) fn session_closed(session: &CapabilityChannel) -> bool {
     hyper_os::wait::wait_many(
@@ -57,14 +57,23 @@ impl ClientSlot {
             binding.phase = BindingPhase::Retire;
         }
         let command = match binding.phase {
-            BindingPhase::Hello => Some(Command::Hello),
+            BindingPhase::Hello => Some(if binding.devices & io::DISK != 0 {
+                Command::Hello
+            } else {
+                Command::NetworkHello
+            }),
             BindingPhase::Prepare => Some(Command::Prepare {
                 alias: 0,
                 guest_base: binding.base,
                 length: binding.length,
                 mapping_token: binding.mapping.token(),
             }),
-            BindingPhase::Reset => Some(Command::Device(BackendOperation::Reset)),
+            BindingPhase::Reset => Some(if binding.devices & io::DISK != 0 {
+                Command::Device(BackendOperation::Reset)
+            } else {
+                Command::NetworkDevice(BackendOperation::Reset)
+            }),
+            BindingPhase::ResetNetwork => Some(Command::NetworkDevice(BackendOperation::Reset)),
             BindingPhase::Release => Some(Command::Release),
             _ => None,
         };
@@ -77,7 +86,14 @@ impl ClientSlot {
             BindingPhase::Retire => binding.begin_retirement(),
             BindingPhase::TryRelease | BindingPhase::FinalRelease => binding.release_mapping(),
             BindingPhase::Disconnect => {
-                binding.notification.disconnect().map_err(show)?;
+                let mut disconnected = Ok(());
+                for notification in binding.notifications.iter().flatten() {
+                    let result = notification.disconnect().map_err(show);
+                    if disconnected.is_ok() {
+                        disconnected = result;
+                    }
+                }
+                disconnected?;
                 self.binding = None;
                 Ok(true)
             }
@@ -92,7 +108,10 @@ impl ClientSlot {
         let pending = binding.pending.as_mut().ok_or("missing transaction")?;
         if binding.retiring
             && pending.can_cancel()
-            && !matches!(binding.phase, BindingPhase::Reset | BindingPhase::Release)
+            && !matches!(
+                binding.phase,
+                BindingPhase::Reset | BindingPhase::ResetNetwork | BindingPhase::Release
+            )
         {
             binding.pending = None;
             binding.phase = BindingPhase::Retire;
@@ -141,7 +160,10 @@ impl ClientSlot {
                         binding.limit = deadline(30)?;
                     }
                 } else if reply.status != Status::Success {
-                    if matches!(binding.phase, BindingPhase::Reset | BindingPhase::Release) {
+                    if matches!(
+                        binding.phase,
+                        BindingPhase::Reset | BindingPhase::ResetNetwork | BindingPhase::Release
+                    ) {
                         return Err("backend refused retirement".into());
                     }
                     binding.retiring = true;
@@ -153,7 +175,10 @@ impl ClientSlot {
                         binding.limit = deadline(30)?;
                         BindingPhase::ReturnHandles
                     }
-                    BindingPhase::Reset => BindingPhase::Release,
+                    BindingPhase::Reset if binding.devices == (io::DISK | io::NETWORK) => {
+                        BindingPhase::ResetNetwork
+                    }
+                    BindingPhase::Reset | BindingPhase::ResetNetwork => BindingPhase::Release,
                     BindingPhase::Release => {
                         binding.limit = deadline(5)?;
                         BindingPhase::FinalRelease
@@ -179,20 +204,26 @@ impl ClientSlot {
         }
         let mut bytes = [0; MAX_RECORD];
         match binding.channel.as_byte_channel().try_receive(&mut bytes) {
-            Ok(16) if &bytes[..8] == b"HIONOT01" && bytes[12..16] == [0; 4] => {
+            Ok(16) if &bytes[..8] == b"HIONOT01" => {
+                let endpoint = u32::from_le_bytes(bytes[12..16].try_into().map_err(show)?) as usize;
                 let operation = match u32::from_le_bytes(bytes[8..12].try_into().map_err(show)?) {
                     0 => Some(Operation::Disable),
                     1 => Some(Operation::Enable),
                     2 => Some(Operation::RaiseConfigurationInterrupt),
                     _ => None,
                 };
-                if let Some(epoch) =
-                    operation.and_then(|operation| binding.notification.control(operation).ok())
-                {
-                    binding.epoch = epoch;
+                if let Some(epoch) = operation.and_then(|operation| {
+                    binding
+                        .notifications
+                        .get(endpoint)?
+                        .as_ref()?
+                        .control(operation)
+                        .ok()
+                }) {
+                    binding.epochs[endpoint] = epoch;
                     let mut reply = b"HIONOTR1".to_vec();
                     reply.extend_from_slice(&epoch.to_le_bytes());
-                    reply.extend_from_slice(&[0; 4]);
+                    reply.extend_from_slice(&(endpoint as u32).to_le_bytes());
                     binding.reply = Some(reply);
                     binding.limit = deadline(30)?;
                 } else {
@@ -204,8 +235,9 @@ impl ClientSlot {
                     && hyper_io_runtime::clients::authorize_request(
                         request,
                         binding.identity,
-                        binding.epoch,
+                        binding.epochs[request.command.device_kind() as usize],
                     )
+                    && binding.devices & (1 << request.command.device_kind() as u32) != 0
                 {
                     self.queue(request.command, Some(request.transaction))?;
                 } else {
@@ -222,7 +254,10 @@ impl ClientSlot {
         let binding = self.binding.as_mut().ok_or("missing binding")?;
         let request = Request {
             binding: binding.identity,
-            epoch: binding.epoch,
+            epoch: binding.epochs[match command {
+                Command::Prepare { .. } | Command::Release => binding.primary(),
+                _ => command.device_kind() as usize,
+            }],
             transaction: self.transaction,
             command,
         };
@@ -241,11 +276,19 @@ impl ClientSlot {
 }
 
 impl ClientBinding {
+    fn primary(&self) -> usize {
+        usize::from(self.devices & io::DISK == 0)
+    }
+
     fn return_handles(&mut self, client_id: u32) -> Result<bool> {
         #[cfg(not(feature = "broker-test"))]
         let _ = client_id;
-        let mut message = io::BOUND_MESSAGE.to_vec();
-        message.extend_from_slice(&self.identity.to_le_bytes());
+        let message = io::Binding {
+            generation: self.identity,
+            devices: self.devices,
+        }
+        .encode()
+        .ok_or("invalid binding")?;
         let result = self.session.try_send(
             &message,
             &mut [
@@ -283,10 +326,11 @@ impl ClientBinding {
             let _ = vm::request_stop(machine.as_handle_ref());
         }
         self.reply = None;
-        self.epoch = self
-            .notification
-            .control(Operation::Disable)
-            .map_err(show)?;
+        for (index, notification) in self.notifications.iter().enumerate() {
+            if let Some(notification) = notification {
+                self.epochs[index] = notification.control(Operation::Disable).map_err(show)?;
+            }
+        }
         self.limit = deadline(5)?;
         self.phase = BindingPhase::TryRelease;
         Ok(true)

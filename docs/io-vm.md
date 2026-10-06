@@ -33,11 +33,11 @@ The I/O VM architecture selects three interface families:
 | Interface | Purpose | Current status |
 | --- | --- | --- |
 | virtio-scsi | Storage for Native clients and guest disks | Implemented with vhost-scsi/LIO |
-| virtio-net | Network connectivity | Planned |
+| virtio-net | Guest network connectivity | Implemented with vhost-net/TAP; QEMU GICv2/GICv3 functional acceptance passes |
 | vfio-user | General device backends beyond the storage and network interfaces | Planned; cross-VM integration remains to be designed |
 
-These are the supported design directions, not a claim that all three are
-implemented. Other device models are assessed against actual requirements;
+Storage and guest networking have implementations; vfio-user remains a design
+direction. Other device models are assessed against actual requirements;
 there is no promise of universal support. Native userspace services remain an
 option for devices that do not fit these interfaces.
 
@@ -52,7 +52,7 @@ or automatic physical-device passthrough.
 `make run` on AArch64 uses the QEMU board configuration, keeps the HypeR shell,
 and starts `/svc/io-runtime` from the generated service manifest. Init explicitly delegates the physical-device
 capability only to this service and charges its VM to the bounded VM fleet.
-The service owns the VM, physical device and control mailbox. Guest power-off,
+The service owns the VM, assigned physical controllers and control mailboxes. Guest power-off,
 control failure or runtime exit initiates VM retirement; failed physical reset
 continues to use the kernel's existing quarantine semantics. There is no
 automatic restart of an uncertain device owner.
@@ -83,7 +83,7 @@ unique disposable disk through the full two-VM virtio-scsi path.
 | HypeR | HypeR-io-vm |
 | --- | --- |
 | Native apps, VM lifecycle, grants, notifications | Upstream Linux build and out-of-tree drivers |
-| Guest virtio device model and negotiation | Linux-side service, vhost-scsi/LIO setup |
+| Guest virtio device models and negotiation | Linux-side services, vhost-scsi/LIO and vhost-net/TAP |
 | DTS/DTB and device assignment policy | Kernel configuration and complete Linux initramfs |
 | Digest-pinned package download and validation | GHCR package publication and corresponding source materials |
 | Hyper integration and board tests | Linux appliance build and backend tests |
@@ -110,14 +110,16 @@ Separate QEMU and Pi 5 AArch64 appliances are published as prereleases in GHCR.
 Each entry in [io-vm.lock.json](../scripts/io-vm.lock.json) pins its platform's
 immutable reference, source revision and successful qualification/publication
 runs. Platform metadata identifies the build profile; it does not certify Pi
-hardware operation. Earlier Pi 5 testing reached appliance userspace and
-mounted/read its physical SD configuration volume using a development
-reassembly. The newly pinned Pi package still requires hardware requalification.
+hardware operation. The development image with the combined SDIO1/RP1
+deployment passed a physical Pi 5 smoke test before publication. The exact
+published package has not been reflashed on hardware, so its lock entry keeps
+`hardware_qualified: false`.
 Final boot images follow the [image release contract](image-distribution.md).
 The import command also accepts `IO_VM_REFERENCE` explicitly. The qualified QEMU
-fixture consumes the imported generation. The ordinary AArch64 `make` build
-also imports it for the board-managed I/O VM; `make run` then starts the built
-deployment under Native init.
+fixture consumes the imported generation. Without an override, the ordinary
+AArch64 `make` build also selects the committed protocol version 3 lock.
+No local appliance checkout or package override is required. `make run` starts the artifacts from the
+last build and does not fetch or rebuild the appliance.
 
 The I/O VM repository owns the pinned upstream LTS version and builds each
 external module against the exact kernel configuration and release. HypeR
@@ -137,15 +139,19 @@ is HypeR's configuration volume, mounted by the kernel at `/data`; init waits
 for an explicit readiness record before opening `/data/vms.json`. This is also
 the default AArch64 `make run` profile.
 
-A VM definition may include `"disk": {"client": 1, "volume": "alpine"}`. The
-manager creates a unique capability session for that runtime. The I/O runtime
-checks both fields against `/etc/hyper/io-clients.conf`, generated from the same
-board JSON as the Linux volume table. Duplicate active bindings are refused.
-`vmm create NAME --config FILE` reads disk assignments and runtime settings from
+A VM definition may include `"disk": {"client": 1, "volume": "alpine"}` and/or
+`"network": {"client": 1, "network": "default", "mac": "02:48:59:00:00:01"}`.
+Both devices use the same client ID. The manager creates one capability session
+for the runtime; the I/O runtime checks its complete device policy against
+`/etc/hyper/io-clients.conf`, generated from the same board JSON as the Linux
+client, volume and network tables. Duplicate active bindings are refused.
+The board source assigns client IDs when it generates the runtime definitions;
+see [the QEMU board](../boards/qemu.json) for the source format.
+`vmm create NAME --config FILE` reads disk/network assignments and runtime settings from
 the named definition in the configuration file; `--from SOURCE` selects a template.
 
 The resident I/O VM has 128 MiB of ordinary RAM for Linux, services and
-vhost-scsi queue allocations; shared business-guest pages are additional mappings,
+vhost queue allocations; shared business-guest pages are additional mappings,
 not allocator memory for Linux. The isolated two-VM fixture below retains its
 64 MiB per-VM layout.
 
@@ -153,11 +159,12 @@ The fleet has a finite allowance for eight business VMs plus the resident I/O
 VM and manager overhead. Physical memory admission remains fallible; the quota
 does not reserve backing RAM in advance.
 
-The I/O runtime owns each control mailbox and notification capability. The
+The I/O runtime owns one control mailbox per client and a separate notification
+capability for each configured device. The
 per-VM runtime handles virtio configuration MMIO and exchanges only negotiation
 and notification enable/disable commands over its dedicated channel. Virtqueue
-kicks, completions, and disk data continue through the direct kernel route and
-shared pages. There is no storage-request relay through either Native service.
+kicks, completions, disk data and packet buffers use direct kernel routes and
+shared pages. Neither Native service relays individual I/O requests or packets.
 
 Normal guest RAM remains noncontiguous. A single guest-memory grant is mapped
 into the frontend and admitted into the I/O VM using an immutable, token-scoped
@@ -166,17 +173,18 @@ static I/O RAM and the configuration client's ranges are excluded from that
 translation to avoid ambiguous DMA reverse mappings.
 
 Closing a runtime session revokes its connection: disable new notifications,
-reset and drain vhost, release the Linux mappings, obtain the kernel's
+reset and drain every configured vhost endpoint, release the Linux mappings, obtain the kernel's
 quiescence proof, then remove the old notification routes. A new binding gets
 a new generation. Any failure to establish quiescence stops the I/O VM and
 retains uncertain DMA storage until actual device retirement. A timeout alone
 never authorizes memory reuse.
 
-## Storage protocol and control ownership
+## Device protocol and control ownership
 
-The guest-facing device uses modern virtio-mmio and standard virtio-scsi. Linux
-vhost-scsi/LIO consumes the shared virtqueues. Neither vm-runtime nor the Linux
-management service forwards individual storage requests.
+The guest-facing devices use modern virtio-mmio with standard virtio-scsi and
+virtio-net. Linux vhost-scsi/LIO and vhost-net consume the shared virtqueues.
+Neither vm-runtime nor the Linux management service forwards individual disk
+requests or packets.
 
 Configuration MMIO uses a bounded per-vCPU request, published after hardware
 detach and completed through the owning vCPU capability. Reading a request is
@@ -208,19 +216,88 @@ again, and late backend completions cannot reactivate it. Queue descriptions
 and pending transactions remain retained until independent CPU/DMA quiescence
 has been established; failure notification is not permission to release pages.
 
-The current AArch64 reference controller exposes 64 interrupt IDs. Assigned
-physical devices and I/O notification/control endpoints admit shared interrupt
-IDs 40 through 63, with collision checks against existing routes. Expanding
-this range requires matching GIC construction, accounting, register decoding,
-and guest-visible capabilities.
+The AArch64 reference controller exposes 256 interrupt IDs on GICv2 and GICv3.
+Assigned physical devices and I/O notification/control endpoints admit shared
+interrupt IDs 40 through 255, with collision checks against existing routes.
+The I/O VM may own both storage and network controllers; activation rollback
+and final retirement must quiesce every assigned controller before RAM reuse.
+
+## Guest networking
+
+The QEMU path is guest virtio-net → Linux vhost-net/TAP → Linux bridge → assigned
+virtio-net uplink → QEMU user networking. The bridge has no IP address; QEMU
+supplies DHCP and NAT. Native HypeR does not establish a network link. Client
+zero remains reserved for future Native networking, but no Native network
+frontend, TAP or network notification binding is created.
+
+Appliance startup creates the configured bridge (by default `hbr0`), attaches
+the uplink and brings both interfaces up. Each guest gets its own nonpersistent
+TAP when its virtio-net queues activate; reset or retirement removes that TAP
+after vhost drains. Guests on the same bridge share a layer-2 segment. QEMU's
+NAT sits beyond the uplink; the I/O VM does not provide DHCP or IP routing.
+
+The board's `io-vm.network-device` selects the physical controller and
+`io-vm.networks` names the bridge/uplink. Each business VM's optional `network`
+entry selects a network and stable locally administered unicast MAC. Disk and
+network are independent options: a network-only VM does not receive a hidden
+storage endpoint or LIO target. The shared Ethernet segment does not provide
+anti-spoofing or per-VM network isolation policy.
+
+The guest device uses modern virtio-mmio, RX queue 0 and TX queue 1, with at most
+128 descriptors per queue. It offers `VIRTIO_F_VERSION_1` and `VIRTIO_NET_F_MAC`;
+MTU is 1500. Offloads, mergeable RX buffers, a control virtqueue and multiqueue
+are not offered. Modern virtio uses a 12-byte packet header even without
+mergeable RX buffers. The Linux backend consumes/supplies that header and the
+TAP carries ordinary Ethernet frames.
+
+Each client has one memory owner, binding identity and control transaction
+sequence. Storage and network have independent queue epochs and can reset
+independently. The primary endpoint is storage when present, otherwise network;
+its HELLO admits the binding and its epoch labels PREPARE_MEMORY/RELEASE_MEMORY.
+NETWORK_HELLO returns 80 bytes, including MAC and MTU; NETWORK_ACTIVATE uses two
+queue records in a 112-byte request. Only the shared memory owner may acknowledge
+RELEASE_MEMORY, after both backends have drained. A failed drain retains the
+mapping and withholds the retirement proof.
+
+The Pi 5 profile uses the same guest/frontend/backend contract with RP1 GEM as
+the physical uplink. `boards/rpi5.json` combines SDIO1 storage with RP1
+Ethernet. The Linux bridge forwards guest MAC addresses onto the attached LAN;
+the LAN supplies DHCP and routing. Neither Native HypeR nor the I/O VM bridge
+has an IP address.
+
+The assignment unit is the complete RP1 PCI function (`pci-function`, selected
+by PCI vendor/device ID `1de4:0001`). HypeR owns the BCM2712 host bridge,
+firmware-initialized PCI windows, exclusive BAR ownership and physical MSI
+routing. Linux sees a generic ECAM host bridge, all admitted BARs and a GICv2m
+MSI frame. PCI configuration and MSI-X table accesses are mediated: BAR probes
+and relocations affect only the guest view, and messages can target only the
+assignment's guest SPI range. Linux owns RP1's interrupt controller, clocks,
+GPIO, GEM, PHY and other enabled function devices. Native projects the firmware
+subtree and its admitted dependencies without operating RP1 function registers.
+
+RP1 uses a separate noncoherent DMA bus with a 64 GiB bus-address offset;
+SDHCI retains its own DMA translation. The current PCI host transport admits one
+firmware-initialized, single-function endpoint with memory BARs and MSI-X.
+It has no IOMMU isolation and is intended only for the trusted I/O VM.
+Whole BARs can include vendor aliases for controller configuration; standard
+PCI mediation alone does not contain a malicious function driver. RP1
+peripherals share that owner and cannot be assigned independently. Stopping an
+activated I/O VM quarantines its physical devices and memory; clearing PCI bus
+mastering is not a DMA-drain proof. Ordinary business-VM stop/start still uses
+the shared backend retirement protocol.
+
+See the [Pi 5 Ethernet bring-up procedure](../kernel/docs/rpi5.md#ethernet-backend-qualification).
+Host tests and QEMU acceptance do not qualify the physical RP1 link, cache
+maintenance or interrupt ordering. A physical Pi 5 network run remains required.
 
 ## Shared pages and DMA
 
 Direct queue consumption requires Linux to access queue metadata, responses,
 and every guest data buffer referenced by descriptors. The trusted deployment
-currently grants the entire RAM VMO of each business VM with an I/O-backed disk.
+currently grants the entire RAM VMO of each business VM with an I/O-backed disk
+or network device. Both devices share one grant and Linux mapping.
 The Native configuration-volume client
-uses a dedicated 1 MiB shared I/O pool. Bridge protocol version 2 carries six
+uses a dedicated 1 MiB shared I/O pool. Bridge protocol version 3 retains six storage
 split queues: control, event, and four request queues. The Native client submits
 up to four 128 KiB reads before issuing one combined notification. Each request
 queue owns its descriptor chain and data buffer until completion. Writes and
@@ -242,7 +319,7 @@ currently populates **every page**, before the backend starts serving requests.
 calls `populate_page`, obtains physical addresses and constructs the shared
 extents. The current alias address is derived from the host physical address,
 so the complete extent description requires physical pages to exist first.
-Thus attaching a disk removes the memory-saving benefit of demand allocation
+Thus attaching a disk or network device removes the memory-saving benefit of demand allocation
 for that guest, even if stage-2 entries are subsequently installed on faults.
 Guests without this backend admission can retain sparse backing; their actual
 resident footprint still depends on image loading and guest accesses.
@@ -312,8 +389,8 @@ allocations cannot be replaced with swap; shared pages must also remain stable
 through backend CPU/DMA use and retirement.
 
 Business guests may enable one through four request queues; unused optional
-queues have canonical zero entries in activation records. Version 1 peers are
-rejected, so the main repository must pin the matching I/O VM package. Image
+queues have canonical zero entries in activation records. Protocol versions 1
+and 2 are rejected; both repositories must use a matching version 3 generation. Image
 loading pipelines two 512 KiB userspace buffers between a scoped reader and the
 guest-memory writer. Read-ahead stays inside the selected payload and the reader
 is joined on success or failure. There is no idle polling or unbounded data cache.
@@ -367,6 +444,117 @@ to reuse them.
 
 ## Build and validation
 
+### Protocol version 3 appliance requirement
+
+The [package lock](../scripts/io-vm.lock.json) selects separate protocol version 3
+QEMU and Pi 5 appliances published from the merged HypeR-io-vm source. Default
+builds and I/O VM acceptance import and verify these immutable GHCR digests.
+The appliance boot banner and `/etc/hyper-io-version` identify the source
+revision, dirty state, build profile and UTC build time.
+
+`IO_VM_PACKAGE` remains an explicit development override for a complete boot
+generation; ordinary builds do not need it. A completed SD image already
+contains its appliance and does not need access to GHCR when booting.
+
+Adopt future generations in this order:
+
+1. Land the I/O VM changes in HypeR-io-vm and pass its appliance build/tests.
+   The successful main build publishes separate QEMU and Pi 5 prerelease packages.
+2. Import and test those exact immutable digests with the matching HypeR
+   control plane. Keep physical Pi 5 results separate from Linux/QEMU checks.
+3. Update both entries in `scripts/io-vm.lock.json`, including their source and
+   workflow identities, and pass HypeR integration checks using those pins.
+4. After HypeR merges, advance the image-distribution repository's HypeR pin;
+   it inherits the dependency locks from that revision.
+
+The default QEMU board includes storage and networking for Alpine:
+
+```sh
+make board-build ARCH=aarch64 BOARD=qemu
+make board-run ARCH=aarch64 BOARD=qemu
+```
+
+`boards/qemu.json` owns the assigned network controller and guest interface;
+the launcher creates the matching QEMU user-network uplink. Alpine automatically
+loads virtio-net, brings up its interfaces and starts a background DHCP client
+which configures addresses, routes and DNS and renews leases. A missing DHCP
+server does not block the guest shell; client logs are in
+`/var/log/udhcpc-<interface>.log`. This applies to both RAM and disk roots.
+Existing persistent disks keep their on-disk VM definitions, guest FITs and
+root filesystems across builds. Follow
+[updating existing deployments](board-storage.md#updating-existing-deployments)
+when changing device policy or guest startup files.
+
+### Startup diagnostics
+
+- `hyper-io-bridge ... failed with error -17`: an old appliance can treat a
+  network notification as a storage notification and attempt to register the
+  same device name twice. Verify that the packaged appliance recognizes
+  `hyper,device-kind` and uses protocol version 3. Rebuild the bootstrap from
+  the current appliance pin; changing only the guest disk does not
+  replace the I/O VM.
+- `vm-runtime: failed: OperatingSystem(Status(Status(-15)))`: `-15` means
+  `PEER_CLOSED`. Inspect preceding io-runtime diagnostics for the cause. A
+  `rejected client ... does not match the board I/O policy` message means the
+  requested volume, network or MAC differs from the bootstrap policy. Compare
+  `/data/vms.json` with `/etc/hyper/io-clients.conf`; an existing disk can still
+  contain a storage-only VM definition after a network-enabled bootstrap rebuild.
+- Alpine reaches its shell but has no address: check `ip addr`, `ip route` and
+  `/var/log/udhcpc-eth0.log`. The appliance's `network default ready on eth0`
+  message confirms bridge setup, not a DHCP lease or a working external link.
+  QEMU supplies DHCP through user networking; Pi 5 needs an external LAN DHCP server.
+
+### Network acceptance
+
+The [network verifier](../tests/qemu/verify-network.py) derives a test fixture
+from the default board and adds a second, network-only guest with a distinct
+MAC address. This second guest belongs to the test, not the default deployment.
+`test-board-network` prepares and runs this fixture with a fresh disposable disk
+under `target/board-tests/network.*`. It retains the configuration and log for
+diagnosis and writes a small proof file in the disk guest's `/root`:
+
+```sh
+make test-board-network ARCH=aarch64 \
+  QEMU_MACHINE=virt,virtualization=on,gic-version=3
+make test-board-network ARCH=aarch64 \
+  QEMU_MACHINE=virt,virtualization=on,gic-version=2
+```
+
+The **HypeR / I/O VM integration** workflow runs separate GICv2 and GICv3 network
+jobs on pull requests and main pushes. Its local suite is
+`sh tests/ci/run.sh io-network`; `QEMU_MACHINE` selects the GIC version.
+The suite imports the committed appliance pin unless `IO_VM_REFERENCE` selects
+another immutable generation. The Make target also accepts `IO_VM_PACKAGE`.
+
+The test serves a random 256 KiB + 137 byte payload on localhost and verifies
+its SHA-256 inside each guest. CI needs no public HTTP endpoint. A direct
+`verify-network.py run` invocation can add `--external-url http://...` with a
+small public file to also check DNS and outbound HTTP; the external fetch
+checks for a successful, nonempty response, while the local payload provides
+the integrity check. The guest image must include its `virtio_net` module and automatic DHCP
+startup. The verifier checks the address, default route, DNS configuration and
+live DHCP client before issuing any manual network setup. Manual setup is used
+only after the intentional driver unbind/rebind. Direct verifier invocations
+must use the same generated board configuration for image construction and
+execution; rebuild their disposable disk when guest files change.
+
+Both GIC variants have passed DHCP, payload integrity, network driver
+unbind/rebind, and stop/start followed by another transfer for a disk+network
+guest and a network-only guest. The disk proof survives network reset and VM
+restart; the network-only guest has no SCSI device. Both guests remain usable
+after the other's network reset, and the verifier waits for all four
+`RELEASE_MEMORY: ok` acknowledgements. An optional fetch from Alpine's public
+HTTP server also passed for both guests, covering DNS and outbound connectivity.
+The existing isolated storage acceptance continues to pass.
+
+These are functional tests without performance thresholds. Concurrent
+disk/network load, sustained traffic and fault stress require further coverage;
+these results do not qualify physical RPi5 networking or a remote appliance
+release. Backend protocol and injected retirement-failure tests separately
+exercise shared memory ownership and device epochs.
+
+### Package import and storage acceptance
+
 Import the pinned, anonymously downloadable QEMU package (ORAS is discovered
 or downloaded automatically):
 
@@ -392,12 +580,11 @@ built Pi package against its platform metadata. The lock explicitly records `har
 
 Linux build instructions and the vhost-scsi reserved-page acceptance test live
 in [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm). They run in that
-repository. Run the HypeR fixture with a verified OCI import directory or a
-complete external `boot-artifacts.json` generation:
+repository. The HypeR fixture defaults to the pinned QEMU package:
 
 ```sh
-make test-io-vm ARCH=aarch64 IO_VM_PACKAGE=/path/to/qualified/generation
-make test-io-vm ARCH=aarch64 IO_VM_PACKAGE=/path/to/qualified/generation \
+make test-io-vm ARCH=aarch64
+make test-io-vm ARCH=aarch64 \
   IO_VM_TEST=reset QEMU_CPUS=1 QEMU_MACHINE=virt,virtualization=on,gic-version=2
 ```
 
@@ -420,8 +607,8 @@ configurations on pull requests and main pushes using the pinned package.
 Manual dispatch can override the public immutable reference. Its local
 equivalent is `sh tests/ci/run.sh io-vm`; set `IO_VM_REFERENCE` to qualify
 another generation explicitly.
-The pinned package has passed its appliance build/tests, publication verification
-and import from GHCR. The board-managed Native FAT and business-client tests
+The locked version 3 packages passed the upstream appliance build/tests and
+publication verification. The board-managed Native FAT and business-client tests
 are additional HypeR acceptance paths, documented in [board storage](board-storage.md).
 Updating the lock requires qualifying the exact new build.
 
@@ -445,7 +632,7 @@ and memory admission after retirement. Separate Native guest tests cover
 mailbox/notification interrupts, backend exit, stale completions and interrupted
 MMIO retirement.
 
-Multi-vCPU storage guests, concurrent reset during I/O, forced I/O VM exit with
+Sustained multi-vCPU storage load, concurrent reset during I/O, forced I/O VM exit with
 physical requests in flight, and physical read/write/flush failure injection
 still need dedicated qualification. Pi 5 must additionally validate DMA address
 translation, cache maintenance, interrupt ordering, device reset, and measured

@@ -7,7 +7,7 @@ use hyper_init::manifest::{LaunchPlan, Manifest, Service};
 use hyper_os::fs::FileRights;
 use hyper_os::handle::{OwnedHandle, ProcessObject, Rights, RightsOffer};
 use hyper_os::startup;
-use hyper_os::task::ProcessBuilder;
+use hyper_os::task::{ProcessBuilder, StartFailure};
 
 use super::LaunchError;
 use super::authority::AuthorityInventory;
@@ -31,7 +31,7 @@ impl ServiceLauncher {
             .authorities
             .root_directory
             .open(service.image(), FileRights::EXECUTE)
-            .map_err(|_| LaunchError::OperatingSystem)?;
+            .map_err(LaunchError::service_operation)?;
         let vm_fleet_scope = Some(service_index) == vm_manager_index
             || service.image() == hyper_init::bootstrap_policy::IO_RUNTIME_IMAGE;
         let builder = ProcessBuilder::create(
@@ -48,20 +48,20 @@ impl ServiceLauncher {
             },
             executable.as_handle_ref(),
         )
-        .map_err(|_| LaunchError::OperatingSystem)?;
+        .map_err(LaunchError::service_operation)?;
         builder
             .set_name(service.name())
-            .map_err(|_| LaunchError::OperatingSystem)?;
+            .map_err(LaunchError::service_resources)?;
         builder
             .add_argument(service.image())
-            .map_err(|_| LaunchError::OperatingSystem)?;
+            .map_err(LaunchError::service_resources)?;
         builder
             .add_handle_duplicate(
                 self.authorities.library_directory.as_handle_ref(),
                 startup::DYNAMIC_LIBRARY_DIRECTORY.as_raw(),
                 RightsOffer::Exact(Rights::READ.union(Rights::EXECUTE)),
             )
-            .map_err(|_| LaunchError::OperatingSystem)?;
+            .map_err(LaunchError::service_resources)?;
 
         for (capability_index, _) in service.capabilities().enumerate() {
             let grant = plan
@@ -70,8 +70,15 @@ impl ServiceLauncher {
             self.authorities.offer(grant, vm_fleet_scope, &builder)?;
         }
 
-        builder.seal().map_err(|_| LaunchError::OperatingSystem)?;
-        builder.start().map_err(|_| LaunchError::OperatingSystem)
+        builder.seal().map_err(LaunchError::service_image)?;
+        builder.start().map_err(|failure| match failure {
+            // Rejection still owns the unpublished builder; dropping it rolls
+            // back the prepared image and capabilities before continuing.
+            StartFailure::Rejected { error, .. } => LaunchError::service_resources(error),
+            // A malformed result after publication cannot be treated as a
+            // service that never started: supervisor ownership is unknown.
+            StartFailure::Committed(_) => LaunchError::OperatingSystem,
+        })
     }
 }
 
@@ -107,6 +114,9 @@ impl ServiceLauncher {
                             service.name(),
                             &error,
                         );
+                        if !service.critical() && matches!(error, LaunchError::ServiceUnavailable) {
+                            continue;
+                        }
                         return Err(error);
                     }
                 };

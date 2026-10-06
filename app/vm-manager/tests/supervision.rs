@@ -4,6 +4,41 @@
 use super::*;
 use std::cell::Cell;
 
+#[test]
+fn unavailable_initial_fleet_rejects_admission_but_keeps_queries_responsive() {
+    let unavailable = FleetConfiguration::Unavailable;
+    assert!(unavailable.check_request(&fleet::Request::List).is_ok());
+    for action in [fleet::Action::Start, fleet::Action::Restart] {
+        let request = fleet::Request::Control {
+            name: "io".into(),
+            action,
+        };
+        assert!(unavailable.check_request(&request).is_err());
+        assert!(
+            FleetConfiguration::Configured
+                .check_request(&request)
+                .is_ok()
+        );
+    }
+    let create = fleet::Request::Create {
+        definitions: Vec::new(),
+    };
+    assert!(unavailable.check_request(&create).is_err());
+    assert!(
+        FleetConfiguration::Configured
+            .check_request(&create)
+            .is_ok()
+    );
+    assert!(
+        unavailable
+            .check_request(&fleet::Request::Control {
+                name: "io".into(),
+                action: fleet::Action::Status,
+            })
+            .is_ok()
+    );
+}
+
 fn running() -> InstancePolicy {
     let mut policy = InstancePolicy::default();
     policy.observe(InstanceStatus::ImageValidated).unwrap();
@@ -131,17 +166,17 @@ fn broker_backpressure_retains_endpoint_but_exit_releases_it() {
     let closed = Cell::new(0);
     let mut pending = Some(Endpoint(&closed));
     let mut instance = InstancePolicy::default();
-    assert!(!instance.wants_disk_admission(pending.is_some()));
+    assert!(!instance.wants_io_admission(pending.is_some()));
     instance.observe(InstanceStatus::ImageValidated).unwrap();
     instance.observe(InstanceStatus::MemoryPrepared).unwrap();
     instance.observe(InstanceStatus::Installed).unwrap();
-    assert!(instance.wants_disk_admission(pending.is_some()));
+    assert!(instance.wants_io_admission(pending.is_some()));
     complete_admission(
         &mut pending,
         Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)),
     );
     assert_eq!(closed.get(), 0);
-    assert!(instance.wants_disk_admission(pending.is_some()));
+    assert!(instance.wants_io_admission(pending.is_some()));
     let outcome = instance.finish(false, &mut pending);
     assert_eq!(closed.get(), 1);
     assert!(pending.is_none());
@@ -164,13 +199,13 @@ fn broker_completion_and_failure_release_pending_record() {
 }
 
 #[test]
-fn stopped_instance_cannot_be_admitted_to_disk_broker() {
+fn stopped_instance_cannot_be_admitted_to_io_broker() {
     let mut instance = InstancePolicy::default();
     instance.observe(InstanceStatus::ImageValidated).unwrap();
     instance.observe(InstanceStatus::MemoryPrepared).unwrap();
     instance.observe(InstanceStatus::Installed).unwrap();
     instance.request_cooperative_stop();
-    assert!(!instance.wants_disk_admission(true));
+    assert!(!instance.wants_io_admission(true));
 }
 
 #[test]

@@ -3,6 +3,115 @@
 
 //! Allocation-free admission and interrupt decisions for an assigned transport.
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VirtioKind {
+    Scsi,
+    Net,
+}
+
+impl VirtioKind {
+    pub(crate) const fn from_device_id(id: u32) -> Option<Self> {
+        match id {
+            8 => Some(Self::Scsi),
+            1 => Some(Self::Net),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn device_id(self) -> u32 {
+        match self {
+            Self::Scsi => 8,
+            Self::Net => 1,
+        }
+    }
+
+    pub(crate) const fn profile(self) -> u32 {
+        use hyper::abi::native as abi;
+        match self {
+            Self::Scsi => abi::HYPER_NATIVE_DEVICE_PROFILE_VIRTIO_MMIO_SCSI as u32,
+            Self::Net => abi::HYPER_NATIVE_DEVICE_PROFILE_VIRTIO_MMIO_NET as u32,
+        }
+    }
+}
+
+pub(crate) const fn transport_profile(profile: u32) -> bool {
+    profile == VirtioKind::Scsi.profile()
+        || profile == VirtioKind::Net.profile()
+        || profile == hyper::abi::native::HYPER_NATIVE_DEVICE_PROFILE_PCI_FUNCTION as u32
+}
+
+pub(crate) fn valid_guest_interrupt(irq: u32) -> bool {
+    use hyper::abi::native as abi;
+    (abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_DEVICE_INTERRUPT_BASE as u32
+        ..abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_INTERRUPT_COUNT as u32)
+        .contains(&irq)
+}
+
+pub(crate) fn valid_guest_interrupt_range(base: u32, count: u32) -> bool {
+    count != 0
+        && valid_guest_interrupt(base)
+        && base
+            .checked_add(count - 1)
+            .is_some_and(valid_guest_interrupt)
+}
+
+pub(crate) fn interrupt_ranges_conflict(
+    base: u32,
+    count: u32,
+    other: u32,
+    other_count: u32,
+) -> bool {
+    if count == 0 || other_count == 0 {
+        return false;
+    }
+    match (base.checked_add(count), other.checked_add(other_count)) {
+        (Some(end), Some(other_end)) => base < other_end && other < end,
+        _ => true,
+    }
+}
+
+/// Canonical PCI vendor/device selector, independent of firmware node names.
+pub(crate) fn pci_identity(text: &str) -> Option<u32> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 9 || bytes[4] != b':' {
+        return None;
+    }
+    let word = |digits: &[u8]| {
+        digits.iter().try_fold(0u32, |value, digit| {
+            let nibble = match digit {
+                b'0'..=b'9' => digit - b'0',
+                b'a'..=b'f' => digit - b'a' + 10,
+                _ => return None,
+            };
+            Some((value << 4) | u32::from(nibble))
+        })
+    };
+    Some(word(&bytes[..4])? | (word(&bytes[5..])? << 16))
+}
+
+/// Compare complete profile-owned apertures, including holes between windows.
+pub(crate) fn assignments_conflict(
+    (base, size, irq, count): (u64, u64, u32, u32),
+    (other_base, other_size, other_irq, other_count): (u64, u64, u32, u32),
+) -> bool {
+    interrupt_ranges_conflict(irq, count, other_irq, other_count)
+        || register_windows_conflict(base, size, other_base, other_size)
+}
+
+/// Register access is mediated against exact byte windows, never delegated as
+/// a physical-page mapping. Distinct QEMU transports may therefore share a page.
+pub(crate) fn register_windows_conflict(
+    base: u64,
+    size: u64,
+    other_base: u64,
+    other_size: u64,
+) -> bool {
+    match (base.checked_add(size), other_base.checked_add(other_size)) {
+        (Some(end), Some(other_end)) => base < other_end && other_base < end,
+        _ => true,
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Negotiation {
     selector: u32,
@@ -113,12 +222,12 @@ pub(crate) fn register_offset(
     (u64::try_from(end).ok()? <= length).then_some(offset)
 }
 
-pub(crate) fn assignment_aperture(base: u64) -> bool {
-    base.is_multiple_of(4096)
+pub(crate) fn assignment_aperture(base: u64, size: u64) -> bool {
+    size != 0
+        && size.is_multiple_of(4096)
+        && base.is_multiple_of(4096)
         && (0x0b00_0000..0x0c00_0000).contains(&base)
-        && base
-            .checked_add(65536)
-            .is_some_and(|end| end <= 0x0c00_0000)
+        && base.checked_add(size).is_some_and(|end| end <= 0x0c00_0000)
 }
 
 /// A physical level IRQ's delivery token and userspace notification state.

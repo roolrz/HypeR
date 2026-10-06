@@ -124,10 +124,21 @@ ABI revision: `0`.
 | `device_firmware_field_compatible` | `2` |
 | `device_firmware_field_registers` | `3` |
 | `device_firmware_field_property` | `4` |
+| `device_firmware_field_property_names` | `5` |
 | `device_profile_virtio_mmio_scsi` | `1` |
 | `device_profile_userspace` | `2` |
+| `device_profile_virtio_mmio_net` | `3` |
+| `device_profile_pci_function` | `4` |
+| `device_pci_aperture_size` | `8388608` |
+| `device_resource_pci_ecam` | `256` |
+| `device_resource_pci_msi` | `257` |
+| `device_resource_pci_bar0` | `512` |
+| `device_resource_memory_64` | `1` |
+| `device_resource_prefetchable` | `2` |
+| `device_assignment_max_devices` | `4` |
 | `device_identity_compatible` | `1` |
 | `device_identity_fdt_path` | `2` |
+| `device_identity_pci_id` | `3` |
 | `io_max_clients` | `9` |
 | `guest_notification_disconnect` | `3` |
 | `guest_dynamic_alias_offset` | `68719476736` |
@@ -206,6 +217,8 @@ ABI revision: `0`.
 | `virtual_platform_aarch64_reference_uart_size` | `4096` |
 | `virtual_platform_aarch64_reference_uart_interrupt` | `33` |
 | `virtual_platform_aarch64_reference_timer_interrupt` | `27` |
+| `virtual_platform_aarch64_reference_interrupt_count` | `256` |
+| `virtual_platform_aarch64_reference_device_interrupt_base` | `40` |
 | `virtual_platform_riscv64_reference` | `2` |
 | `virtual_platform_riscv64_reference_guest_ram_base` | `2147483648` |
 | `virtual_platform_riscv64_reference_dtb_offset` | `65536` |
@@ -294,6 +307,9 @@ ABI revision: `0`.
 
 ## Semantic rules
 
+- Device firmware inspection reads one immutable boot snapshot. Field PROPERTY_NAMES (5) returns every property name as a NUL-separated list, without granting ownership or exposing mapping capabilities; field PROPERTY (4) reads a named property's original bytes. Other fields report node identity, compatible strings, translated registers and interrupt metadata. Empty output queries the required byte length. The caller supplies a name only for PROPERTY; all other fields require an empty name. Inspection cannot substitute for an atomic device claim.
+- Physical device profiles identify the admitted transport contract: virtio-mmio SCSI (1), userspace-managed registers (2), virtio-mmio network (3), and an exclusively assigned PCI function (4). Firmware matching combines profile with identity and rejects ambiguous matches. PCI identity kind 3 uses exactly nine lowercase ASCII bytes vvvv:dddd (vendor and device identifiers). Physical MMIO is mediated against exact resource extents; a device handle never grants a host MMIO page mapping. DEVICE_PROFILE_INFO reports the complete guest aperture, resource count, interrupt count, PCI device/vendor word and admitted DMA bus offset. Non-PCI profiles use a 64 KiB aperture and zero PCI identity and DMA offset. Virtio profiles have one interrupt; userspace profiles report zero or one physical interrupt. Non-PCI assignment still reserves one virtual interrupt when no physical interrupt is present. A pending VM admits at most DEVICE_ASSIGNMENT_MAX_DEVICES controllers with disjoint apertures and interrupt ranges; all share its DMA backing lifetime. Partial installation rolls back every controller, and retirement releases pages only after every controller is quiescent.
+- The PCI-function profile presents one endpoint at guest BDF 00:00.0 through an 8 MiB aperture. Resource kinds PCI_ECAM and PCI_MSI describe a virtual 1 MiB ECAM window and 4 KiB GICv2m frame; PCI_BAR0 through PCI_BAR0+5 describe implemented memory BARs. Resource offsets are relative to the assigned guest aperture; bus_address is the initial virtual PCI address of a BAR. MEMORY_64 and PREFETCHABLE flags apply only to BAR resources; other resources have zero flags and bus_address. PCI configuration and MSI-X are mediated: physical host-bridge, interrupt-controller and DMA-window registers are never guest resources. The interrupt argument selects the first of interrupt_count consecutive GIC SPIs (at most 64); the AArch64 reference GIC has 256 IDs. Linux owns the entire endpoint and its child drivers. DMA bus addresses equal the admitted host physical extent plus dma_bus_offset; this translation is not an IOMMU boundary. Firmware-initialized devices remain fail-closed if link or DMA translation validation fails. Clearing bus mastering alone is not proof of DMA retirement; a PCI assignment without a proven reset/quiescence protocol retains its DMA backing and physical claim on teardown.
 - system_config queries a public scalar system property by u64 key. PAGE_SIZE (1) returns the Native mapping granule in bytes, immutable for the lifetime of a process. Unknown keys return NOT_SUPPORTED. Unused argument registers must be zero. Success returns the value in value0 and zero in value1. This query requires no inspector capability and does not expose privileged observations.
 - vmar_allocate(parent, address, size, options) uses address as the low end. Options zero treats nonzero address as a hint, choosing the nearest fitting free interval with lower-base tie breaking; address zero selects the lowest free interval. VMAR_ALLOCATE_EXACT requires the exact address, including zero. Unknown flags are invalid. Size is nonzero, addresses and size page aligned, and intervals must not overflow. Success returns child in value0 and actual base in value1. Selection and reservation commit atomically within parent authority. No fitting free interval returns NO_MEMORY.
 - system_config key SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT returns the HAL application-exclusive address limit in value0 and zero in value1. It describes profile geometry, not VMAR authority. The initial loader grants ROOT_VMAR from one page to that limit.
@@ -505,11 +521,11 @@ element size before any user-memory access.
 
 | Name | Minimum prefix | Size | Alignment | Fields |
 | --- | ---: | ---: | ---: | --- |
-| `device_profile_info` | 32 | 32 | 8 | `profile: u32 @ 0`, `reserved0: u32 @ 4`, `resource_count: u32 @ 8`, `reserved1: u32 @ 12`, `reserved2: u64 @ 16`, `reserved3: u64 @ 24` |
+| `device_profile_info` | 32 | 32 | 8 | `profile: u32 @ 0`, `interrupt_count: u32 @ 4`, `resource_count: u32 @ 8`, `pci_identity: u32 @ 12`, `dma_bus_offset: u64 @ 16`, `aperture_size: u64 @ 24` |
 | `device_firmware_query` | 24 | 24 | 8 | `node: u32 @ 0`, `field: u32 @ 4`, `name_address: u64 @ 8`, `name_length: u64 @ 16` |
 | `device_firmware_info` | 32 | 32 | 8 | `flags: u32 @ 0`, `register_count: u32 @ 4`, `irq_number: u32 @ 8`, `irq_trigger: u32 @ 12`, `reserved0: u64 @ 16`, `reserved1: u64 @ 24` |
 | `device_bundle_entry` | 16 | 16 | 8 | `node: u32 @ 0`, `resource: u32 @ 4`, `offset: u64 @ 8` |
-| `device_resource_info` | 32 | 32 | 8 | `kind: u32 @ 0`, `reserved: u32 @ 4`, `offset: u64 @ 8`, `length: u64 @ 16`, `reserved2: u64 @ 24` |
+| `device_resource_info` | 32 | 32 | 8 | `kind: u32 @ 0`, `flags: u32 @ 4`, `offset: u64 @ 8`, `length: u64 @ 16`, `bus_address: u64 @ 24` |
 | `physical_device_info` | 16 | 16 | 8 | `device_id: u32 @ 0`, `transport_version: u32 @ 4`, `mmio_size: u64 @ 8` |
 | `dma_extent` | 16 | 16 | 8 | `physical_base: u64 @ 0`, `length: u64 @ 8` |
 | `virtual_cpu_mmio_request` | 48 | 48 | 8 | `id: u64 @ 0`, `device: u64 @ 8`, `address: u64 @ 16`, `value: u64 @ 24`, `operation: u32 @ 32`, `width: u32 @ 36`, `reserved: u64 @ 40` |

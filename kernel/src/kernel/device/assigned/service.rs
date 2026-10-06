@@ -40,7 +40,8 @@ pub(crate) fn claim_matching(
     if identity.is_empty()
         || identity.len() > 512
         || identity.bytes().any(|byte| byte <= 32 || byte == 127)
-        || !matches!(identity_kind, 1 | 2)
+        || !matches!(identity_kind, 1..=3)
+        || (identity_kind == 3 && super::model::pci_identity(identity).is_none())
         || (identity_kind == 2
             && (!identity.starts_with('/')
                 || identity.ends_with('/')
@@ -54,7 +55,7 @@ pub(crate) fn claim_matching(
     process
         .resolve_handle::<DeviceAssignmentAuthority>(authority, Rights::INSPECT)
         .map_err(Error::from)?;
-    if profile != 1 {
+    if !super::model::transport_profile(profile) {
         return Err(Error::NotSupported.into());
     }
     if !crate::hal::vm::supports_guest_device_assignment() {

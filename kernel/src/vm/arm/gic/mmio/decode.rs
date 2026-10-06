@@ -324,7 +324,7 @@ fn decode_distributor_v2(offset: u32, width: AccessWidth) -> Result<DecodedRegis
         (0x300, BitmapRegister::SetActive),
         (0x380, BitmapRegister::ClearActive),
     ] {
-        for word in 0..2 {
+        for word in 0..super::INTERRUPT_COUNT / 32 {
             if let Some(result) = bitmap(offset, width, base + word * 4, word * 32, register) {
                 return result.map(|decoded| {
                     if word == 0
@@ -345,7 +345,7 @@ fn decode_distributor_v2(offset: u32, width: AccessWidth) -> Result<DecodedRegis
             }
         }
     }
-    for word in 0..2 {
+    for word in 0..super::INTERRUPT_COUNT / 32 {
         if let Some(result) = priority(offset, width, 0x400 + word * 32, word * 32) {
             return result.map(|mut decoded| {
                 if let DecodedRegister::Model(ModelRegister {
@@ -361,11 +361,11 @@ fn decode_distributor_v2(offset: u32, width: AccessWidth) -> Result<DecodedRegis
             return result;
         }
     }
-    if (0x800..0x840).contains(&offset) {
+    if (0x800..0x800 + super::INTERRUPT_COUNT).contains(&offset) {
         let count = width.bytes() as u8;
         if !matches!(width, AccessWidth::Byte | AccessWidth::Word)
             || !offset.is_multiple_of(u32::from(count))
-            || offset + u32::from(count) > 0x840
+            || offset + u32::from(count) > 0x800 + super::INTERRUPT_COUNT
         {
             return Err(DecodeError::InvalidRegisterAccess);
         }
@@ -453,18 +453,23 @@ fn decode_distributor(offset: u32, width: AccessWidth) -> Result<DecodedRegister
         (0x0304, BitmapRegister::SetActive),
         (0x0384, BitmapRegister::ClearActive),
     ] {
-        if let Some(result) = bitmap(offset, width, base, 32, register) {
-            return result;
+        for word in 0..super::INTERRUPT_COUNT / 32 - 1 {
+            if let Some(result) = bitmap(offset, width, base + word * 4, 32 + word * 32, register) {
+                return result;
+            }
         }
     }
-    if let Some(result) = priority(offset, width, 0x0420, 32) {
-        return result;
-    }
-    if let Some(result) = configuration(offset, width, 0x0c08, 32) {
-        return result;
-    }
-    if let Some(result) = route(offset, width, 0x6100, 32) {
-        return result;
+    for word in 0..super::INTERRUPT_COUNT / 32 - 1 {
+        let first = 32 + word * 32;
+        if let Some(result) = priority(offset, width, 0x0420 + word * 32, first) {
+            return result;
+        }
+        if let Some(result) = configuration(offset, width, 0x0c08 + word * 8, first) {
+            return result;
+        }
+        if let Some(result) = route(offset, width, 0x6100 + word * 256, first) {
+            return result;
+        }
     }
     Ok(DecodedRegister::Reserved)
 }

@@ -20,7 +20,7 @@ use hyper_os::wait::{self, ObjectSignals, WaitItem};
 use hyper_vm_image::guest_fdt::io::{DmaRange, IoClient, MmioDevice, SharedMemory};
 use hyper_vm_support::io_guest::{InstalledGuest, RAM_BASE, RAM_BYTES, SharedGrant};
 use hyper_vm_support::io_protocol::{Command, MAX_RECORD, Reply, Request, Status};
-use hyper_vm_support::virtio_scsi::{BackendOperation, QUEUES, Queue, VERSION_1};
+use hyper_vm_support::virtio_mmio::{BackendOperation, QUEUES, Queue, VERSION_1};
 
 const _: () = assert!(QUEUES == block::QUEUE_COUNT);
 
@@ -31,13 +31,11 @@ pub(super) struct NativeStorage {
     _memory: WritableVmo,
     grant: OwnedHandle<GuestMemoryObject>,
     dma: DmaExtent,
-    ready: Option<OwnedHandle<ByteChannelObject>>,
     block: Option<NativeBlock>,
 }
 impl NativeStorage {
     pub(super) fn prepare(
         authority: HandleRef<'_, DeviceAssignmentAuthorityObject>,
-        ready: OwnedHandle<ByteChannelObject>,
     ) -> Result<Self> {
         let memory = WritableVmo::create_contiguous(block::MEMORY_BYTES).map_err(show)?;
         let dma = device::dma_extent(authority, memory.as_handle_ref(), 0, block::MEMORY_BYTES)
@@ -47,13 +45,12 @@ impl NativeStorage {
             _memory: memory,
             grant,
             dma,
-            ready: Some(ready),
             block: None,
         })
     }
     pub(super) fn description(&self) -> IoClient {
         IoClient {
-            id: 0,
+            id: hyper_service::io::NATIVE_CLIENT,
             shared_memory: SharedMemory {
                 base: SHARED_BASE,
                 size: block::MEMORY_BYTES,
@@ -64,11 +61,12 @@ impl NativeStorage {
                 size: 4096,
                 irq: 41,
             },
-            notification: MmioDevice {
+            notification: Some(MmioDevice {
                 base: NOTIFICATION_MMIO,
                 size: 4096,
                 irq: 42,
-            },
+            }),
+            network_notification: None,
             dynamic: false,
         }
     }
@@ -188,12 +186,6 @@ impl NativeStorage {
             result
         })?;
         self.block = Some(mounted);
-        self.ready
-            .take()
-            .ok_or("readiness capability already consumed")?
-            .as_byte_channel()
-            .send(hyper_service::io::READY_MESSAGE)
-            .map_err(show)?;
         Ok(())
     }
 }

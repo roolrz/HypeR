@@ -20,13 +20,17 @@ use crate::kernel::vm::registry::{PreparedVm, VmBuilder, VmLifecycleResources, V
 
 type PendingLock = InterruptSpinLock<PendingState, crate::hal::irq::LocalMask>;
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "bounded device slots are charged inline and must not allocate under the construction lock"
+)]
 enum PendingState {
     Configuring {
         reservation: VmReservation,
         lifecycle_resources: VmLifecycleResources,
         memory: alloc::boxed::Box<Layout>,
         bootstrap: Option<VirtualCpuBootstrap>,
-        physical: Option<crate::kernel::device::assigned::Assignment>,
+        physical: crate::kernel::device::assigned::AssignmentSet,
         virtual_serial:
             Option<KernelRef<super::super::virtual_serial::VirtualSerial, VmDeviceBinding>>,
     },
@@ -64,7 +68,7 @@ impl PendingVirtualMachine {
                 lifecycle_resources,
                 memory: Layout::try_new(configuration.memory_size, domain)?,
                 bootstrap: None,
-                physical: None,
+                physical: crate::kernel::device::assigned::AssignmentSet::new(),
                 virtual_serial: None,
             }),
             domain: domain.clone(),
@@ -103,10 +107,9 @@ impl PendingVirtualMachine {
     ) -> Result<(), Error> {
         let mut assignment = Some(assignment);
         let result = self.state.with(|state| match state {
-            PendingState::Configuring { physical, .. } if physical.is_none() => {
-                *physical = assignment.take();
-                Ok(())
-            }
+            PendingState::Configuring { physical, .. } => physical
+                .insert(&mut assignment)
+                .map_err(|_| Error::InvalidConfiguration),
             _ => Err(Error::BadState),
         });
         drop(assignment);
@@ -220,9 +223,9 @@ impl PendingVirtualMachine {
         virtual_serial: Option<
             KernelRef<super::super::virtual_serial::VirtualSerial, VmDeviceBinding>,
         >,
-        physical: Option<crate::kernel::device::assigned::Assignment>,
+        physical: crate::kernel::device::assigned::AssignmentSet,
     ) -> Result<PreparedVm, Error> {
-        if physical.is_some() {
+        if !physical.is_empty() {
             memory.validate_dma()?;
         }
         let mut address_space = GuestAddressSpace::from_vmo(

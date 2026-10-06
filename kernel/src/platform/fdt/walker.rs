@@ -88,6 +88,7 @@ impl<First: NodeVisitor, Second: NodeVisitor> NodeVisitor for VisitorPair<'_, Fi
                 enabled: node.enabled,
                 resource_error: node.resource_error,
                 registers: node.registers,
+                pci_memory: node.pci_memory,
                 interrupt_cells: node.interrupt_cells,
             })
             .map_err(VisitorPairError::First)?;

@@ -6,14 +6,17 @@
 use super::assigned::service::MatchError;
 use crate::kernel::vm::service::Error;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 use hyper::drivers::platform::PlatformDevice;
 use hyper::mm::FallibleArc;
 
 pub(super) struct Catalogue {
     pub(super) nodes: Vec<PlatformDevice>,
-    reserved: Vec<AtomicBool>,
+    ownership: Vec<AtomicU8>,
 }
+
+const OWNED: u8 = 1;
+const RESERVED: u8 = 2;
 
 impl Catalogue {
     pub(super) fn new(
@@ -22,45 +25,68 @@ impl Catalogue {
     ) -> Result<FallibleArc<Self>, ()> {
         let mut reserved = Vec::new();
         reserved.try_reserve_exact(nodes.len()).map_err(|_| ())?;
-        reserved.extend((0..nodes.len()).map(|_| AtomicBool::new(false)));
-        let catalogue = FallibleArc::try_new(Self { nodes, reserved }).map_err(|_| ())?;
+        reserved.extend((0..nodes.len()).map(|_| AtomicU8::new(0)));
+        let catalogue = FallibleArc::try_new(Self {
+            nodes,
+            ownership: reserved,
+        })
+        .map_err(|_| ())?;
         catalogue.reserve(owned);
         Ok(catalogue)
     }
 
     // Boot-only mutation, completed before the registry publishes this owner.
     pub(super) fn reserve(&self, owned: impl Fn(&PlatformDevice) -> bool) {
+        // Resolve dependency ownership once per node. The predicate may walk
+        // firmware links; invoking it inside the alias scan would be cubic.
+        for (index, node) in self.nodes.iter().enumerate() {
+            self.ownership[index].store(if owned(node) { OWNED } else { 0 }, Ordering::Relaxed);
+        }
         for (index, node) in self.nodes.iter().enumerate() {
             // Protect byte resources and their device pages against firmware
             // aliases. A second node name never grants access to a kernel owner.
-            let conflict = self.nodes.iter().filter(|node| owned(node)).any(|owner| {
-                let irq_conflict = irq(owner)
-                    .zip(irq(node))
-                    .is_some_and(|(a, b)| a.0 >= 32 && a.0 == b.0);
-                irq_conflict
-                    || owner.registers().iter().any(|left| {
-                        node.registers().iter().any(|right| {
-                            let end = |range: &hyper::drivers::platform::MmioResource| {
-                                range
-                                    .start()
-                                    .checked_add(range.size())
-                                    .and_then(|v| v.checked_add(4095))
-                                    .map(|v| v & !4095)
-                            };
-                            match (end(left), end(right)) {
-                                (Some(a), Some(b)) => {
-                                    (left.start() & !4095) < b && (right.start() & !4095) < a
+            let conflict = self
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| self.ownership[*index].load(Ordering::Relaxed) & OWNED != 0)
+                .any(|(_, owner)| {
+                    let irq_conflict = irq(owner)
+                        .zip(irq(node))
+                        .is_some_and(|(a, b)| a.0 >= 32 && a.0 == b.0);
+                    irq_conflict
+                        || owner.mmio_resources().any(|left| {
+                            node.mmio_resources().any(|right| {
+                                let end = |range: &hyper::drivers::platform::MmioResource| {
+                                    range
+                                        .start()
+                                        .checked_add(range.size())
+                                        .and_then(|v| v.checked_add(4095))
+                                        .map(|v| v & !4095)
+                                };
+                                match (end(&left), end(&right)) {
+                                    (Some(a), Some(b)) => {
+                                        (left.start() & !4095) < b && (right.start() & !4095) < a
+                                    }
+                                    _ => true,
                                 }
-                                _ => true,
-                            }
+                            })
                         })
-                    })
-            });
-            self.reserved[index].store(owned(node) || conflict, Ordering::Relaxed);
+                });
+            let flags = self.ownership[index].load(Ordering::Relaxed);
+            self.ownership[index].store(
+                flags
+                    | if flags & OWNED != 0 || conflict {
+                        RESERVED
+                    } else {
+                        0
+                    },
+                Ordering::Relaxed,
+            );
         }
     }
     pub(super) fn reserved(&self, index: usize) -> bool {
-        self.reserved[index].load(Ordering::Relaxed)
+        self.ownership[index].load(Ordering::Relaxed) & RESERVED != 0
     }
 
     pub(super) fn read(&self, index: u32, field: u32, name: &str) -> Result<Vec<u8>, MatchError> {
@@ -89,7 +115,10 @@ impl Catalogue {
                 append(&bytes)?;
             }
             1 => append(node.path().as_bytes())?,
-            2 => {
+            4 if node.property(name).is_some() => {
+                append(node.property(name).ok_or(MatchError::Missing)?)?;
+            }
+            2 | 4 if field == 2 || name == "compatible" => {
                 for value in node.compatibles() {
                     append(value.as_bytes())?;
                     append(&[0])?;
@@ -107,6 +136,18 @@ impl Catalogue {
                 }
             }
             4 => append(node.property(name).ok_or(MatchError::Missing)?)?,
+            5 => {
+                for property in node.properties() {
+                    append(property.name().as_bytes())?;
+                    append(&[0])?;
+                }
+                if !node.compatibles().is_empty() && node.property("compatible").is_none() {
+                    append(b"compatible\0")?;
+                }
+                if !node.interrupt_cells().is_empty() && node.property("interrupts").is_none() {
+                    append(b"interrupts\0")?;
+                }
+            }
             _ => return Err(Error::InvalidArgument.into()),
         }
         Ok(out)

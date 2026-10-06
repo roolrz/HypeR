@@ -12,8 +12,8 @@ mod supervisor;
 use authority::{AuthorityInventory, VmAuthorities};
 use hyper_init::bootstrap_policy::BootstrapPolicy;
 use launcher::ServiceLauncher;
-use provision::FleetProvisioner;
-use supervisor::SupervisorSet;
+use provision::{FleetConfiguration, FleetProvisioner};
+use supervisor::{StorageReadiness, SupervisorSet};
 
 use std::convert::Infallible;
 use std::io::Read;
@@ -281,25 +281,56 @@ impl Runtime {
                 vm_manager_index,
                 &mut self.supervisors,
             )?;
+            let mut storage_available = true;
             if let (Some(reader), Some(service)) = (ready_reader.as_ref(), ready_service) {
-                self.supervisors.wait_for_storage(
+                let readiness = self.supervisors.wait_for_storage(
                     manifest,
                     service,
                     reader,
                     self.launcher.authorities.console,
                 )?;
+                if let StorageReadiness::Unavailable(reason) = readiness {
+                    let _ = self
+                        .launcher
+                        .authorities
+                        .console
+                        .as_emergency_console()
+                        .write_all(reason.diagnostic());
+                    self.supervisors.stop_storage_provider(
+                        manifest,
+                        service,
+                        self.launcher.authorities.console,
+                    )?;
+                    storage_available = false;
+                    // A provider which failed before taking its offers must
+                    // not leave an unused readiness or broker peer alive.
+                    self.launcher.authorities.io_ready_channel.take();
+                    self.launcher.authorities.io_broker_server.take();
+                }
             }
             drop(ready_reader);
             if let Some((manager, path)) = vm_configuration {
                 let provisioner = self.provisioner.take().ok_or(LaunchError::InvalidPlan)?;
-                provisioner.configure_fleet(
-                    manifest,
-                    manager,
-                    path,
-                    &self.launcher.authorities.root_directory,
-                    self.launcher.authorities.console,
-                    &mut self.supervisors,
-                )?;
+                let configuration = if storage_available {
+                    provisioner.configure_fleet(
+                        manifest,
+                        manager,
+                        path,
+                        &self.launcher.authorities.root_directory,
+                        self.launcher.authorities.console,
+                        &mut self.supervisors,
+                    )?
+                } else {
+                    provisioner.configuration_unavailable(
+                        manifest,
+                        manager,
+                        self.launcher.authorities.console,
+                        &mut self.supervisors,
+                    )?
+                };
+                if configuration == FleetConfiguration::Unavailable {
+                    report::report_fleet_unavailable(self.launcher.authorities.console);
+                }
             }
             self.supervisors
                 .supervise(manifest, self.launcher.authorities.console)
@@ -326,37 +357,63 @@ pub(super) enum LaunchError {
     CriticalServiceTerminated,
     InvalidPlan,
     OperatingSystem,
+    RequiredServiceUnavailable,
+    ServiceUnavailable,
     StopRollbackFailed,
     UnsupportedAuthority,
     UnsupportedRestartPolicy,
     UnsupportedSupervisionGraph,
-    VmFleetConfigurationRejected,
     VmFleetReplyClosed,
     VmFleetReplyInvalid,
     VmProvisioningClosed,
-    StorageNotReady,
+    WaitTimedOut,
 }
 
 impl LaunchError {
+    fn service_operation(error: hyper_os::Error) -> Self {
+        if supervision::service_unavailable(&error) {
+            Self::ServiceUnavailable
+        } else {
+            Self::OperatingSystem
+        }
+    }
+
+    fn service_image(error: hyper_os::Error) -> Self {
+        if supervision::service_image_unavailable(&error) {
+            Self::ServiceUnavailable
+        } else {
+            Self::OperatingSystem
+        }
+    }
+
+    fn service_resources(error: hyper_os::Error) -> Self {
+        if supervision::service_resources_unavailable(&error) {
+            Self::ServiceUnavailable
+        } else {
+            Self::OperatingSystem
+        }
+    }
+
     const fn diagnostic(&self) -> &'static [u8] {
         match self {
             Self::AuthorityConsumed => b"HypeR init: service authority was already consumed\n",
             Self::CriticalServiceTerminated => b"HypeR init: critical service terminated\n",
             Self::InvalidPlan => b"HypeR init: invalid launch plan\n",
             Self::OperatingSystem => b"HypeR init: service launch operation failed\n",
+            Self::RequiredServiceUnavailable => b"HypeR init: startup provider unavailable\n",
+            Self::ServiceUnavailable => b"HypeR init: service image or resources unavailable\n",
             Self::StopRollbackFailed => b"HypeR init: service rollback failed\n",
             Self::UnsupportedAuthority => b"HypeR init: unsupported service authority\n",
             Self::UnsupportedRestartPolicy => b"HypeR init: unsupported restart policy\n",
             Self::UnsupportedSupervisionGraph => {
                 b"HypeR init: unsupported critical-service supervision graph\n"
             }
-            Self::VmFleetConfigurationRejected => b"HypeR init: VM fleet configuration rejected\n",
             Self::VmFleetReplyClosed => {
                 b"HypeR init: VM fleet result channel closed without a reply\n"
             }
             Self::VmFleetReplyInvalid => b"HypeR init: VM fleet configuration reply is invalid\n",
             Self::VmProvisioningClosed => b"HypeR init: VM provisioning channel closed\n",
-            Self::StorageNotReady => b"HypeR init: storage readiness failed or timed out\n",
+            Self::WaitTimedOut => b"HypeR init: service handshake timed out\n",
         }
     }
 
@@ -366,15 +423,16 @@ impl LaunchError {
             Self::CriticalServiceTerminated => b"critical service terminated",
             Self::InvalidPlan => b"invalid launch plan",
             Self::OperatingSystem => b"kernel operation rejected",
+            Self::RequiredServiceUnavailable => b"startup provider unavailable",
+            Self::ServiceUnavailable => b"service image or resources unavailable",
             Self::StopRollbackFailed => b"rollback failed",
             Self::UnsupportedAuthority => b"unsupported authority",
             Self::UnsupportedRestartPolicy => b"unsupported restart policy",
             Self::UnsupportedSupervisionGraph => b"unsupported supervision graph",
-            Self::VmFleetConfigurationRejected => b"VM fleet configuration rejected",
             Self::VmFleetReplyClosed => b"VM fleet result channel closed without a reply",
             Self::VmFleetReplyInvalid => b"VM fleet configuration reply is invalid",
             Self::VmProvisioningClosed => b"VM provisioning channel closed",
-            Self::StorageNotReady => b"storage not ready",
+            Self::WaitTimedOut => b"service handshake timed out",
         }
     }
 }

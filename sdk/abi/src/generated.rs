@@ -194,10 +194,21 @@ pub const HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_PATH: u64 = 1;
 pub const HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_COMPATIBLE: u64 = 2;
 pub const HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_REGISTERS: u64 = 3;
 pub const HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_PROPERTY: u64 = 4;
+pub const HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_PROPERTY_NAMES: u64 = 5;
 pub const HYPER_NATIVE_DEVICE_PROFILE_VIRTIO_MMIO_SCSI: u64 = 1;
 pub const HYPER_NATIVE_DEVICE_PROFILE_USERSPACE: u64 = 2;
+pub const HYPER_NATIVE_DEVICE_PROFILE_VIRTIO_MMIO_NET: u64 = 3;
+pub const HYPER_NATIVE_DEVICE_PROFILE_PCI_FUNCTION: u64 = 4;
+pub const HYPER_NATIVE_DEVICE_PCI_APERTURE_SIZE: u64 = 8388608;
+pub const HYPER_NATIVE_DEVICE_RESOURCE_PCI_ECAM: u64 = 256;
+pub const HYPER_NATIVE_DEVICE_RESOURCE_PCI_MSI: u64 = 257;
+pub const HYPER_NATIVE_DEVICE_RESOURCE_PCI_BAR0: u64 = 512;
+pub const HYPER_NATIVE_DEVICE_RESOURCE_MEMORY_64: u64 = 1;
+pub const HYPER_NATIVE_DEVICE_RESOURCE_PREFETCHABLE: u64 = 2;
+pub const HYPER_NATIVE_DEVICE_ASSIGNMENT_MAX_DEVICES: u64 = 4;
 pub const HYPER_NATIVE_DEVICE_IDENTITY_COMPATIBLE: u64 = 1;
 pub const HYPER_NATIVE_DEVICE_IDENTITY_FDT_PATH: u64 = 2;
+pub const HYPER_NATIVE_DEVICE_IDENTITY_PCI_ID: u64 = 3;
 pub const HYPER_NATIVE_IO_MAX_CLIENTS: u64 = 9;
 pub const HYPER_NATIVE_GUEST_NOTIFICATION_DISCONNECT: u64 = 3;
 pub const HYPER_NATIVE_GUEST_DYNAMIC_ALIAS_OFFSET: u64 = 68719476736;
@@ -276,6 +287,8 @@ pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_USER_MMIO_SIZE: u64 = 
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_SIZE: u64 = 4096;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_INTERRUPT: u64 = 33;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_TIMER_INTERRUPT: u64 = 27;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_INTERRUPT_COUNT: u64 = 256;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_DEVICE_INTERRUPT_BASE: u64 = 40;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_RISCV64_REFERENCE: u64 = 2;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_RISCV64_REFERENCE_GUEST_RAM_BASE: u64 = 2147483648;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_RISCV64_REFERENCE_DTB_OFFSET: u64 = 65536;
@@ -531,20 +544,20 @@ pub const HYPER_NATIVE_DEVICE_PROFILE_INFO_MIN_SIZE: usize = 32;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeDeviceProfileInfo {
     pub profile: u32,
-    pub reserved0: u32,
+    pub interrupt_count: u32,
     pub resource_count: u32,
-    pub reserved1: u32,
-    pub reserved2: u64,
-    pub reserved3: u64,
+    pub pci_identity: u32,
+    pub dma_bus_offset: u64,
+    pub aperture_size: u64,
 }
 const _: () = assert!(core::mem::size_of::<HyperNativeDeviceProfileInfo>() == 32);
 const _: () = assert!(core::mem::align_of::<HyperNativeDeviceProfileInfo>() == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, profile) == 0);
-const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, reserved0) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, interrupt_count) == 4);
 const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, resource_count) == 8);
-const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, reserved1) == 12);
-const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, reserved2) == 16);
-const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, reserved3) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, pci_identity) == 12);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, dma_bus_offset) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, aperture_size) == 24);
 
 pub const HYPER_NATIVE_DEVICE_FIRMWARE_QUERY_MIN_SIZE: usize = 24;
 #[repr(C)]
@@ -601,18 +614,18 @@ pub const HYPER_NATIVE_DEVICE_RESOURCE_INFO_MIN_SIZE: usize = 32;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeDeviceResourceInfo {
     pub kind: u32,
-    pub reserved: u32,
+    pub flags: u32,
     pub offset: u64,
     pub length: u64,
-    pub reserved2: u64,
+    pub bus_address: u64,
 }
 const _: () = assert!(core::mem::size_of::<HyperNativeDeviceResourceInfo>() == 32);
 const _: () = assert!(core::mem::align_of::<HyperNativeDeviceResourceInfo>() == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceResourceInfo, kind) == 0);
-const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceResourceInfo, reserved) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceResourceInfo, flags) == 4);
 const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceResourceInfo, offset) == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceResourceInfo, length) == 16);
-const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceResourceInfo, reserved2) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceResourceInfo, bus_address) == 24);
 
 pub const HYPER_NATIVE_PHYSICAL_DEVICE_INFO_MIN_SIZE: usize = 16;
 #[repr(C)]

@@ -90,12 +90,12 @@ fn build_device_tree(
     plan: &linux::BootPlan,
     boot_arguments: &str,
     metadata: GuestHardwareMetadata,
-    disk: bool,
+    devices: u32,
 ) -> Result<(), Error> {
     let mut structure = [0u8; 8192];
     let mut strings = [0u8; 2048];
     let mut output = [0u8; 12 * 1024];
-    let length = if disk {
+    let length = if devices != 0 {
         let GuestHardwareMetadata::Aarch64 { gic_version } = metadata else {
             return Err(Error::UnsupportedConfiguration);
         };
@@ -109,11 +109,20 @@ fn build_device_tree(
                 boot_arguments,
             },
             guest_fdt::io::IoDevices {
-                virtio: Some(guest_fdt::io::MmioDevice {
-                    base: hyper_service::io::FRONTEND_MMIO,
-                    size: 4096,
-                    irq: hyper_service::io::FRONTEND_IRQ,
-                }),
+                virtio: (devices & hyper_service::io::DISK != 0).then_some(
+                    guest_fdt::io::MmioDevice {
+                        base: hyper_service::io::FRONTEND_MMIO,
+                        size: 4096,
+                        irq: hyper_service::io::FRONTEND_IRQ,
+                    },
+                ),
+                network: (devices & hyper_service::io::NETWORK != 0).then_some(
+                    guest_fdt::io::MmioDevice {
+                        base: hyper_service::io::FRONTEND_NET_MMIO,
+                        size: 4096,
+                        irq: hyper_service::io::FRONTEND_NET_IRQ,
+                    },
+                ),
                 ..guest_fdt::io::IoDevices::empty()
             },
             &mut structure,
@@ -147,7 +156,7 @@ pub(super) fn prepare_guest_memory(
     image: hyper_vm_image::ConfiguredImage,
     plan: &linux::BootPlan,
     metadata: GuestHardwareMetadata,
-    with_disk: bool,
+    devices: u32,
     started: std::time::Instant,
 ) -> Result<WritableVmo, Error> {
     let memory = WritableVmo::create(plan.memory_size()).map_err(Error::OperatingSystem)?;
@@ -165,7 +174,7 @@ pub(super) fn prepare_guest_memory(
         plan,
         image.boot_arguments.as_str(),
         metadata,
-        with_disk,
+        devices,
     )?;
     #[cfg(feature = "startup-profile")]
     eprintln!(

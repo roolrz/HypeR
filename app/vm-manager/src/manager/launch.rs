@@ -5,7 +5,7 @@
 
 use super::{
     FleetManager,
-    instance::{DiskAdmission, VmInstance},
+    instance::{IoAdmission, VmInstance},
 };
 use hyper_os::capability_channel::CapabilityChannel;
 use hyper_os::channel;
@@ -20,6 +20,9 @@ const RUNTIME_ARGUMENT: &str = "/svc/vm-runtime";
 
 impl FleetManager {
     pub(super) fn start_instance(&mut self, vm: usize) -> Result<(), String> {
+        self.configuration
+            .check_admission()
+            .map_err(str::to_owned)?;
         if self.machines[vm].instance.is_some() {
             return Err("VM is already active".into());
         }
@@ -39,6 +42,10 @@ impl FleetManager {
 
     fn launch_instance(&mut self, vm: usize) -> hyper_os::Result<()> {
         let definition = &self.machines[vm];
+        let connection = definition
+            .definition
+            .io_connection()
+            .map_err(|_| hyper_os::Error::InvalidResponse)?;
         let domain = create_resource_domain(
             self.fleet_domain.as_handle_ref(),
             hyper_vm_policy::VM_INSTANCE_LIMITS,
@@ -58,6 +65,9 @@ impl FleetManager {
         )?;
         builder.set_name("vm-runtime")?;
         builder.add_argument(RUNTIME_ARGUMENT)?;
+        if let Some(connection) = connection {
+            builder.add_argument(&format!("--io-devices={}", connection.devices()))?;
+        }
         for argument in definition
             .definition
             .configuration
@@ -117,7 +127,7 @@ impl FleetManager {
                 ),
             )
             .map_err(|failure| failure.error())?;
-        let disk_admission = if let Some(disk) = &definition.definition.disk {
+        let io_admission = if let Some(connection) = connection {
             self.io_service
                 .as_ref()
                 .ok_or(hyper_os::Error::MissingHandle)?;
@@ -129,9 +139,10 @@ impl FleetManager {
                     RightsOffer::Exact(hyper_service::io::SESSION_RIGHTS),
                 )
                 .map_err(|failure| failure.error())?;
-            let record = hyper_service::io::encode_connect(disk.client, &disk.volume)
+            let record = connection
+                .encode()
                 .ok_or(hyper_os::Error::InvalidResponse)?;
-            Some(DiskAdmission {
+            Some(IoAdmission {
                 endpoint: Some(owner.into_handle()),
                 record,
             })
@@ -148,7 +159,7 @@ impl FleetManager {
             console_connection,
             policy: InstancePolicy::default(),
             observation_sequence: 0,
-            disk_admission,
+            io_admission,
         });
         self.machines[vm].policy.started();
         Ok(())

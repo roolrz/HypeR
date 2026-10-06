@@ -71,8 +71,8 @@ Set `configuration.vcpus` to `4` for a four-vCPU VM; the ITB is reusable without
 repacking. The runtime places initramfs at the top of configured RAM and validates
 kernel, initramfs and generated DTB ranges before allocating memory.
 `allocated VM backing` measures resident physical backing, not memory used
-inside Linux. Attaching an I/O-backed disk currently populates the guest's
-entire RAM VMO. See [I/O allocation and zero-copy](io-vm.md#allocation-and-zero-copy-scope)
+inside Linux. Attaching an I/O-backed disk or network currently populates the
+guest's entire RAM VMO. See [I/O allocation and zero-copy](io-vm.md#allocation-and-zero-copy-scope)
 for the allocation policy and [memory observations](io-vm.md#memory-observations-and-queue-overhead)
 for shared-memory accounting and queue costs.
 Guest PSCI poweroff stops the instance cleanly; guest reboot creates a fresh
@@ -101,7 +101,8 @@ The VM file contains definitions, not service capabilities:
         "memory-bytes": 268435456,
         "bootargs": "console=ttyAMA0 rdinit=/init loglevel=7 hyper.root=/dev/sda"
       },
-      "disk": { "client": 1, "volume": "alpine" }
+      "disk": { "client": 1, "volume": "alpine" },
+      "network": { "client": 1, "network": "default", "mac": "02:48:59:00:00:01" }
     }
   ]
 }
@@ -113,13 +114,19 @@ components or control characters. Unknown fields are errors. The manager validat
 and opens every image before publishing a batch of definitions. If autostart
 fails afterward, the definitions remain visible with the failed VM state.
 
+Disk and network are optional. When both are present, they must use the same
+I/O client. The complete client, volume, network and MAC binding must match
+the board's bootstrap policy. The example above is the runtime format; board
+JSON assigns client IDs when generating these definitions.
+
 VM configuration is managed at deployment time. Board images provide
 `/data/vms.json`; update the board's VM definitions before building the image.
 `vmm create` and `vmm delete` only change the running manager and do not persist
 across reboot. `vmm create NAME --config FILE` reads that named definition from
-FILE; `--from SOURCE` copies another named definition under NAME. Disk assignments
-and all runtime settings are copied together; `--start` starts the new instance.
-Exclusive disk assignments cannot be shared by two definitions. Native test images
+FILE; `--from SOURCE` copies another named definition under NAME. Disk/network
+assignments and all runtime settings are copied together; `--start` starts the
+new instance. Two definitions cannot share an I/O client, an exclusive disk
+volume or a network MAC address. Native test images
 use `app/init/tests/config/vms.json` (or `vms-riscv64.json`).
 
 The `vcpus`, `memory-bytes` and `bootargs` fields are required. `bootargs` may be empty and is
@@ -152,7 +159,10 @@ any vCPU starts, including for I/O VMs. A mask rejected by the host (for example
 one containing no schedulable CPU) fails startup. `vmm affinity` can still change
 the current instance; restarting reapplies the saved definition's defaults.
 For board deployments, edit the board JSON's VM `configuration` or `io-vm`
-object; generated configuration files and ITBs need no manual edits.
+object; generated configuration files and ITBs need no manual edits. Ordinary
+builds preserve an existing disk, including `/data/vms.json`; see
+[updating existing deployments](board-storage.md#updating-existing-deployments)
+to apply a changed configuration.
 
 Migration: rebuild old ITBs with the current packer and add `configuration` to
 existing JSON definitions. The v2 ITB contract rejects v1 bundles and embedded
@@ -162,7 +172,12 @@ Init waits for the manager to accept the complete fleet configuration, including
 an empty fleet or definitions with no autostart VMs. It continues supervising
 the manager as a critical service. Every guest lifecycle belongs to the manager:
 an autostart or later runtime failure marks that VM failed without stopping init
-or unrelated guests. Configuration admission errors still fail system startup.
+or unrelated guests. Unavailable storage or rejected fleet configuration leaves
+the Native services running. The manager continues answering inspection requests
+but rejects VM creation and startup until a subsequent boot supplies a valid
+configuration. Critical service termination and malformed provisioning protocol
+still fail bootstrap; configuration unavailability is an explicit init request,
+not an implicit interpretation of a closed channel.
 
 ## Validation
 

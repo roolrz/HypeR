@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod broker;
+mod physical_network;
 mod storage;
 
 use hyper_io_runtime::guest_log::GuestLog;
 use hyper_os::guest_io::Mailbox;
-use hyper_os::handle::{GuestMailboxObject, VirtualMachineObject};
+use hyper_os::handle::{ByteChannelObject, GuestMailboxObject, OwnedHandle, VirtualMachineObject};
 use hyper_os::startup::{self, Startup};
 use hyper_os::wait::{self, ObjectSignals, WaitItem};
 use hyper_os::{device, vm};
@@ -14,8 +15,10 @@ use hyper_vm_image::guest_fdt::{
     GuestHardwareMetadata,
     io::{DmaRange, IoDevices, MmioDevice, MmioWindow, SdhciDevice, SdhciRevision},
 };
+use hyper_vm_support::io_guest::PhysicalAssignment;
 use hyper_vm_support::io_guest::{self, Image, InstalledGuest, PHYSICAL_MMIO, RAM_BASE, RAM_BYTES};
 use hyper_vm_support::io_protocol::{Command, MAX_RECORD, Reply, Request, Status};
+use physical_network::PhysicalNetwork;
 use std::io;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -44,17 +47,17 @@ fn check_deadline(limit: u64) -> Result<()> {
     }
 }
 
-fn run(startup: &mut Startup<'_>) -> Result<()> {
+fn run(
+    startup: &mut Startup<'_>,
+    readiness: &mut Option<OwnedHandle<ByteChannelObject>>,
+) -> Result<()> {
     let config = hyper_io_runtime::config::Config::load("/etc/hyper/board.json")?;
-    let ready = startup
-        .take_optional(hyper_service::io::READY)
-        .map_err(show)?;
     let mut broker = startup
         .take_optional(hyper_service::io::BROKER_SERVER)
         .map_err(show)?
         .map(broker::Broker::load)
         .transpose()?;
-    if broker.is_some() && ready.is_none() {
+    if broker.is_some() && readiness.is_none() {
         return Err("I/O broker requires managed storage readiness".into());
     }
     let authority = startup
@@ -76,10 +79,15 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
                 .map_err(show)?;
             (physical, None)
         }
+        device::Profile::VirtioMmioNet | device::Profile::PciFunction => {
+            return Err("network controller selected for storage".into());
+        }
     };
     let profile = device::profile_info(physical.as_handle_ref()).map_err(show)?;
-    let mut client = ready
-        .map(|ready| storage::NativeStorage::prepare(authority, ready))
+    let network = PhysicalNetwork::claim(authority, config.network_device())?;
+    let mut client = readiness
+        .as_ref()
+        .map(|_| storage::NativeStorage::prepare(authority))
         .transpose()?;
     let image = Image::load(config.definition())?;
     if image.plan.memory_size() != RAM_BYTES {
@@ -127,7 +135,7 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
         size: host.size,
         irq: 40,
     };
-    let (physical_node, sdhci) = match (profile.profile, sdhci_profile) {
+    let (storage_node, sdhci) = match (profile.profile, sdhci_profile) {
         (device::Profile::VirtioMmioScsi, None) if profile.resource_count == 1 => {
             (Some(host), None)
         }
@@ -152,42 +160,56 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
         ),
         _ => return Err("invalid physical resource bundle".into()),
     };
-    if let Some(client) = client.as_ref() {
-        let mut descriptions = vec![client.description()];
-        let mut dma_ranges = vec![own_dma, client.dma_range()];
-        if let Some(broker) = broker.as_ref() {
-            descriptions.extend(broker.descriptions());
-            dma_ranges.extend(broker.dma_ranges(&dma_ranges)?);
+    network.with_description(|network_node, pci| -> Result<()> {
+        if let Some(client) = client.as_ref() {
+            let mut descriptions = vec![client.description()];
+            let mut dma_ranges = vec![own_dma, client.dma_range()];
+            if let Some(broker) = broker.as_ref() {
+                descriptions.extend(broker.descriptions());
+                dma_ranges.extend(broker.dma_ranges(&dma_ranges)?);
+            }
+            image.device_tree(
+                gic_version,
+                IoDevices {
+                    clients: &descriptions,
+                    virtio: storage_node,
+                    network: network_node,
+                    pci,
+                    sdhci,
+                    dma_ranges: &dma_ranges,
+                    ..IoDevices::empty()
+                },
+            )
+        } else {
+            image.device_tree(
+                gic_version,
+                IoDevices {
+                    clients: &[],
+                    virtio: storage_node,
+                    network: network_node,
+                    pci,
+                    sdhci,
+                    dma_ranges: &[own_dma],
+                    mailbox: Some(MmioDevice {
+                        base: MAILBOX_MMIO,
+                        size: 4096,
+                        irq: 41,
+                    }),
+                    ..IoDevices::empty()
+                },
+            )
         }
-        image.device_tree(
-            gic_version,
-            IoDevices {
-                clients: &descriptions,
-                virtio: physical_node,
-                sdhci,
-                dma_ranges: &dma_ranges,
-                ..IoDevices::empty()
-            },
-        )?;
-    } else {
-        image.device_tree(
-            gic_version,
-            IoDevices {
-                clients: &[],
-                virtio: physical_node,
-                sdhci,
-                dma_ranges: &[own_dma],
-                mailbox: Some(MmioDevice {
-                    base: MAILBOX_MMIO,
-                    size: 4096,
-                    irq: 41,
-                }),
-                ..IoDevices::empty()
-            },
-        )?;
-    }
+    })?;
     let grant = vm::create_guest_memory(image.memory.as_handle_ref()).map_err(show)?;
     let mappings = client.as_ref().map(|client| client.mapping());
+    let mut assignments = vec![PhysicalAssignment {
+        device: physical.as_handle_ref(),
+        base: PHYSICAL_MMIO,
+        irq: 40,
+    }];
+    if let Some(assignment) = network.assignment() {
+        assignments.push(assignment);
+    }
     let mut guest = io_guest::install_mapped(
         startup,
         &image,
@@ -203,7 +225,7 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
                     0
                 }
         },
-        Some(&physical),
+        &assignments,
         0xd000_0000,
     )?;
     drop(grant);
@@ -254,6 +276,7 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
             &mut guest_log,
             client.as_mut(),
             broker.as_mut(),
+            readiness,
         )
     })();
     if let Err(error) = &outcome {
@@ -296,6 +319,7 @@ fn supervise(
     guest_log: &mut GuestLog,
     mut client: Option<&mut storage::NativeStorage>,
     mut broker: Option<&mut broker::Broker>,
+    readiness: &mut Option<OwnedHandle<ByteChannelObject>>,
 ) -> Result<()> {
     // HELLO has no DMA/queue side effects. There is deliberately no periodic
     // health request once the backend acknowledges its startup contract.
@@ -330,6 +354,15 @@ fn supervise(
                             guest_log,
                             reply.features.ok_or("HELLO omitted features")?,
                         )?;
+                        readiness
+                            .as_ref()
+                            .ok_or("readiness capability already consumed")?
+                            .as_byte_channel()
+                            .send(hyper_service::io::READY_MESSAGE)
+                            .map_err(show)?;
+                        // Only successful publication releases the outer
+                        // owner's EOF gate before steady supervision begins.
+                        drop(readiness.take());
                         println!("HypeR io-runtime: ready; configuration volume mounted at /data");
                     } else {
                         println!(
@@ -426,11 +459,22 @@ pub(super) fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match run(&mut startup) {
+    let mut readiness = match startup.take_optional(hyper_service::io::READY) {
+        Ok(readiness) => readiness,
+        Err(error) => {
+            eprintln!("HypeR io-runtime: failed: {error:?}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let status = match run(&mut startup, &mut readiness) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("HypeR io-runtime: failed: {error}");
             ExitCode::FAILURE
         }
-    }
+    };
+    // Closing READY tells init to abandon this provider. Queue the complete
+    // failure diagnostic first so its targeted stop cannot truncate the cause.
+    drop(readiness);
+    status
 }

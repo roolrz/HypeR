@@ -77,13 +77,11 @@ impl VmBinding {
         &self,
         access: hyper::vm::exit::MmioAccess,
     ) -> Option<hyper::vm::exit::MmioAction> {
-        let owner = self.machine.physical.with(|physical| {
-            physical
-                .as_ref()
-                .map(|physical| (physical.object(), physical.offset(access)))
-        });
-        let (object, offset) = owner?;
-        offset.map(|offset| object.object().access_at(offset, access))
+        let (object, offset) = self
+            .machine
+            .physical
+            .with(|physical| physical.mmio_owner(access))?;
+        Some(object.object().access_at(offset, access))
     }
     #[allow(
         dead_code,
@@ -99,21 +97,19 @@ impl VmBinding {
         &self,
         route: &crate::kernel::vm::io::Route,
     ) -> Result<(), crate::kernel::vm::io::Error> {
-        if self.machine.physical.with(|physical| {
-            physical
-                .as_ref()
-                .is_some_and(|physical| physical.irq() == route.irq())
-        }) {
+        if self
+            .machine
+            .physical
+            .with(|physical| physical.has_interrupt(route.irq()))
+        {
             return Err(crate::kernel::vm::io::Error::Busy);
         }
         self.machine.io_routes.can_insert(route)
     }
     pub(crate) fn owns_userspace_assignment_aperture(&self, base: u64, length: u64) -> bool {
-        self.machine.physical.with(|physical| {
-            physical
-                .as_ref()
-                .is_some_and(|assignment| assignment.owns_userspace_aperture(base, length))
-        })
+        self.machine
+            .physical
+            .with(|physical| physical.owns_userspace_aperture(base, length))
     }
     pub(crate) fn io_range_conflicts(&self, base: u64, length: u64) -> bool {
         self.machine.io_routes.conflicts(base, length)
@@ -429,7 +425,7 @@ pub(super) struct VirtualMachine {
     interrupts: VmInterruptController,
     devices: VirtualDeviceSet,
     physical: InterruptSpinLock<
-        Option<crate::kernel::device::assigned::Assignment>,
+        crate::kernel::device::assigned::AssignmentSet,
         crate::hal::irq::LocalMask,
     >,
     io_routes: crate::kernel::vm::io::Routes,
@@ -457,7 +453,7 @@ impl VirtualMachine {
             ),
             interrupts,
             devices,
-            physical: InterruptSpinLock::new(None),
+            physical: InterruptSpinLock::new(crate::kernel::device::assigned::AssignmentSet::new()),
             io_routes: crate::kernel::vm::io::Routes::new(),
             diagnostics: crate::kernel::vm::diagnostics::VmDiagnostics::new(),
             lifecycle,
@@ -554,38 +550,14 @@ impl VirtualMachine {
         super::super::device::quiesce(&self.devices)
     }
 
-    pub(super) fn set_physical(
-        &self,
-        physical: Option<crate::kernel::device::assigned::Assignment>,
-    ) {
-        self.physical.with(|slot| *slot = physical);
-    }
-    pub(super) fn activate_physical(&self) -> Result<(), Error> {
-        let assignment = self
+    pub(super) fn set_physical(&self, physical: crate::kernel::device::assigned::AssignmentSet) {
+        let old = self
             .physical
-            .with(|slot| slot.as_ref().map(|assignment| assignment.object()));
-        if let Some(assignment) = assignment {
-            let irq = self
-                .physical
-                .with(|slot| slot.as_ref().map(|assignment| assignment.irq()))
-                .ok_or(Error::StaleIdentity)?;
-            assignment
-                .object()
-                .activate_for(self.id, irq)
-                .map_err(|_| Error::Allocation)?;
-        }
-        Ok(())
+            .with(|slot| core::mem::replace(slot, physical));
+        drop(old);
     }
-    pub(super) fn physical_owner(
-        &self,
-    ) -> Option<
-        crate::kernel::object::KernelRef<
-            crate::kernel::device::assigned::PhysicalDevice,
-            crate::kernel::object::VmDeviceBinding,
-        >,
-    > {
-        self.physical
-            .with(|slot| slot.as_ref().map(|assignment| assignment.object()))
+    pub(super) fn physical_owners(&self) -> crate::kernel::device::assigned::AssignmentOwners {
+        self.physical.with(|physical| physical.owners())
     }
     pub(super) fn close_io_routes(&self) {
         self.io_routes.close();

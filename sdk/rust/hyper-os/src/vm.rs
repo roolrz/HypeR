@@ -923,6 +923,13 @@ pub fn map_guest_memory(
 /// Fixed affine DMA alias window. Actual admitted pages remain constrained by
 /// the stable grant and the physical device's immutable DMA translation map.
 pub const IO_MAX_CLIENTS: usize = hyper_abi::HYPER_NATIVE_IO_MAX_CLIENTS as usize;
+
+/// `AArch64` reference GIC INTIDs, including SGIs and PPIs.
+pub const AARCH64_INTERRUPT_COUNT: u32 =
+    hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_INTERRUPT_COUNT as u32;
+/// First reference-platform INTID available for assigned devices and I/O routes.
+pub const AARCH64_DEVICE_INTERRUPT_BASE: u32 =
+    hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_DEVICE_INTERRUPT_BASE as u32;
 pub const DYNAMIC_ALIAS_OFFSET: u64 = hyper_abi::HYPER_NATIVE_GUEST_DYNAMIC_ALIAS_OFFSET;
 pub const DYNAMIC_PHYSICAL_LIMIT: u64 = hyper_abi::HYPER_NATIVE_GUEST_DYNAMIC_PHYSICAL_LIMIT;
 

@@ -3,9 +3,9 @@
 
 //! Per-VM runtime process entry.
 
-mod disk;
 mod error;
 mod image;
+mod io_devices;
 mod runtime;
 mod supervisor;
 

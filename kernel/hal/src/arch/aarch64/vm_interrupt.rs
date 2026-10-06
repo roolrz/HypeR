@@ -6,7 +6,8 @@
 use hyper::sync::InterruptSpinLock;
 use hyper::vm::arm::gic::ListEntry;
 use hyper::vm::arm::gic::mmio::{
-    DecodedRegister, ModelError, RegisterState, read_model_register, write_model_register,
+    DecodedRegister, INTERRUPT_COUNT, ModelError, RegisterState, read_model_register,
+    write_model_register,
 };
 use hyper::vm::arm::gic::{
     BuildError as VgicBuildError, GicInterruptId, InterruptGroup, InterruptSnapshot,
@@ -19,7 +20,7 @@ type ControllerLock = InterruptSpinLock<ControllerState, super::LocalInterruptMa
 
 const TIMER_PRIORITY: u8 = 0x80;
 const PRIVATE_ENTRIES_PER_VCPU: usize = 32;
-const SHARED_ENTRIES: usize = 32;
+const SHARED_ENTRIES: usize = INTERRUPT_COUNT as usize - PRIVATE_ENTRIES_PER_VCPU;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -108,7 +109,7 @@ impl VmInterruptController {
                 )?;
             }
         }
-        for id in 32..64 {
+        for id in 32..INTERRUPT_COUNT {
             builder.configure(
                 GicInterruptId::new(id).ok_or(Error::InvalidInterrupt)?,
                 VirtualCpuId::new(0),
