@@ -77,6 +77,18 @@ Hardware results currently establish Native boot, Linux appliance userspace
 and SD-backed configuration-directory reads on Pi 5 D0. A two-vCPU Alpine
 guest has also passed three secondary-CPU off/on cycles, ordinary reboot with
 a synced file preserved on its ext4 root, and ordinary poweroff while the I/O
-VM remained available. Those results precede the combined SDIO1/RP1 deployment.
-The new deployment, write durability under power loss, device-reset recovery
-and networking still need qualification.
+VM remained available. Those lifecycle results precede the combined SDIO1/RP1
+deployment. The combined deployment using the published Pi 5 I/O VM pin then
+completed 1 GiB Native/guest writes with readback and bidirectional guest TCP
+measurements on 2026-10-06; see the
+[exploratory survey](../README.md#exploratory-pi-5-io-measurements).
+Power-loss durability, device-reset recovery, physical DMA retirement and
+extended/concurrent load remain [deferred qualification](roadmap.md#deferred-hardware-qualification).
+The appliance lock retains `hardware_qualified: false`.
+
+The [manual hardware fixtures](../tests/hardware/storage/README.md) create
+separate development images under explicit output directories. They enlarge
+the test configuration partition and optionally add guest iperf3; they are not
+default build or distribution profiles. Their manifests record the actual
+source state and artifact hashes. Publishing such a test image would also
+require carrying its additional package inventory and license/source materials.

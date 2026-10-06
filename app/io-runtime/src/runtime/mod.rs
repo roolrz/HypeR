@@ -5,6 +5,10 @@ mod broker;
 mod physical_network;
 mod storage;
 
+#[cfg(feature = "physical-retirement-probe")]
+#[path = "../../tests/fixtures/physical_retirement.rs"]
+mod physical_retirement;
+
 use hyper_io_runtime::guest_log::GuestLog;
 use hyper_os::guest_io::Mailbox;
 use hyper_os::handle::{ByteChannelObject, GuestMailboxObject, OwnedHandle, VirtualMachineObject};
@@ -369,6 +373,8 @@ fn supervise(
                             "HypeR io-runtime: ready; storage backend idle (no client attached)"
                         );
                     }
+                    #[cfg(feature = "physical-retirement-probe")]
+                    physical_retirement::arm()?;
                 }
                 Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {}
                 Err(error) => return Err(show(error)),

@@ -21,6 +21,7 @@ bench = false
 storage-probe = []
 broker-test = []
 userspace-device-test = []
+physical-retirement-probe = []
 
 [[bin]]
 name = "hyper-storage-probe"

@@ -103,39 +103,91 @@ DHCP and outbound HTTP through the I/O VM, validated with GICv2 and GICv3.
 RISC-V runs Native init,
 shell, std applications, and userspace-managed Linux guests on QEMU. x86-64 currently has build and image validation only.
 
-Pi 5 D0 hardware has booted the Native shell and Linux I/O VM, and read its
-SD-backed FAT volume through `/data`. A two-vCPU Alpine guest has passed CPU
-off/on cycles, reboot with file persistence, and poweroff on hardware. These
-results precede the combined SDIO1/RP1 deployment. That deployment, write
-durability, networking and device-reset recovery remain under qualification.
+Pi 5 D0 hardware has booted the Native shell and Linux I/O VM. The combined
+SDIO1/RP1 deployment has completed 1 GiB Native FAT and Alpine ext4 writes with
+full readback checks, plus bidirectional guest TCP measurements through RP1.
+Earlier two-vCPU Alpine tests passed CPU off/on cycles, reboot with file
+persistence, and poweroff. Power-loss durability, concurrent I/O stress and
+physical device retirement/recovery still require hardware qualification.
 
 The Native ABI is pre-release. Broad hardware support, general-purpose virtual
 I/O, device assignment, and transactional multi-vCPU reconfiguration remain unfinished.
 See [implementation status](docs/status.md) and the [roadmap](docs/roadmap.md).
 
+## Exploratory Pi 5 I/O measurements
+
+**2026-10-06: an initial performance survey, for reference only.** This was an
+informal development setup, not a controlled benchmark. Each case was run once;
+card identity/state, filesystem and mount settings, available RAM, thermal/clock
+conditions and network filtering were not fully standardized or recorded. These
+numbers compare complete deployments, not isolated hypervisor overhead, and do
+not establish production readiness or power-loss durability.
+
+The tests used physical Raspberry Pi 5 hardware and separate SD cards for HypeR
+and native Raspbian. HypeR Native accessed FAT32 at `/data`; Alpine accessed its
+ext4 root disk through virtio-scsi and the Linux I/O VM. Raspbian used its existing
+filesystem. Alpine had two vCPUs and 256 MiB RAM; the I/O VM had one vCPU and
+128 MiB. The HypeR test image was based on `b7022b6` with local test fixtures and
+the digest-pinned Pi 5 appliance from I/O VM source `c8ec02adbb8f`.
+
+Storage used the same deterministic **1 GiB** workload: 128 KiB sequential
+writes followed by a volume sync. Throughput and total time include the sync;
+full readback verification follows outside the timed interval. All Native,
+guest and Raspbian sequential write/readback checks passed. The 4 KiB case used
+128 overwrites with a volume sync after every write, at application queue depth
+one; its IOPS are synchronous-write IOPS, not ordinary buffered or raw-disk IOPS.
+
+| Storage measurement | Native Raspbian | HypeR Native | Alpine guest on HypeR |
+| --- | ---: | ---: | ---: |
+| New-file sequential write (MiB/s) | 24.76 | 8.82 | 23.34 |
+| New-file write total (s) | 41.36 | 116.13 | 43.87 |
+| Existing-file overwrite (MiB/s) | 25.48 | 14.35 | 23.09 |
+| Overwrite total (s) | 40.19 | 71.37 | 44.34 |
+| 4 KiB write + volume sync (IOPS) | 175.54 | 103.60 | 93.07 |
+| Synchronous-write mean latency (ms) | 5.70 | 9.65 | 10.74 |
+| Synchronous-write P95 latency (ms) | 13.00 | 12.44 | 12.18 |
+| Synchronous-write P99 latency (ms) | 32.60 | 12.47 | 23.42 |
+
+For networking, the same Mac ran iperf3 3.22 as the client, with Raspbian or the
+Alpine guest as the server. Alpine ran Linux `6.18.36-0-virt` and iperf3 3.19.1.
+Each TCP case used a 2-second warm-up and a 15-second measurement, with one or
+four connections. Values are aggregate receiver-reported decimal Mbit/s.
+Mac-to-Pi connections and their return traffic were permitted by the network
+policy. The peer, network path and filtering are part of these measurements.
+
+| TCP direction | Connections | Native Raspbian (Mbit/s) | Alpine guest (Mbit/s) | Guest / Raspbian |
+| --- | ---: | ---: | ---: | ---: |
+| Mac -> Pi | 1 | 926.99 | 843.29 | 91.0% |
+| Mac -> Pi | 4 | 926.25 | 817.71 | 88.3% |
+| Pi -> Mac | 1 | 935.89 | 296.69 | 31.7% |
+| Pi -> Mac | 4 | 934.78 | 287.53 | 30.8% |
+
+HypeR Native networking is not implemented and was not measured. Storage and
+network tests ran separately; concurrent load and fault tests are still pending.
+The [storage procedure](tests/hardware/storage/README.md) and
+[network exercise](tests/hardware/network/README.md) describe the tools and
+collection commands. These are manual hardware measurements, not QEMU results
+or CI performance thresholds. Default builds and images do not compile or
+package the measurement tools; the explicit preparation scripts create
+separate test images.
+
 ## Near-term roadmap
 
-**Run HypeR on Raspberry Pi 5 with a trimmed, trusted Linux I/O VM as its
-network and block-device backend.** Linux drives the physical devices; HypeR
-Native services remain the host application runtime. Storage uses standard
-virtio-scsi with Linux vhost-scsi/LIO.
+Basic Pi 5 bring-up, Native and guest storage, guest networking, and the first
+performance survey are complete. The next priorities are:
 
-- [x] Implement host GICv2 and Pi 5 debug-UART support; validate in QEMU.
-- [x] Boot the Native shell on Pi 5 with four CPUs, timer and debug-UART input.
-- [x] Add GICv2 guest interrupts, Arm guest SMP and runtime-managed guest power control.
-- [x] Validate guest SMP, CPU hotplug, reboot and poweroff on Pi 5 (two-vCPU Alpine).
-- [x] Boot the Linux I/O VM on physical Pi 5 and reach Linux userspace.
-- [x] Publish the complete appliance from [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm)
-  and consume a digest-pinned package; HypeR owns apps and DTS/DTB.
-- [x] Verify cross-VM virtio-scsi/vhost I/O against a real QEMU disk.
-- [x] Mount and read the SD-backed configuration volume through the Pi 5 I/O VM.
-- [x] Implement guest virtio-net with an independent Linux vhost-net/TAP backend.
-- [x] Verify QEMU guest DHCP, HTTP integrity, network reset and VM restart with GICv2/GICv3.
-- [x] Publish and pin matching protocol version 3 appliances.
-- [x] Assign the RP1 PCI function to Linux through generic PCI/BAR/MSI mediation.
-- [ ] Qualify storage writes, durability and physical DMA retirement.
-- [ ] Exercise guest networking and Native/guest storage on Pi 5, including failure handling
-  and performance measurements.
+- [ ] **Block and guest network performance tuning, on a best-effort basis.**
+  Measure and reduce overhead with focused changes, without major code or
+  architecture rework. Start with Native storage writes and guest network
+  transmit throughput, using the physical Pi 5/Raspbian survey as a reference.
+  Linux parity is not an acceptance requirement; performance tests stay manual.
+- [ ] **Security hardening around the I/O VM.** Refine capabilities into finer
+  device, resource and operation permissions. Add host-owned SMMU/IOMMU drivers
+  and DMA domains, including the applicable RP1/BCM2712 isolation mechanisms.
+  Establish coverage for each assigned device, including the separate SDHCI
+  path. The goal is to protect HypeR memory and authority from the I/O VM;
+  guests still depend on it for I/O. The current Pi 5 deployment remains a
+  trusted I/O VM configuration until that isolation is implemented and verified.
 
 See the [roadmap](docs/roadmap.md) for scope and acceptance criteria, and the
 [Pi 5 boot guide](kernel/docs/rpi5.md) for the recommended firmware setup.
