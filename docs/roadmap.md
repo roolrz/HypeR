@@ -7,137 +7,160 @@ SPDX-License-Identifier: Apache-2.0
 
 [Project overview](../README.md)
 
-## Current goal: a Linux I/O backend on Raspberry Pi 5
+## Near-term priorities
 
-The near-term milestone is an end-to-end system on **physical Raspberry Pi 5**:
-HypeR runs Native applications and a trimmed Linux I/O VM; Linux drives the
-physical network and storage devices, exposing storage to Native clients and
-guests and networking to guest VMs over shared memory and event-driven
-notifications. The Native network endpoint is reserved for later use. Storage uses standard virtio-scsi
-with Linux vhost-scsi/LIO. QEMU remains the regression platform. Hardware
-bring-up is part of this milestone, not a follow-up after the backend is done.
+The Pi 5 functional bring-up and initial I/O performance survey are complete.
+The current phase focuses on **best-effort block and guest network performance
+tuning** and **security hardening around the I/O VM**. Extended hardware
+qualification is retained in the [deferred TODO](#deferred-hardware-qualification),
+not a prerequisite for starting this phase.
 
-### Architecture decisions
+### 1. Block and guest network performance
 
-- **Linux is a trusted I/O VM.** It supplies the device-driver ecosystem, while
-  HypeR remains the host kernel and owns scheduling, memory, capabilities and VM
-  lifecycle.
-- **Physical devices are driven directly by Linux.** Device assignment must
-  describe MMIO, interrupts, DMA addressing, firmware dependencies and reset
-  ownership. An emulated device backed by a host driver is not this milestone.
-- **Use standard storage queues.** Modern virtio-mmio and virtio-scsi define
-  the guest interface; Linux vhost-scsi/LIO consumes the shared virtqueues.
-  HypeR owns device negotiation, memory grants and event routing. Cross-VM
-  setup must not forward individual requests through management services.
-  Define version negotiation, buffer grants and event-driven notification.
-  Design the data path for zero-copy where ownership, alignment and DMA rules
-  allow it; measure remaining copies. A copy-first transport is not a required
-  architectural stage.
-- **Deliver Linux as an independent appliance.**
-  [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm) owns the upstream LTS
-  source lock, kernel configuration, external `.ko` drivers, Linux-side
-  services, complete initramfs, tests and GHCR publication. Linux stays
-  unmodified upstream. HypeR owns Native apps, DTS/DTB and launch policy;
-  it imports a fixed package digest and does not build or patch the Linux rootfs.
-  Each release carries matching source materials and notices.
-- **Memory ownership is explicit.** A submitted buffer remains owned by the
-  in-flight operation until completion or proven device quiescence. Define
-  cache visibility, barriers, cancellation and queue generations before reuse.
-  A crashed VM does not prove that physical DMA has stopped.
-- **Pi 5 initially uses a trusted-driver model.** Exclude HypeR-owned RAM from
-  Linux's allocatable memory and reserve shared/device-visible ranges explicitly.
-  Retain stage-2 CPU access controls. Reservation is an allocation contract, not
-  DMA isolation; this milestone does not claim containment of malicious Linux.
-  IOMMU-backed untrusted device domains remain a later hardening goal.
-- **Keep the VFS boundary intact.** Namespace, open-file semantics and cache
-  policy stay in HypeR; ramfs remains entirely in the kernel. Linux exports block
-  I/O rather than taking ownership of HypeR's VFS. Give HypeR exclusive ownership
-  of each exported block range; Linux must not independently mount or modify it.
-  Define completion/flush durability and cache invalidation across reconnects.
+Improve the existing paths without major code or architecture changes. Use
+focused profiling, tuning and local refactoring where measurements justify
+them. Work on a best-effort basis, with no required Linux parity or fixed
+throughput target; changes that need a substantial redesign belong in a
+separate proposal.
 
-Native apps and services remain first-class throughout this work, including
-independently deployed power and resource-policy services. The I/O VM supplies
-drivers, not a replacement for the Native application runtime. Keep existing
-app/std functionality and service supervision covered while adding backend
-capabilities; new privileged power operations require explicit Native authority.
+- [ ] Investigate Native storage write throughput and synchronous-write latency,
+  then reduce measured overhead in the existing block/VFS/backend path.
+- [ ] Investigate guest network transmit throughput, then tune the existing
+  virtio-net/vhost-net path and notification handling where useful.
+- [ ] Check read performance and guest network receive performance for useful
+  local improvements and regressions alongside those changes.
+- [ ] Record before/after throughput and latency on physical Pi 5, comparing
+  against native Raspbian with the manual storage and network tools. Keep
+  correctness checks and disclose differences in filesystem, card state,
+  workload and network setup. Do not add QEMU or CI performance thresholds.
 
-### Ordered milestones and to-do
+The [2026-10-06 survey](../README.md#exploratory-pi-5-io-measurements) supplies
+starting reference data, not a controlled benchmark or a diagnosis of the gaps.
+Each optimization should have measured benefit and preserve existing I/O,
+memory ownership and flush semantics. Report remaining gaps when further gains
+would require major rework. Native networking remains outside this phase.
 
-1. **Bring up the HypeR host on Pi 5.**
-   - [x] Implement host GICv2, adapt the dedicated PL011 debug UART, and remove
-     QEMU-specific early RAM/MMIO mapping assumptions.
-   - [x] Add QEMU GICv2 UP/SMP acceptance and document the official EEPROM/PSCI boot setup.
-   - [x] Validate physical boot, four online CPUs, timer-driven scheduling
-     and interrupt-driven debug-UART input on Pi 5 D0.
-   - [ ] Qualify prolonged idle/wakeup and load stress on hardware.
-2. **Boot the Linux I/O VM on Pi 5.**
-   - [x] Implement the GICv2 guest interrupt backend and its QEMU lifecycle tests.
-   - [x] Implement Arm guest SMP (1..8 CPUs) and runtime-mediated PSCI CPU
-     on/off, poweroff and reset; add GICv2/GICv3 QEMU acceptance.
-   - [ ] Qualify the minimal upstream LTS configuration for Pi 5 in HypeR-io-vm.
-   - [x] Publish the common appliance with corresponding source materials.
-   - [x] Release the separate Pi 5 build profile after Linux CI qualification.
-   - [x] Pin the common package and integrate Native deployment.
-   - [x] Adopt the separate Pi 5 package by immutable digest; hardware
-     requalification of that exact generation remains outstanding.
-   - [x] Provide board/guest device trees, RAM reservations and VM configuration
-     through the existing VMM and vm-runtime path.
-   - [x] Validate two-vCPU Alpine boot and console, three CPU off/on cycles,
-     ordinary reboot and poweroff on Pi 5 hardware.
-   - [ ] Stress timer/IPI wakeups and cross-core cache/TLB retirement on hardware.
-3. **Connect physical network and storage devices.**
-   - [x] Implement SDIO1 MMIO/IRQ and clock/pinctrl/GPIO resource validation,
-     exclusive Native bundle claims and Linux handoff.
-   - [x] Exercise the SD storage path on Pi 5 with HypeR-owned RAM excluded
-     from Linux's allocator; basic reads and guest persistence are recorded.
-   - [x] Assign the whole RP1 PCI function through generic PCI/BAR/MSI mediation; keep RP1 drivers in Linux.
-   - [ ] Qualify storage stress, DMA fault retirement and direct networking.
-4. **Expose I/O to Native clients and guest VMs.**
-   - [x] Validate the AArch64 QEMU cross-VM virtio-scsi/vhost-scsi baseline,
-     including a real disk, DMA translations, reset/rebind and VM retirement.
-   - [x] Integrate storage with ordinary Native service deployment and mount
-     the Pi 5 SD-backed configuration volume at `/data`; directory reads pass.
-   - [ ] Qualify SD writes and persistence across reboot.
-   - [x] Implement guest virtio-net with Linux vhost-net/TAP, shared client
-     memory ownership and independent storage/network reset epochs.
-   - [x] Validate the QEMU network profile with GICv2/GICv3: DHCP, HTTP payload
-     integrity, DNS/outbound HTTP, disk+network and network-only guests,
-     independent network reset, VM restart and memory-release acknowledgements.
-   - [x] Build, publish, import and pin protocol version 3 QEMU and Pi 5 appliances.
-   - [x] Integrate the storage backend and Native block frontend with kernel
-     VFS/FAT and the configuration-volume mount.
-   - [x] Reserve Native client zero for future networking without creating an
-     active Native link. Native network APIs are deferred.
-   - [ ] Prove teardown: fence sessions, fail outstanding requests, quiesce DMA
-     before releasing memory, and prevent stale completions after reconnect.
-5. **Qualify the complete system on physical Pi 5.**
-   - [ ] Run guest network traffic and Native/guest block read/write with data
-     verification, then concurrent I/O under memory and queue pressure.
-   - [ ] Test backend failure and shutdown. Restart is allowed only after device
-     quiescence/reset is established; otherwise keep affected memory pinned and
-     require recovery rather than recycling potentially DMA-visible pages.
-   - [ ] Record throughput, latency, CPU consumption and idle behavior alongside
-     reproducible build, deployment and test instructions.
+### 2. Capability and DMA isolation hardening
 
-The milestone is complete when Native clients use physical storage and guest
-VMs use physical network and storage through the Linux VM on Pi 5, correctness
-and failure tests pass, and
-measured results can be reproduced. A Linux boot banner or QEMU-only I/O is not
-sufficient. This is a development milestone, not a production-readiness claim.
+The goal is to protect HypeR's memory and authority from a faulty or compromised
+I/O VM. Guests using its storage or network backend still depend on that VM:
+this work does not promise guest I/O availability or trustworthy backend data
+after the backend is compromised. The current Pi 5 deployment still trusts the
+I/O VM; reserving HypeR RAM in Linux and restricting guest CPU mappings do not
+provide physical DMA isolation.
 
-See [Pi 5 bring-up](../kernel/docs/rpi5.md),
-[implementation status](status.md), [I/O VM delivery and integration](io-vm.md),
-and [VFS boundaries](../kernel/docs/vfs.md).
+- [ ] Refine capability scope and rights for device discovery, assignment,
+  MMIO/configuration access, interrupt control, reset and DMA mappings. Enforce
+  device/resource boundaries in the kernel and allow delegation only with the
+  same or reduced authority. Audit grants from init through io-runtime to the
+  I/O VM; board configuration alone is not an access-control boundary.
+- [ ] Introduce host-owned DMA domains and SMMU/IOMMU drivers on supported
+  hardware. Keep translation tables and isolation controls outside I/O VM
+  access. Admit only authorized RAM and shared buffers, with supported access
+  permissions, explicit mapping lifetimes and completed invalidation before
+  reuse. Unsupported hardware must report its actual isolation limits.
+- [ ] Implement the applicable RP1/BCM2712 DMA isolation mechanisms after
+  establishing their coverage and enforcement properties. Audit bus masters,
+  address aliases, bypass routes, PCI configuration/BAR access and MSI targets;
+  Linux must not be able to reprogram or bypass the host protection boundary.
+- [ ] Assess SDIO1/SDHCI separately from RP1. If an assigned device cannot be
+  contained by the available hardware, document that gap and select a different
+  ownership/access arrangement before claiming full I/O VM DMA containment.
+- [ ] Validate denied operations, restricted delegation and out-of-domain DMA
+  on supported paths, including the mapping lifecycle. Keep focused correctness
+  checks with each change; the extended fault and stress campaign below remains
+  deferred.
+
+Pi 5 hardware coverage must be established per path. Raspberry Pi's
+[Pi 5 device tree](https://github.com/raspberrypi/linux/blob/rpi-6.18.y/arch/arm64/boot/dts/broadcom/bcm2712-rpi-5-b.dts)
+associates `iommu5` with selected RP1 display/camera masters, and its Linux tree
+contains a platform-specific
+[BCM2712 IOMMU driver](https://github.com/raspberrypi/linux/blob/rpi-6.18.y/drivers/iommu/bcm2712-iommu.c).
+That does not establish protection for Ethernet, SDHCI or every DMA path exposed
+by assigning the whole RP1 function. The plan must not assume Pi 5 has a generic
+Arm SMMU covering all devices.
+
+The limited-change constraint above applies to performance tuning. Security
+hardening may require new drivers and changes to capability and assignment
+contracts; containment claims require evidence for the covered paths.
+
+## Completed foundation
+
+- [x] Boot HypeR on Pi 5 D0 with four CPUs, timer-driven scheduling and the
+  interrupt-driven debug UART; retain QEMU GICv2/GICv3 coverage.
+- [x] Run the Linux I/O VM on Pi 5 and consume independently published,
+  digest-pinned protocol version 3 appliances from
+  [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm).
+- [x] Provide board/guest device trees, RAM reservations and VM configuration;
+  validate two-vCPU Alpine boot, console, CPU off/on, ordinary reboot with a
+  synced file preserved, and poweroff on Pi 5.
+- [x] Hand SDIO1 resources and the RP1 PCI function to Linux with resource
+  validation and PCI/BAR/MSI mediation; keep physical device drivers in Linux.
+- [x] Mount the SD-backed `/data` volume through virtio-scsi/vhost-scsi and
+  integrate the Native block frontend with HypeR VFS/FAT.
+- [x] Implement guest virtio-net with Linux vhost-net/TAP and independent
+  storage/network reset epochs; reserve an inactive Native network endpoint.
+- [x] Validate QEMU cross-VM disk I/O, guest DHCP and HTTP integrity, backend
+  reset, VM restart and memory-release acknowledgements.
+- [x] Verify 1 GiB Native FAT and guest ext4 writes/overwrites with full readback
+  on Pi 5, exercise bidirectional guest TCP through RP1, and record initial
+  comparisons with native Raspbian.
+
+These establish basic end-to-end operation. The lifecycle tests predate the
+combined SDIO1/RP1 deployment, while the 2026-10-06 I/O survey used that combined
+deployment. Neither set of results closes the deferred qualification items.
+
+## Architecture boundaries
+
+- HypeR owns scheduling, memory, capabilities, VM lifecycle and device isolation.
+  Native apps and service supervision remain first-class. Linux supplies the
+  physical device-driver ecosystem as an I/O VM, not as the host kernel.
+- Storage uses virtio-scsi and Linux vhost-scsi/LIO; guest networking uses
+  virtio-net and Linux vhost-net/TAP. HypeR owns negotiation, shared-memory
+  grants and event routing. Management services do not forward individual I/O
+  requests.
+- HypeR-io-vm owns the upstream Linux source lock, kernel configuration, external
+  modules, Linux services, initramfs and publication with corresponding source
+  materials. HypeR imports immutable package digests and owns Native apps,
+  DTS/DTB and launch policy.
+- Namespace, open-file semantics and cache policy stay in HypeR. Linux exports
+  block I/O; it must not independently mount or modify a block range exclusively
+  owned by HypeR.
+- Submitted buffers remain owned until completion or proven device quiescence.
+  A crashed VM does not prove physical DMA has stopped. Deferring qualification
+  does not permit recycling possibly DMA-visible memory: uncertain retirement
+  must retain affected memory rather than claim successful release.
+
+## Deferred hardware qualification
+
+These are open TODOs, deliberately outside the current phase. Existing manual
+tools remain available; deferral does not mean the checks have passed.
+
+- [ ] Power-loss durability and reboot persistence on the combined SDIO1/RP1
+  deployment, with an external record of acknowledged writes.
+- [ ] Backend failure, shutdown, recovery and physical DMA retirement: fence
+  sessions, fail outstanding requests, establish device quiescence/reset before
+  memory reuse, and reject stale completions after reconnect.
+- [ ] Concurrent storage/network traffic under memory and queue pressure.
+- [ ] Prolonged load and idle/wakeup stress, including timer/IPI wakeups and
+  cross-core cache/TLB retirement on hardware.
+- [ ] Extended qualification of the minimal Pi 5 appliance, repeatability,
+  system-wide CPU consumption and controlled environment metadata.
+
+See the [manual storage procedure](../tests/hardware/storage/README.md) and
+[network exercise](../tests/hardware/network/README.md). Current measurements
+remain exploratory and do not establish production readiness.
 
 ## Later work
 
-These remain directions rather than prerequisites for the Pi 5 milestone:
-
 - Native network APIs and a connection for the reserved Native endpoint;
-- IOMMU-backed device isolation and untrusted driver domains;
 - transactional multi-vCPU management, richer VM supervision and accounting;
 - broader Native ABI/std coverage, ABI stabilization and generated bindings;
 - additional filesystems, cache/writeback policy and storage recovery;
 - scheduler load balancing, power management and CPU hotplug;
 - broader hardware support while preserving existing AArch64/RISC-V acceptance
   and x86-64 builds.
+
+See [Pi 5 bring-up](../kernel/docs/rpi5.md),
+[implementation status](status.md), [I/O VM delivery and integration](io-vm.md),
+and [VFS boundaries](../kernel/docs/vfs.md).

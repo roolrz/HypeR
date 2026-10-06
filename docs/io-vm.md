@@ -23,7 +23,8 @@ and upstream vhost-scsi/LIO. A Native test deployment owns both VMs, their DTBs,
 shared memory and control transactions. It verifies disk contents independently
 on the host and checks DMA memory admission after both VMs retire.
 See [implementation status](status.md#linux-io-vm-baseline) for the acceptance
-boundary. Pi 5 device assignment still requires hardware qualification.
+boundary. Pi 5 device assignment has basic storage/network measurements;
+extended hardware qualification remains deferred.
 The board deployment path is described in [board storage](board-storage.md).
 
 ## Selected backend interfaces
@@ -33,7 +34,7 @@ The I/O VM architecture selects three interface families:
 | Interface | Purpose | Current status |
 | --- | --- | --- |
 | virtio-scsi | Storage for Native clients and guest disks | Implemented with vhost-scsi/LIO |
-| virtio-net | Guest network connectivity | Implemented with vhost-net/TAP; QEMU GICv2/GICv3 functional acceptance passes |
+| virtio-net | Guest network connectivity | Implemented with vhost-net/TAP; QEMU GICv2/GICv3 acceptance and an initial Pi 5 TCP survey completed |
 | vfio-user | General device backends beyond the storage and network interfaces | Planned; cross-VM integration remains to be designed |
 
 Storage and guest networking have implementations; vfio-user remains a design
@@ -111,9 +112,11 @@ Each entry in [io-vm.lock.json](../scripts/io-vm.lock.json) pins its platform's
 immutable reference, source revision and successful qualification/publication
 runs. Platform metadata identifies the build profile; it does not certify Pi
 hardware operation. The development image with the combined SDIO1/RP1
-deployment passed a physical Pi 5 smoke test before publication. The exact
-published package has not been reflashed on hardware, so its lock entry keeps
-`hardware_qualified: false`.
+deployment passed a physical Pi 5 smoke test before publication. The published
+Pi 5 pin was then used for the 2026-10-06 physical storage and guest TCP
+[performance survey](../README.md#exploratory-pi-5-io-measurements). This is basic
+functional/reference evidence, not full stress, durability and DMA retirement
+qualification; the lock entry therefore retains `hardware_qualified: false`.
 Final boot images follow the [image release contract](image-distribution.md).
 The import command also accepts `IO_VM_REFERENCE` explicitly. The qualified QEMU
 fixture consumes the imported generation. Without an override, the ordinary
@@ -288,7 +291,11 @@ the shared backend retirement protocol.
 
 See the [Pi 5 Ethernet bring-up procedure](../kernel/docs/rpi5.md#ethernet-backend-qualification).
 Host tests and QEMU acceptance do not qualify the physical RP1 link, cache
-maintenance or interrupt ordering. A physical Pi 5 network run remains required.
+maintenance or interrupt ordering. The physical TCP survey records basic
+operation; sustained traffic, concurrent I/O and fault coverage remain
+[deferred qualification](roadmap.md#deferred-hardware-qualification).
+The [manual network tools](../tests/hardware/network/README.md) are opt-in guest
+additions and do not change the default Alpine rootfs or I/O VM appliance.
 
 ## Shared pages and DMA
 

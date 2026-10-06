@@ -208,9 +208,14 @@ For Pi 5, use `make rpi5-sd`
 with the pinned official prebuilt DTBs/overlays. The boot chain uses the official
 EEPROM firmware and its built-in BL31; no custom TF-A artifact is required.
 QEMU and Pi 5 package selections live in `scripts/io-vm.lock.json`. Recorded
-Pi 5 development runs established SD-backed reads and basic guest persistence;
-the selected package's hardware qualification and DMA fault recovery remain
-separate validation requirements. The FAT boot
+Pi 5 development runs established SD-backed reads and basic guest persistence.
+The 2026-10-06 [performance survey](../README.md#exploratory-pi-5-io-measurements)
+also exercised Native and guest SD writes with full readback and physical guest
+TCP traffic using the published pin. Full hardware qualification and DMA fault
+recovery remain [deferred work](roadmap.md#deferred-hardware-qualification).
+The [manual test image](../tests/hardware/storage/README.md) adds a 1 GiB workload
+and enlarges the configuration volume to 2 GiB; default images neither compile
+nor package that workload. The FAT boot
 volume contains the firmware configuration, official DTBs/overlays, kernel and bootstrap archive.
 The userspace `bcm2712-sdhci` profile validates the upstream C0/D0 SDIO1
 resource graph: host/config registers, fixed clock, main/AON pinctrl and AON
@@ -242,8 +247,9 @@ alongside its SD-backed disk. The kernel assigns the whole RP1 PCI function
 while retaining host PCIe transport, BAR ownership and MSI routing. Upstream
 Linux owns RP1 interrupts, GEM, clocks, GPIO and the Ethernet bridge. Its DMA
 bus translation is separate from SDHCI. This trusted I/O VM path has no IOMMU
-DMA isolation. It requires the matching new Pi 5 appliance package and physical
-network qualification; see [Ethernet bring-up](../kernel/docs/rpi5.md#ethernet-backend-qualification).
+DMA isolation. The pinned Pi 5 appliance has served the physical TCP survey;
+extended network qualification remains deferred. See
+[Ethernet bring-up](../kernel/docs/rpi5.md#ethernet-backend-qualification).
 
 `make test-userspace-device` uses a test-only virtio worker and a real QEMU disk
 with a level interrupt to exercise the same generic bundle/MMIO/IRQ mechanism.

@@ -6,12 +6,16 @@ SPDX-License-Identifier: Apache-2.0
 # Raspberry Pi 5 bring-up
 
 HypeR supports the host GICv2 MMIO interface and adapts its PL011 driver for
-Pi 5's dedicated three-pin debug UART, including its smaller AXI register window. The intended first milestone is a
-four-core Native shell with timer-driven scheduling and interrupt-driven input.
+Pi 5's dedicated three-pin debug UART, including its smaller AXI register window.
+A four-core Native shell with timer-driven scheduling and interrupt-driven input
+has been validated.
 Native boot, bidirectional UART, SD-backed `/data` reads and basic Alpine
 SMP/reboot/poweroff with file persistence were confirmed on a Pi 5 D0 board.
-See the SD-card qualification record below; sustained load, power-loss durability
-and DMA retirement under faults remain unqualified.
+The combined SDIO1/RP1 deployment also completed the 2026-10-06
+[storage and TCP performance survey](../../README.md#exploratory-pi-5-io-measurements).
+See the qualification records below; sustained load, power-loss durability
+and DMA retirement under faults remain unqualified and are
+[deferred TODOs](../../docs/roadmap.md#deferred-hardware-qualification).
 
 GICv2 guest virtualization is implemented and tested with Linux on QEMU.
 Firmware must describe the GICH and GICV register windows plus the maintenance
@@ -88,7 +92,8 @@ is needed to qualify the kernel and shell. The unused device selector in this
 board policy records the later storage assignment; Native-only init does not
 start the I/O service or claim the SD controller. This is separate from the
 full `boards/rpi5.json` deployment with its 1 GiB configuration volume and guest
-disks. Full I/O deployment still needs physical SD/DMA qualification.
+disks. The full deployment has basic storage/network results; extended
+qualification remains deferred.
 
 Existing image outputs are refused. To explicitly replace this generated
 image, add `BOARD_IMAGE_REPLACE=--replace`. This command never writes a physical
@@ -254,9 +259,10 @@ make rpi5-io-bringup ARCH=aarch64 BOARD_IMAGE_REPLACE=--replace
 ```
 
 `IO_VM_PACKAGE=/path/to/rpi5/appliance` remains an optional development override.
-The released profiles passed Linux CI and QEMU acceptance; earlier physical Pi
-results used a development reassembly. The newly pinned package still requires
-hardware requalification.
+The released profiles passed Linux CI and QEMU acceptance. Earlier physical Pi
+results used a development reassembly; the published Pi 5 pin subsequently
+served the 2026-10-06 combined storage/network survey. This records basic
+operation, not full hardware qualification; `hardware_qualified` remains false.
 
 This replaces `target/board/rpi5-native/disk.img`, retaining the official
 firmware boot chain and HypeR shell. It registers the board's `io-vm.name` (default `io`) for manual startup through
@@ -268,8 +274,8 @@ The guest reports `bring-up ready; no devices assigned, storage service disabled
 It waits under VM supervision; it does not provide an interactive Linux shell
 or claim backend readiness. Stop/restart use the normal VMM commands.
 
-The full storage deployment remains `boards/rpi5.json`; enabling it still
-requires physical storage/DMA qualification. Do not supply its volume/client
+The full storage/network deployment is `boards/rpi5.json`; extended fault and
+stress qualification remains deferred. Do not supply its volume/client
 configuration to diskless bring-up. QEMU GICv2 can exercise this guest boot path
 but cannot validate the board's device drivers.
 
@@ -313,11 +319,20 @@ one ordinary `reboot`, and one ordinary `poweroff`. A file written and synced
 on the SD-backed ext4 root survived the reboot. After poweroff, Alpine reached
 `stopped`, the I/O VM remained `running`, `/data` remained readable, and the
 backend reported successful memory release. That run predates the combined
-SDIO1/RP1 deployment; the current network-enabled image still needs hardware
-qualification of both paths. The result establishes basic guest lifecycle
-operation, not repeated power-cycle durability or DMA retirement under faults.
-Those stress and failure cases remain unqualified. The kernel retains generic device ownership and
-notification mechanisms; SDHCI policy remains in userspace.
+SDIO1/RP1 deployment and establishes basic guest lifecycle operation.
+
+On 2026-10-06, the combined deployment using the published I/O VM pin completed
+1 GiB Native FAT and Alpine ext4 writes/overwrites with full readback, plus
+4 KiB synchronous-write measurements. Native Raspbian on a separate card
+provided reference data. These were single-round exploratory measurements;
+same-boot readback can hit caches and does not prove power-loss durability.
+See the [results](../../README.md#exploratory-pi-5-io-measurements) and
+[manual test image/tools](../../tests/hardware/storage/README.md).
+The tools are absent from default builds and images.
+
+Stress, power-cut and physical retirement trials remain deferred and
+unqualified. The kernel retains generic device ownership and notification
+mechanisms; SDHCI policy remains in userspace.
 
 ## Ethernet backend qualification
 
@@ -413,8 +428,15 @@ trusted I/O VM deployment, not safe passthrough to an untrusted guest. After
 activation, I/O VM teardown retains its device claims and RAM until host reboot
 because physical DMA retirement is not yet qualified.
 
-Physical validation is still required. Connect the Ethernet cable to a LAN,
-wait for `/data`, then start Alpine and enter its console:
+The 2026-10-06 physical survey exercised guest TCP in both directions with one
+and four connections, using the Mac as client and the Alpine guest as server.
+Native Raspbian was measured separately with the same client. See the
+[results and limits](../../README.md#exploratory-pi-5-io-measurements) and
+[manual network exercise](../../tests/hardware/network/README.md).
+This does not qualify simultaneous disk/network load, link recovery or faults.
+
+For manual functional checks, connect Ethernet to a network with DHCP, wait
+for `/data`, then start Alpine and enter its console:
 
 ```text
 vmm start alpine
@@ -431,7 +453,8 @@ ip route
 cat /var/log/udhcpc-eth0.log
 ```
 
-Verify downloads against a known SHA-256 from a LAN HTTP server and upload a
+The following extended checks remain deferred qualification work. When a test
+peer is available, verify downloads against a known SHA-256 and upload a
 file to compare its hash at the receiver. For multi-guest qualification, add a
 second guest with a distinct MAC address to the board configuration, rebuild
 the test image, and repeat with both guests running.
