@@ -41,6 +41,7 @@ impl DriverServices for KernelDriverServices<'_> {
 }
 
 struct PlatformBusState {
+    _iommu: Option<hyper::mm::FallibleArc<super::iommu::runtime::Runtime>>,
     _devices: Vec<PlatformDevice>,
     _manager: PermanentDriverManager,
     assignable: Vec<super::assigned::Resource>,
@@ -71,6 +72,7 @@ pub(crate) enum Error {
     DriverRegistration(ProbeError),
     Fdt(fdt::Error),
     Scan(ScanError),
+    Iommu(super::iommu::Error),
 }
 
 pub(super) struct InitializationReport {
@@ -113,6 +115,12 @@ pub(super) fn initialize(
         .map_err(|_| Error::DriverRegistration(ProbeError::Resource))?;
     let catalogue = super::firmware::Catalogue::new(dependencies, |node| node.kernel_claimed())
         .map_err(|_| Error::DriverRegistration(ProbeError::Resource))?;
+    let services = KernelDriverServices { boot };
+    // Activate default-deny translation before publishing any physical device.
+    // A discovered but unsupported/failed IOMMU aborts admission, never bypasses.
+    let iommu =
+        super::iommu::initialize(&catalogue.nodes, &services, boot.interrupts().root_domain)
+            .map_err(Error::Iommu)?;
     let console = super::serial::initialize(boot, &devices);
     let reserved_console_base = boot.early_console().map(|console| console.base);
     devices.retain(|device| {
@@ -120,7 +128,6 @@ pub(super) fn initialize(
             device.registers().first().map(|range| range.start()) != Some(reserved)
         })
     });
-    let services = KernelDriverServices { boot };
     crate::kernel::time::initialize_realtime(&devices, &services);
     let drivers = manager.probe_devices(&devices, &services);
     // The PCI function owns its bridge/MSI/dependency tree. Firmware
@@ -128,6 +135,7 @@ pub(super) fn initialize(
     // and does not expose any packet DMA until an assigned VM owns its backing.
     let kernel_owned = |node: &PlatformDevice| {
         node.kernel_claimed()
+            || super::iommu::host_owned(node)
             || manager.binding_driver(node.id()).is_some()
             || reserved_console_base.is_some_and(|base| {
                 node.registers()
@@ -199,6 +207,7 @@ pub(super) fn initialize(
         }
     }
     reservation.commit(PlatformBusState {
+        _iommu: iommu,
         _devices: devices,
         _manager: manager.retain_permanently(),
         assignable,

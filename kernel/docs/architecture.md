@@ -153,6 +153,15 @@ driver does not delegate these ownership guarantees, and userspace placement
 alone does not establish DMA isolation on hardware without suitable support.
 The current Linux I/O VM is trusted.
 
+The [SMMUv3 driver](smmuv3.md) provides a host-owned stage-2 DMA mechanism and
+a dedicated QEMU PCI DMA acceptance fixture. It reserves SMMU and generic ECAM
+control apertures and all their interrupt aliases, defaults to denying
+unassigned streams, and retains exposed backing on failed invalidation.
+A wired-IRQ worker quarantines faulting streams, while control-plane failures
+close the controller with disabled-mode abort policy and retain live backing. Integration with device capability grants and
+I/O VM memory leases remains separate work; default virtio-mmio and Pi 5 paths
+do not acquire isolation merely from this driver's presence.
+
 On Pi 5, HypeR owns the BCM2712 PCIe transport, resource claims and MSI routing.
 The complete RP1 PCI function belongs to the I/O VM; Linux owns its interrupt
 controller, clocks, GPIO, Ethernet MAC and PHY drivers. RP1 peripherals cannot
@@ -368,6 +377,21 @@ Kernel code reaches that allocation through direct, counted, typed references;
 it does not resolve process-local handle values through a global kernel handle
 table. Userspace handle tables wrap the same allocation with process-local
 generations, rights, and flags only at the ABI boundary.
+
+Object identity uses a reusable 32-bit slot and a 32-bit generation, encoded
+as a nonzero 64-bit KOID with the slot in its low bits. A linear reservation
+belongs to the canonical allocation until directory detachment and final
+payload destruction finish.
+Abandoned construction returns its reservation through the same path. Reuse
+advances the generation; exhausted generations retire their slots permanently,
+so stale snapshots never identify a replacement object. Object-directory
+pagination uses a separate registration sequence rather than KOID ordering.
+The allocator retains one 16-byte free-list node per reusable slot at the
+object high-water mark on 64-bit targets, including outstanding reservations
+and deferred finalizers. Active-object storage accounting includes this node;
+returned nodes become kernel-owned reusable metadata. Allocation and
+deallocation happen outside its IRQ-masked lock, and final release requires no
+allocation.
 
 Persistent references declare their ownership class. Scheduler residence,
 object-to-object edges, userspace authority, and temporary resolved operations

@@ -445,7 +445,7 @@ impl Process {
         }
         match u32::try_from(id) {
             Ok(id) => id,
-            Err(_) => panic!("Native KOID exceeds Rust's process ID range"),
+            Err(_) => panic!("invalid Native compact process ID"),
         }
     }
     pub fn kill(&mut self) -> io::Result<()> {
@@ -572,6 +572,6 @@ pub fn read_output(
 pub fn getpid() -> u32 {
     match u32::try_from(unsafe { ffi::__hyper_std_current_process_id() }) {
         Ok(id) => id,
-        Err(_) => panic!("Native KOID exceeds Rust process ID range"),
+        Err(_) => panic!("invalid Native compact process ID"),
     }
 }

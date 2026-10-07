@@ -51,9 +51,8 @@ impl Catalogue {
                 .enumerate()
                 .filter(|(index, _)| self.ownership[*index].load(Ordering::Relaxed) & OWNED != 0)
                 .any(|(_, owner)| {
-                    let irq_conflict = irq(owner)
-                        .zip(irq(node))
-                        .is_some_and(|(a, b)| a.0 >= 32 && a.0 == b.0);
+                    let irq_conflict =
+                        shared_interrupts(owner).any(|a| shared_interrupts(node).any(|b| a == b));
                     irq_conflict
                         || owner.mmio_resources().any(|left| {
                             node.mmio_resources().any(|right| {
@@ -163,4 +162,19 @@ fn irq(node: &PlatformDevice) -> Option<(u32, u32)> {
             hyper::platform::PlatformInterruptTrigger::Edge => 2,
         },
     ))
+}
+
+// SMMUv3 has several interrupt descriptors. Protect every host-owned line,
+// including an alias whose first interrupt matches a later SMMU descriptor.
+fn shared_interrupts(node: &PlatformDevice) -> impl Iterator<Item = u32> + '_ {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    let width = 3;
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    let width = node.interrupt_cells().len().max(1);
+    node.interrupt_cells()
+        .chunks_exact(width)
+        .filter_map(|cells| {
+            let interrupt = crate::hal::irq::decode_platform(cells).ok()?.interrupt;
+            (interrupt >= 32).then_some(interrupt)
+        })
 }

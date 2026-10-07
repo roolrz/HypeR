@@ -100,7 +100,7 @@ struct NodeState {
     is_cpu: bool,
     is_pci: bool,
     register_pci: bool,
-    pcie_handoff: crate::platform::bcm2712::PciWindow,
+    pci_window: crate::platform::pci::PciWindow,
     cpu_hardware_id: Option<u64>,
     is_reserved_region: bool,
     no_map: bool,
@@ -130,7 +130,7 @@ impl NodeState {
         is_cpu: false,
         is_pci: false,
         register_pci: false,
-        pcie_handoff: crate::platform::bcm2712::PciWindow::EMPTY,
+        pci_window: crate::platform::pci::PciWindow::EMPTY,
         cpu_hardware_id: None,
         is_reserved_region: false,
         no_map: false,
@@ -444,7 +444,7 @@ fn insert_region<const CAPACITY: usize>(
 }
 
 fn apply_property(node: &mut NodeState, name: &str, value: &[u8]) -> Result<(), Error> {
-    node.pcie_handoff.property(name, value);
+    node.pci_window.property(name, value);
     match name {
         "#address-cells" => {
             node.child_address_cells = decode_u32(value).map_err(|_| Error::BadStructure)?;
@@ -678,7 +678,7 @@ fn pci_memory_window(
         let AddressSpace::PciMemory(tag) = range.child_space else {
             return None;
         };
-        node.pcie_handoff
+        node.pci_window
             .mapping_size(tag, range.child_start, range.size)
             .map(|size| (range, size))
     });

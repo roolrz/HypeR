@@ -32,7 +32,10 @@ unqualified and are tracked as
 The current priorities are best-effort block/guest-network tuning without major
 code or architecture rework, and capability/DMA isolation hardening around the
 I/O VM. These are planned work, not additional isolation guarantees of the
-current deployment.
+current deployment. A [standard SMMUv3 driver and QEMU PCI DMA fixture](../kernel/docs/smmuv3.md)
+now provide stage-2 translation, invalidation, IRQ-driven stream quarantine
+and fail-closed controller handling; the current I/O VM
+assignment path is not yet connected to those DMA domains.
 See the [Pi 5 guide](../kernel/docs/rpi5.md) and
 [image release contract](image-distribution.md).
 
