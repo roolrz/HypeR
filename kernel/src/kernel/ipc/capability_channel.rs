@@ -308,6 +308,7 @@ struct CapabilityPair {
 
 /// One endpoint of a synchronous capability-rendezvous pair.
 pub(crate) struct CapabilityChannel {
+    peer_koid: AtomicU64,
     pair: FallibleArc<CapabilityPair>,
     side: Side,
 }
@@ -341,10 +342,12 @@ impl CapabilityChannel {
             .map_err(|_| CapabilityChannelError::Allocation)?;
         Ok((
             Self {
+                peer_koid: AtomicU64::new(0),
                 pair: pair.clone(),
                 side: Side::First,
             },
             Self {
+                peer_koid: AtomicU64::new(0),
                 pair,
                 side: Side::Second,
             },
@@ -384,6 +387,30 @@ impl private::Sealed for CapabilityChannel {}
 impl private::UserExportable for CapabilityChannel {}
 
 impl KernelObject for CapabilityChannel {
+    fn diagnostic_details(
+        &self,
+        cursor: u64,
+    ) -> Result<
+        crate::kernel::object::diagnostics::Details,
+        crate::kernel::object::diagnostics::DetailError,
+    > {
+        crate::kernel::object::diagnostics::Details::last(
+            self.pair.state.with(|state| {
+                let local = &state.endpoints[self.side.index()];
+                let peer = &state.endpoints[self.side.peer().index()];
+                crate::kernel::object::diagnostics::DetailRecord::Channel {
+                    peer_koid: self.peer_koid.load(Ordering::Acquire),
+                    local_open: local.open,
+                    peer_open: peer.open,
+                    queued: local.receivers.len as u64,
+                    bytes: 0,
+                    byte_queue: false,
+                }
+            }),
+            cursor,
+        )
+    }
+
     const KIND: ObjectKind = ObjectKind::CAPABILITY_CHANNEL;
     const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
         .union(Rights::TRANSFER)
@@ -1035,4 +1062,11 @@ fn registration_scheduler_invariant(message: &str, error: crate::kernel::sync::E
     crate::kernel::crash::fatal(format_args!(
         "HypeR CapabilityChannel scheduler invariant failed: {message}: {error:?}"
     ))
+}
+
+impl crate::kernel::object::diagnostics::PairedObject for CapabilityChannel {
+    fn bind_peer_identity(&self, peer: crate::kernel::object::Koid) {
+        // Publication is one-shot; no strong peer reference or ownership cycle.
+        self.peer_koid.store(peer.get(), Ordering::Release);
+    }
 }

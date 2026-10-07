@@ -133,6 +133,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
     }
 }
 
+#define HYPER_NATIVE_RIGHT_INSPECT_DETAILS (UINT64_C(1) << 33)
 #define HYPER_NATIVE_RIGHT_BIND_WAIT (UINT64_C(1) << 30)
 #define HYPER_NATIVE_RIGHT_DUPLICATE (UINT64_C(1) << 0)
 #define HYPER_NATIVE_RIGHT_TRANSFER (UINT64_C(1) << 1)
@@ -167,7 +168,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_RIGHT_SET_ATTRIBUTES (UINT64_C(1) << 31)
 #define HYPER_NATIVE_RIGHT_LOCK_FILE (UINT64_C(1) << 32)
 
-#define HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x1ffffffff)
+#define HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x3ffffffff)
 
 #define HYPER_NATIVE_SIGNAL_PHYSICAL_DEVICE_READABLE (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_NATIVE_BLOCK_PEER_CLOSED (UINT64_C(1) << 0)
@@ -195,6 +196,13 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_WRITABLE (UINT64_C(1) << 1)
 #define HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_PEER_CLOSED (UINT64_C(1) << 2)
 
+#define HYPER_NATIVE_OBJECT_DETAIL_EMPTY UINT64_C(0)
+#define HYPER_NATIVE_OBJECT_DETAIL_THREAD UINT64_C(1)
+#define HYPER_NATIVE_OBJECT_DETAIL_VMAR UINT64_C(2)
+#define HYPER_NATIVE_OBJECT_DETAIL_MAPPING UINT64_C(3)
+#define HYPER_NATIVE_OBJECT_DETAIL_CHANNEL UINT64_C(4)
+#define HYPER_NATIVE_OBJECT_DETAIL_DEVICE UINT64_C(5)
+#define HYPER_NATIVE_OBJECT_DETAIL_DEVICE_RESOURCE UINT64_C(6)
 #define HYPER_NATIVE_KOID_SLOT_MASK UINT64_C(4294967295)
 #define HYPER_NATIVE_VMAR_ALLOCATE_EXACT UINT64_C(1)
 #define HYPER_NATIVE_SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT UINT64_C(2)
@@ -538,6 +546,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_DEVICE_IRQ_COMPLETE UINT64_C(147)
 #define HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY UINT64_C(148)
 #define HYPER_NATIVE_SYS_SYSTEM_CONFIG UINT64_C(149)
+#define HYPER_NATIVE_SYS_OBJECT_INSPECTOR_READ_DETAILS UINT64_C(150)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -560,6 +569,22 @@ static inline uint64_t hyper_native_failure_result_mask(
     }
     return UINT64_C(0);
 }
+
+#define HYPER_NATIVE_OBJECT_DETAILS_MIN_SIZE UINT64_C(88)
+typedef struct hyper_native_object_details_t {
+    uint64_t koid;
+    uint32_t object_kind;
+    uint32_t record_kind;
+    uint64_t next_cursor;
+    uint8_t payload[64];
+} hyper_native_object_details_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_object_details_t) == 88, "object_details size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_object_details_t) == 8, "object_details alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_details_t, koid) == 0, "object_details.koid offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_details_t, object_kind) == 8, "object_details.object_kind offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_details_t, record_kind) == 12, "object_details.record_kind offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_details_t, next_cursor) == 16, "object_details.next_cursor offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_details_t, payload) == 24, "object_details.payload offset");
 
 #define HYPER_NATIVE_DEVICE_PROFILE_INFO_MIN_SIZE UINT64_C(32)
 typedef struct hyper_native_device_profile_info_t {

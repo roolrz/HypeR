@@ -106,6 +106,7 @@ impl ObjectVisibility {
 #[derive(Debug)]
 pub(crate) enum Error {
     AccessDenied,
+    Details(crate::kernel::object::diagnostics::DetailError),
     Allocation,
     NotFound,
     Object(ObjectCreationError),
@@ -346,6 +347,46 @@ pub(crate) struct ObjectInspector {
 }
 
 impl ObjectInspector {
+    /// Derivation deliberately returns the basic observation authority only.
+    pub(crate) const DERIVATION_RIGHTS: Rights = Rights::DUPLICATE
+        .union(Rights::TRANSFER)
+        .union(Rights::INSPECT)
+        .union(Rights::DERIVE);
+
+    pub(crate) fn read_details(
+        &self,
+        process: u64,
+        target: u64,
+        cursor: u64,
+    ) -> Result<crate::kernel::object::diagnostics::ObjectDetails, Error> {
+        // Scope checks precede target lookup so denied queries cannot probe liveness.
+        let object = if process == 0 {
+            if self.scope != Scope::System
+                || !self.visibility.contains(ObjectVisibility::KERNEL_OBJECTS)
+            {
+                return Err(Error::AccessDenied);
+            }
+            crate::kernel::object::lookup_diagnostic(target).ok_or(Error::NotFound)?
+        } else {
+            if !self.visibility.contains(ObjectVisibility::HANDLE_BASIC)
+                || !self.visibility.contains(ObjectVisibility::OBJECT_BASIC)
+            {
+                return Err(Error::AccessDenied);
+            }
+            let process = find_process_by_koid(process, self.scope).ok_or(Error::NotFound)?;
+            let handle = crate::kernel::capability::HandleValue::try_from_raw(target)
+                .map_err(|_| Error::NotFound)?;
+            process
+                .inspect_handle_object(handle)
+                .map_err(|error| match error {
+                    crate::kernel::process::ProcessError::Handle(_) => Error::NotFound,
+                    error => Error::Process(error),
+                })?
+        };
+        // No registry, process state, or handle-table lock survives this point.
+        object.details(cursor).map_err(Error::Details)
+    }
+
     pub(crate) fn try_system(domain: &ResourceDomain) -> Result<Self, Error> {
         Ok(Self {
             scope: Scope::System,
@@ -469,10 +510,7 @@ impl private::UserExportable for ObjectInspector {}
 impl KernelObject for ObjectInspector {
     const KIND: ObjectKind = ObjectKind::OBJECT_INSPECTOR;
     const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
-    const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
-        .union(Rights::TRANSFER)
-        .union(Rights::INSPECT)
-        .union(Rights::DERIVE);
+    const SUPPORTED_RIGHTS: Rights = Self::DERIVATION_RIGHTS.union(Rights::INSPECT_DETAILS);
 }
 
 /// Immutable physical-memory accounting snapshot.

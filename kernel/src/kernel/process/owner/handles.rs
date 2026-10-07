@@ -760,7 +760,7 @@ impl Process {
     ///
     /// Both erased objects and both active owners exist before publication, so
     /// userspace can never observe only one endpoint of a newly created pair.
-    pub(crate) fn create_object_pair<T: UserExportableObject>(
+    pub(crate) fn create_object_pair<T: crate::kernel::object::diagnostics::PairedObject>(
         &self,
         first: T,
         second: T,
@@ -782,6 +782,8 @@ impl Process {
                 return Err(error.into());
             }
         };
+        first.object().bind_peer_identity(second.koid());
+        second.object().bind_peer_identity(first.koid());
         let first = match PreparedHandle::try_from_new_object(first, rights, HandleFlags::NONE) {
             Ok(handle) => handle,
             Err(error) => {
@@ -827,6 +829,19 @@ impl Process {
         self.inner
             .handles
             .with(|table| table.scan_handles(cursor))
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn inspect_handle_object(
+        &self,
+        value: HandleValue,
+    ) -> Result<
+        crate::kernel::object::ErasedKernelRef<crate::kernel::object::Diagnostic>,
+        ProcessError,
+    > {
+        self.inner
+            .handles
+            .with(|table| table.inspect_object(value))
             .map_err(Into::into)
     }
 

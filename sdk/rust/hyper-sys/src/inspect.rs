@@ -223,3 +223,29 @@ pub unsafe fn cpu_inspector_read(
         )
     }
 }
+
+/// Reads object-local details using an explicitly privileged inspector.
+///
+/// # Safety
+/// The inspector must remain live. `record` must point to one complete writable
+/// ABI record. The process and target values are diagnostic selectors only.
+pub unsafe fn object_inspector_read_details(
+    inspector: abi::HyperNativeHandle,
+    process: u64,
+    target: u64,
+    cursor: u64,
+    record: *mut abi::HyperNativeObjectDetails,
+) -> CallResult {
+    // SAFETY: the caller guarantees the writable output and handle lifetime.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_OBJECT_INSPECTOR_READ_DETAILS,
+            inspector,
+            process,
+            target,
+            cursor,
+            record.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeObjectDetails>() as u64,
+        )
+    }
+}

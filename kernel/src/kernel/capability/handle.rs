@@ -10,8 +10,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::super::authority::{HandleRights, PropagationRights};
 use super::super::object::{
-    ActiveHandleError, ActiveHandleOwner, ErasedKernelRef, KernelObject, Koid, ObjectKind,
-    ObjectPublication, ObjectRetirement, OperationPin, SignalSource, TransferClass,
+    ActiveHandleError, ActiveHandleOwner, Diagnostic, ErasedKernelRef, KernelObject, Koid,
+    ObjectKind, ObjectPublication, ObjectRetirement, OperationPin, SignalSource, TransferClass,
     UserExportableObject,
 };
 use super::Rights;
@@ -747,6 +747,14 @@ impl HandleTable {
             rights: handle.rights.union(),
             flags: handle.flags,
         })
+    }
+
+    pub(crate) fn inspect_object(
+        &self,
+        value: HandleValue,
+    ) -> Result<ErasedKernelRef<Diagnostic>, HandleError> {
+        self.ensure_active()?;
+        Ok(self.lookup(value)?.object().pin_diagnostic())
     }
 
     /// Copies a bounded page of object edges without exposing payload access.

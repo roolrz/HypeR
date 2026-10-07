@@ -40,6 +40,7 @@ impl Rights {
     pub(crate) const TRANSFER: Self = Self(native::HYPER_NATIVE_RIGHT_TRANSFER);
     pub(crate) const WAIT: Self = Self(native::HYPER_NATIVE_RIGHT_WAIT);
     pub(crate) const INSPECT: Self = Self(native::HYPER_NATIVE_RIGHT_INSPECT);
+    pub(crate) const INSPECT_DETAILS: Self = Self(native::HYPER_NATIVE_RIGHT_INSPECT_DETAILS);
     pub(crate) const READ: Self = Self(native::HYPER_NATIVE_RIGHT_READ);
     pub(crate) const WRITE: Self = Self(native::HYPER_NATIVE_RIGHT_WRITE);
     pub(crate) const MAP: Self = Self(native::HYPER_NATIVE_RIGHT_MAP);

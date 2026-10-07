@@ -469,6 +469,53 @@ impl private::Sealed for VmarObject {}
 impl private::UserExportable for VmarObject {}
 
 impl KernelObject for VmarObject {
+    fn diagnostic_details(
+        &self,
+        cursor: u64,
+    ) -> Result<
+        crate::kernel::object::diagnostics::Details,
+        crate::kernel::object::diagnostics::DetailError,
+    > {
+        use super::address_space::{VmarDetailError, VmarDetailRecord};
+        use crate::kernel::object::diagnostics::{DetailError, DetailRecord, Details};
+        let page = self
+            .address_space
+            .logical()
+            .vmar_details(self.token.token(), cursor)
+            .map_err(|error| match error {
+                VmarDetailError::InvalidCursor => DetailError::InvalidCursor,
+                VmarDetailError::Stale => DetailError::Stale,
+            })?;
+        let bits = |permissions: super::contract::Permissions| {
+            use super::contract::Access;
+            u64::from(permissions.contains(Access::Read))
+                | (u64::from(permissions.contains(Access::Write)) << 1)
+                | (u64::from(permissions.contains(Access::Execute)) << 2)
+        };
+        let record = match page.record {
+            VmarDetailRecord::Empty => DetailRecord::Empty,
+            VmarDetailRecord::Region { range, live } => DetailRecord::Vmar {
+                base: range.base().get(),
+                length: range.length(),
+                live,
+            },
+            VmarDetailRecord::Mapping {
+                range,
+                permissions,
+                maximum_permissions,
+            } => DetailRecord::Mapping {
+                base: range.base().get(),
+                length: range.length(),
+                permissions: bits(permissions),
+                maximum_permissions: bits(maximum_permissions),
+            },
+        };
+        Ok(Details {
+            record,
+            next_cursor: page.next_cursor,
+        })
+    }
+
     const KIND: ObjectKind = ObjectKind::VMAR;
     const TRANSFER_CLASS: TransferClass = TransferClass::RendezvousOnly;
     const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE

@@ -69,6 +69,24 @@ impl InspectServices for DeferredProcessServices<'_> {
         inspector.object().scan_threads(cursor, output)
     }
 
+    fn read_object_details(
+        &self,
+        inspector: HandleValue,
+        process: u64,
+        target: u64,
+        cursor: u64,
+    ) -> Result<crate::kernel::object::diagnostics::ObjectDetails, crate::kernel::inspect::Error>
+    {
+        let inspector = self
+            .process
+            .resolve_handle::<ObjectInspector>(
+                inspector,
+                Rights::INSPECT.union(Rights::INSPECT_DETAILS),
+            )
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        inspector.object().read_details(process, target, cursor)
+    }
+
     fn scan_objects(
         &self,
         inspector: HandleValue,
@@ -137,10 +155,7 @@ impl InspectServices for DeferredProcessServices<'_> {
     ) -> Result<HandleValue, crate::kernel::inspect::Error> {
         let inspector = self
             .process
-            .resolve_handle::<ObjectInspector>(
-                inspector,
-                <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS,
-            )
+            .resolve_handle::<ObjectInspector>(inspector, ObjectInspector::DERIVATION_RIGHTS)
             .map_err(crate::kernel::inspect::Error::Process)?;
         let target = self
             .process
@@ -150,7 +165,7 @@ impl InspectServices for DeferredProcessServices<'_> {
             .object()
             .try_derive_process(target.object(), &self.process.resource_domain())?;
         self.process
-            .create_object(derived, <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS)
+            .create_object(derived, ObjectInspector::DERIVATION_RIGHTS)
             .map_err(crate::kernel::inspect::Error::Process)
     }
 
@@ -185,10 +200,7 @@ impl InspectServices for DeferredProcessServices<'_> {
     ) -> Result<HandleValue, crate::kernel::inspect::Error> {
         let inspector = self
             .process
-            .resolve_handle::<ObjectInspector>(
-                inspector,
-                <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS,
-            )
+            .resolve_handle::<ObjectInspector>(inspector, ObjectInspector::DERIVATION_RIGHTS)
             .map_err(crate::kernel::inspect::Error::Process)?;
         let target = self
             .process
@@ -198,7 +210,7 @@ impl InspectServices for DeferredProcessServices<'_> {
             .object()
             .try_derive_task_group(target.object(), &self.process.resource_domain())?;
         self.process
-            .create_object(derived, <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS)
+            .create_object(derived, ObjectInspector::DERIVATION_RIGHTS)
             .map_err(crate::kernel::inspect::Error::Process)
     }
 
@@ -233,10 +245,7 @@ impl InspectServices for DeferredProcessServices<'_> {
     ) -> Result<HandleValue, crate::kernel::inspect::Error> {
         let inspector = self
             .process
-            .resolve_handle::<ObjectInspector>(
-                inspector,
-                <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS,
-            )
+            .resolve_handle::<ObjectInspector>(inspector, ObjectInspector::DERIVATION_RIGHTS)
             .map_err(crate::kernel::inspect::Error::Process)?;
         let target = self
             .process
@@ -246,7 +255,7 @@ impl InspectServices for DeferredProcessServices<'_> {
             .object()
             .try_derive_resource_domain(target.object(), &self.process.resource_domain())?;
         self.process
-            .create_object(derived, <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS)
+            .create_object(derived, ObjectInspector::DERIVATION_RIGHTS)
             .map_err(crate::kernel::inspect::Error::Process)
     }
 }

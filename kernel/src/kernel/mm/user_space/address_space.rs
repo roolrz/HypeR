@@ -75,6 +75,33 @@ impl Vmar {
     }
 }
 
+/// Bounded address-space observations; independent of object publication and ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VmarDetailError {
+    InvalidCursor,
+    Stale,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct VmarDetails {
+    pub(crate) record: VmarDetailRecord,
+    pub(crate) next_cursor: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VmarDetailRecord {
+    Empty,
+    Region {
+        range: UserSlice,
+        live: bool,
+    },
+    Mapping {
+        range: UserSlice,
+        permissions: Permissions,
+        maximum_permissions: Permissions,
+    },
+}
+
 /// VMAR authority safe to publish through a Native application handle.
 ///
 /// Internal VMARs retain the machine's complete user range. Keeping the
@@ -335,6 +362,72 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
                 next_user_write_id: 1,
             }),
             _metadata_charge: metadata_charge,
+        })
+    }
+
+    pub(crate) fn vmar_details(
+        &self,
+        vmar: Vmar,
+        cursor: u64,
+    ) -> Result<VmarDetails, VmarDetailError> {
+        let (live, mappings) = self.state.with(|state| {
+            let live = vmar.address_space == self.id
+                && if vmar.id == 0 {
+                    vmar == self.root
+                } else {
+                    state
+                        .vmars
+                        .get(vmar.id)
+                        .is_some_and(|record| record.token == vmar)
+                };
+            (live, state.mappings.clone())
+        });
+        if cursor == 0 {
+            return Ok(VmarDetails {
+                record: VmarDetailRecord::Region {
+                    range: vmar.range,
+                    live,
+                },
+                next_cursor: if live && !mappings.records.is_empty() {
+                    1
+                } else {
+                    0
+                },
+            });
+        }
+        if !live {
+            return Err(VmarDetailError::Stale);
+        }
+        let start = usize::try_from(cursor - 1).map_err(|_| VmarDetailError::InvalidCursor)?;
+        if start > mappings.records.len() {
+            return Err(VmarDetailError::InvalidCursor);
+        }
+        let end = start.saturating_add(32).min(mappings.records.len());
+        for index in start..end {
+            let mapping = &mappings.records[index];
+            if !vmar.range.contains(mapping.snapshot.range) {
+                continue;
+            }
+            return Ok(VmarDetails {
+                record: VmarDetailRecord::Mapping {
+                    range: mapping.snapshot.range,
+                    permissions: mapping.snapshot.permissions,
+                    maximum_permissions: mapping.maximum_permissions,
+                },
+                next_cursor: if index + 1 < mappings.records.len() {
+                    index as u64 + 2
+                } else {
+                    0
+                },
+            });
+        }
+        Ok(VmarDetails {
+            record: VmarDetailRecord::Empty,
+            next_cursor: if end < mappings.records.len() {
+                end as u64 + 1
+            } else {
+                0
+            },
         })
     }
 

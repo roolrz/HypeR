@@ -500,6 +500,14 @@ pub(in crate::kernel) trait SystemInspectServices: UserMemoryServices {
 }
 
 pub(in crate::kernel) trait InspectServices: UserMemoryServices {
+    fn read_object_details(
+        &self,
+        inspector: HandleValue,
+        process: u64,
+        target: u64,
+        cursor: u64,
+    ) -> Result<crate::kernel::object::diagnostics::ObjectDetails, crate::kernel::inspect::Error>;
+
     fn scan_processes(
         &self,
         inspector: HandleValue,

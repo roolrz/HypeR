@@ -270,6 +270,16 @@ impl PhysicalDevice {
 impl private::Sealed for PhysicalDevice {}
 impl private::UserExportable for PhysicalDevice {}
 impl KernelObject for PhysicalDevice {
+    fn diagnostic_details(
+        &self,
+        cursor: u64,
+    ) -> Result<
+        crate::kernel::object::diagnostics::Details,
+        crate::kernel::object::diagnostics::DetailError,
+    > {
+        self.diagnostic(cursor)
+    }
+
     const KIND: ObjectKind = ObjectKind::PHYSICAL_DEVICE;
     const TRANSFER_CLASS: TransferClass = TransferClass::RendezvousOnly;
     const SUPPORTED_RIGHTS: Rights = Rights::TRANSFER

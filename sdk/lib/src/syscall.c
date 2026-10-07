@@ -490,6 +490,15 @@ hyper_call_result_t hyper_task_inspector_scan_threads(hyper_native_handle_t insp
 				  (uintptr_t)records, capacity, 0, 0);
 }
 
+hyper_call_result_t hyper_object_inspector_read_details(hyper_native_handle_t inspector,
+						      uint64_t process, uint64_t target,
+						      uint64_t cursor,
+						      hyper_native_object_details_t *record)
+{
+	return hyper_native_call6(HYPER_NATIVE_SYS_OBJECT_INSPECTOR_READ_DETAILS, inspector,
+				  process, target, cursor, (uintptr_t)record, sizeof(*record));
+}
+
 hyper_call_result_t hyper_object_inspector_scan_objects(hyper_native_handle_t inspector,
 							uint64_t cursor,
 							hyper_native_object_inspection_t *records,

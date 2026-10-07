@@ -201,6 +201,21 @@ pub(crate) fn scan(cursor: ObjectScanCursor) -> ObjectSnapshotPage {
     ObjectSnapshotPage { entries, len, next }
 }
 
+/// Pins one exact generation for inspection. The registry lock is released
+/// before the caller reads payload state; the reference grants no operations.
+pub(crate) fn lookup_diagnostic(koid: u64) -> Option<ErasedKernelRef<Diagnostic>> {
+    DIRECTORY.with(|directory| {
+        let mut entry = directory.head.as_deref();
+        while let Some(current) = entry {
+            if current.koid.get() == koid {
+                return current.object.upgrade();
+            }
+            entry = current.next.as_deref();
+        }
+        None
+    })
+}
+
 /// Retains one diagnostic-only object reference for a lifecycle self-test.
 ///
 /// Production diagnostics intentionally return pointer-free snapshots. This
@@ -208,16 +223,7 @@ pub(crate) fn scan(cursor: ObjectScanCursor) -> ObjectSnapshotPage {
 /// refcounted allocation rather than its scheduler registry entry.
 #[cfg(feature = "kernel-self-test")]
 pub(crate) fn retain_for_test(koid: Koid) -> Option<ErasedKernelRef<Diagnostic>> {
-    DIRECTORY.with(|directory| {
-        let mut entry = directory.head.as_deref();
-        while let Some(current) = entry {
-            if current.koid == koid {
-                return current.object.upgrade();
-            }
-            entry = current.next.as_deref();
-        }
-        None
-    })
+    lookup_diagnostic(koid.get())
 }
 
 fn has_older_live(mut entry: Option<&Entry>, sequence: u64) -> bool {

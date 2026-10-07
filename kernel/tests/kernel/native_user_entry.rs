@@ -140,7 +140,8 @@ fn verify_thread_creation_affinity(
         &process,
         &caller,
         UserAddress::new(IMAGE_BASE + PAGE_SIZE * 2),
-    );
+    )
+    .and_then(|()| crate::kernel::entry::verify_object_details_for_test(&process, &caller));
     process.request_stop(crate::kernel::process::TerminalReason::Requested);
     retire_process(&process)?;
     if let Err(reason) = result {

@@ -3,6 +3,9 @@
 
 //! Native wire-record decoding, validation, and byte encoding.
 
+mod object_details;
+pub(super) use object_details::encode_object_details;
+
 use alloc::vec::Vec;
 
 use hyper::abi::native::{

@@ -10,6 +10,7 @@
 use crate::kernel::authority::Rights;
 
 mod core;
+pub(crate) mod diagnostics;
 mod directory;
 mod event;
 mod identity;
@@ -29,7 +30,7 @@ pub(crate) use core::{
 };
 #[cfg(feature = "kernel-self-test")]
 pub(crate) use directory::retain_for_test;
-pub(crate) use directory::{ObjectScanCursor, scan};
+pub(crate) use directory::{ObjectScanCursor, lookup_diagnostic, scan};
 pub(crate) use event::{Event, EventError};
 #[cfg(feature = "kernel-self-test")]
 pub(crate) use signals::PreparedSignalWait;

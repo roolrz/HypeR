@@ -50,6 +50,35 @@ impl private::Sealed for UserThreadObject {}
 impl private::UserExportable for UserThreadObject {}
 
 impl KernelObject for UserThreadObject {
+    fn diagnostic_details(
+        &self,
+        cursor: u64,
+    ) -> Result<
+        crate::kernel::object::diagnostics::Details,
+        crate::kernel::object::diagnostics::DetailError,
+    > {
+        use crate::kernel::object::diagnostics::{DetailRecord, Details};
+        let phase = self
+            .inner
+            .control
+            .with(|control| match control.lifecycle.phase() {
+                UserThreadPhase::Prepared => 1,
+                UserThreadPhase::Dormant => 2,
+                UserThreadPhase::Runnable => 3,
+                UserThreadPhase::StopRequested => 4,
+                UserThreadPhase::Detached => 5,
+            });
+        Details::last(
+            DetailRecord::Thread {
+                tid: core::num::NonZeroU64::new(self.inner.scheduler_id.load(Ordering::Acquire))
+                    .map(|id| id.get()),
+                role: 4,
+                phase,
+            },
+            cursor,
+        )
+    }
+
     const KIND: ObjectKind = ObjectKind::THREAD;
     const TRANSFER_CLASS: TransferClass = TransferClass::RendezvousOnly;
     // Cross-Process transfer remains outside the initial Channel policy. It

@@ -10,6 +10,8 @@
 #![cfg_attr(test, allow(unexpected_cfgs))]
 
 mod address_space;
+#[cfg(test)]
+pub(crate) use address_space::{VmarDetailError, VmarDetailRecord};
 #[cfg(not(test))]
 mod authority;
 mod contract;

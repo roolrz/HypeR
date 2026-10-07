@@ -467,6 +467,9 @@ pub(in crate::kernel) fn dispatch_deferred(
         abi::HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_PROCESS => {
             handlers::sys_task_inspector_derive_process(services, invocation.arguments())
         }
+        abi::HYPER_NATIVE_SYS_OBJECT_INSPECTOR_READ_DETAILS => {
+            handlers::sys_object_inspector_read_details(services, invocation.arguments())
+        }
         abi::HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_OBJECTS => {
             handlers::sys_object_inspector_scan_objects(services, invocation.arguments())
         }

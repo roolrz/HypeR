@@ -40,10 +40,10 @@ pub(super) use handles::{
 pub(super) use inspect::{
     sys_cpu_inspector_read, sys_memory_inspector_read, sys_object_inspector_derive_process,
     sys_object_inspector_derive_resource_domain, sys_object_inspector_derive_task_group,
-    sys_object_inspector_scan_handles, sys_object_inspector_scan_objects,
-    sys_task_inspector_derive_process, sys_task_inspector_derive_resource_domain,
-    sys_task_inspector_derive_task_group, sys_task_inspector_scan_processes,
-    sys_task_inspector_scan_threads,
+    sys_object_inspector_read_details, sys_object_inspector_scan_handles,
+    sys_object_inspector_scan_objects, sys_task_inspector_derive_process,
+    sys_task_inspector_derive_resource_domain, sys_task_inspector_derive_task_group,
+    sys_task_inspector_scan_processes, sys_task_inspector_scan_threads,
 };
 pub(super) use ipc::{
     sys_byte_channel_create, sys_byte_channel_read, sys_byte_channel_write,

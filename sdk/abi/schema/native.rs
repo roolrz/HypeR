@@ -658,6 +658,10 @@ pub const GUEST_MEMORY_RIGHTS: u64 = RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_MA
 
 pub const RIGHTS: &[Right] = &[
     Right {
+        bit: 33,
+        name: "inspect_details",
+    },
+    Right {
         bit: 30,
         name: "bind_wait",
     },
@@ -820,6 +824,7 @@ pub const RIGHT_CREATE_VIRTUAL_MACHINE: u64 = 1 << RIGHT_CREATE_VIRTUAL_MACHINE_
 pub const RIGHT_BIND_WAIT: u64 = 1 << 30;
 pub const RIGHT_SET_ATTRIBUTES: u64 = 1 << 31;
 pub const RIGHT_LOCK_FILE: u64 = 1 << 32;
+pub const RIGHT_INSPECT_DETAILS: u64 = 1 << 33;
 
 pub const EVENT_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_SIGNAL;
@@ -1016,6 +1021,34 @@ const DIRECTORY_ENTRY_NAME_CAPACITY: u32 = 256;
 const DIRECTORY_ENTRY_RECORD_SIZE: u16 = 24 + DIRECTORY_ENTRY_NAME_CAPACITY as u16;
 
 pub const CONSTANTS: &[AbiConstant] = &[
+    AbiConstant {
+        name: "object_detail_empty",
+        value: 0,
+    },
+    AbiConstant {
+        name: "object_detail_thread",
+        value: 1,
+    },
+    AbiConstant {
+        name: "object_detail_vmar",
+        value: 2,
+    },
+    AbiConstant {
+        name: "object_detail_mapping",
+        value: 3,
+    },
+    AbiConstant {
+        name: "object_detail_channel",
+        value: 4,
+    },
+    AbiConstant {
+        name: "object_detail_device",
+        value: 5,
+    },
+    AbiConstant {
+        name: "object_detail_device_resource",
+        value: 6,
+    },
     AbiConstant {
         name: "koid_slot_mask",
         value: u32::MAX as u64,
@@ -2147,6 +2180,34 @@ const CPU_OBSERVATION_FIELDS: &[Field] = &[
     },
 ];
 
+const OBJECT_DETAILS_FIELDS: &[Field] = &[
+    Field {
+        name: "koid",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "object_kind",
+        kind: FieldKind::U32,
+        offset: 8,
+    },
+    Field {
+        name: "record_kind",
+        kind: FieldKind::U32,
+        offset: 12,
+    },
+    Field {
+        name: "next_cursor",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "payload",
+        kind: FieldKind::Bytes(64),
+        offset: 24,
+    },
+];
+
 const OBJECT_INSPECTION_FIELDS: &[Field] = &[
     Field {
         name: "koid",
@@ -2684,6 +2745,13 @@ const RESOURCE_LIMITS_FIELDS: &[Field] = &[
 ];
 
 pub const RECORDS: &[Record] = &[
+    Record {
+        name: "object_details",
+        fields: OBJECT_DETAILS_FIELDS,
+        minimum_size: 88,
+        size: 88,
+        alignment: 8,
+    },
     Record {
         name: "device_profile_info",
         fields: &[
@@ -4856,6 +4924,58 @@ const OBJECT_INSPECTOR_SCAN_HANDLES_ARGUMENTS: &[Argument] = &[
     Argument {
         name: "capacity",
         kind: ValueKind::ElementCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const OBJECT_INSPECTOR_READ_DETAILS_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("object_inspector"),
+            required_rights: RIGHT_INSPECT | RIGHT_INSPECT_DETAILS,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "process_koid",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "target",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "cursor",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "record",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "record_size",
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+            },
+            record: Some("object_details"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "record_size",
+        kind: ValueKind::ByteCount,
         handle: None,
         memory: None,
     },
@@ -9208,6 +9328,24 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::None,
         failure_results: &[],
     },
+    Syscall {
+        number: 150,
+        name: "object_inspector_read_details",
+        feature: FeatureGate::Core,
+        arguments: OBJECT_INSPECTOR_READ_DETAILS_ARGUMENTS,
+        results: &[ResultValue {
+            name: "supported_size",
+            kind: ValueKind::ByteCount,
+            handle: None,
+        }],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -9224,6 +9362,8 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "object_inspector_read_details requires INSPECT and INSPECT_DETAILS on an ObjectInspector. With process_koid zero, target is a KOID and only system scope is allowed. Otherwise target is a generation-qualified handle in the named, scope-visible process. Inspection takes a diagnostic reference under the lookup lock, releases that lock, and copies object-local metadata only; it does not grant operation authority. Cursor zero starts a query; next_cursor zero finishes it. Empty records may advance a bounded scan without yielding a mapping. Concurrent mutation makes pages weakly consistent. Unsupported object kinds return NOT_SUPPORTED; inaccessible or expired identities return NOT_FOUND. Inspector derivation continues to produce only the original basic rights, never implicitly acquiring INSPECT_DETAILS.",
+    "Object-details payload consists of eight little-endian u64 words. All unused words are zero. Record 0 is empty. Thread (1): scheduler TID (zero is a valid bootstrap TID), role (task_thread role values), user lifecycle phase (0 unavailable, 1 prepared, 2 dormant, 3 runnable, 4 stop-requested, 5 detached), TID present (0/1; absent TID word is zero). VMAR (2): base, length, live (0/1). Mapping (3): base, length, current R/W/X bits, maximum R/W/X bits. Channel (4): peer KOID (zero until pair publication), local open (0/1), peer open (0/1), queued messages or receivers, queued bytes, byte-queue counters present (0/1). Device (5): profile, virtio device ID, PCI vendor/device word, host IRQ domain, first host interrupt, interrupt count, lifecycle (1 claimed, 2 attached, 3 active, 4 retired, 5 quarantined), resource count. Device resource (6): resource kind, host physical base, length, guest aperture offset, attributes. Addresses never contain kernel virtual pointers. Device details read metadata without MMIO/config-space probes; host interrupt identities are not guest IRQs.",
     "Device firmware inspection reads one immutable boot snapshot. Field PROPERTY_NAMES (5) returns every property name as a NUL-separated list, without granting ownership or exposing mapping capabilities; field PROPERTY (4) reads a named property's original bytes. Other fields report node identity, compatible strings, translated registers and interrupt metadata. Empty output queries the required byte length. The caller supplies a name only for PROPERTY; all other fields require an empty name. Inspection cannot substitute for an atomic device claim.",
     "Physical device profiles identify the admitted transport contract: virtio-mmio SCSI (1), userspace-managed registers (2), virtio-mmio network (3), and an exclusively assigned PCI function (4). Firmware matching combines profile with identity and rejects ambiguous matches. PCI identity kind 3 uses exactly nine lowercase ASCII bytes vvvv:dddd (vendor and device identifiers). Physical MMIO is mediated against exact resource extents; a device handle never grants a host MMIO page mapping. DEVICE_PROFILE_INFO reports the complete guest aperture, resource count, interrupt count, PCI device/vendor word and admitted DMA bus offset. Non-PCI profiles use a 64 KiB aperture and zero PCI identity and DMA offset. Virtio profiles have one interrupt; userspace profiles report zero or one physical interrupt. Non-PCI assignment still reserves one virtual interrupt when no physical interrupt is present. A pending VM admits at most DEVICE_ASSIGNMENT_MAX_DEVICES controllers with disjoint apertures and interrupt ranges; all share its DMA backing lifetime. Partial installation rolls back every controller, and retirement releases pages only after every controller is quiescent.",
     "The PCI-function profile presents one endpoint at guest BDF 00:00.0 through an 8 MiB aperture. Resource kinds PCI_ECAM and PCI_MSI describe a virtual 1 MiB ECAM window and 4 KiB GICv2m frame; PCI_BAR0 through PCI_BAR0+5 describe implemented memory BARs. Resource offsets are relative to the assigned guest aperture; bus_address is the initial virtual PCI address of a BAR. MEMORY_64 and PREFETCHABLE flags apply only to BAR resources; other resources have zero flags and bus_address. PCI configuration and MSI-X are mediated: physical host-bridge, interrupt-controller and DMA-window registers are never guest resources. The interrupt argument selects the first of interrupt_count consecutive GIC SPIs (at most 64); the AArch64 reference GIC has 256 IDs. Linux owns the entire endpoint and its child drivers. DMA bus addresses equal the admitted host physical extent plus dma_bus_offset; this translation is not an IOMMU boundary. Firmware-initialized devices remain fail-closed if link or DMA translation validation fails. Clearing bus mastering alone is not proof of DMA retirement; a PCI assignment without a proven reset/quiescence protocol retains its DMA backing and physical claim on teardown.",
@@ -9251,7 +9391,7 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "Directory reads require the exact published page capacity. Cookie zero starts a scan and a returned next_cookie of zero ends it. Every name is one valid path component encoded as name_length UTF-8 bytes followed by zero-filled capacity. Pages are weakly consistent with concurrent filesystem mutation; callers must neither interpret nor synthesize cookies.",
     "Native task and object inspectors are immutable capability-scoped views. Process, thread, and object KOIDs plus scan cursors are observation-only values and can never be exchanged for operational authority. Out-of-scope targeted lookup returns not_found.",
     "Task inspector records carry a bounded UTF-8 name as name_length bytes followed by zero-filled capacity. Process names are the immutable labels committed by ProcessBuilder publication; Thread names are immutable scheduler identity labels retained through the retiring registry phase.",
-    "Inspector derivation is monotonic: a derived Process, TaskGroup, or ResourceDomain view cannot widen its parent's task scope, object scope, visibility, or rights. Derivation requires the inspector's complete supported rights because the returned handle carries that fixed rights set; callers attenuate it before delegation. Native task operations remain handle-based; numeric PID and TID namespaces belong exclusively to compatibility personalities.",
+    "Inspector derivation is monotonic: a derived Process, TaskGroup, or ResourceDomain view cannot widen its parent's task scope, object scope, visibility, or rights. Derivation requires DUPLICATE | TRANSFER | INSPECT | DERIVE and returns exactly that base set; INSPECT_DETAILS is never added or preserved by the existing derivation calls. Callers attenuate the returned handle before delegation. Native task operations remain handle-based; numeric PID and TID namespaces belong exclusively to compatibility personalities.",
     "Every live TaskGroup handle participates in shared group-lifetime ownership regardless of its attenuated rights. Closing the last TaskGroup handle asynchronously requests stop for every member. Rights control operations available through a handle; they do not change this ownership effect.",
     "Inspector scans require the exact published page capacity for their record type. Cursor zero starts a scan and a returned next_cursor of zero ends it. Pages and complete scans are weakly consistent with concurrent task, object, and handle-table mutation; generation-qualified handle values prevent slot reuse from aliasing an earlier observation.",
     "Memory and CPU inspectors publish immutable point-in-time copies. Their handles grant observation only; they never expose writable accounting storage or allocator and scheduler synchronization to userspace. CPU categories are scheduler-tick observations and a multi-CPU snapshot is weakly consistent across CPUs.",
