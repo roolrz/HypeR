@@ -7,6 +7,12 @@
 //! continue to require typed handles; this module intentionally provides no
 //! lookup which converts an observed identifier into authority.
 
+mod details;
+pub use details::{
+    DetailCursor, DetailRecord, DetailTarget, DeviceState, MappingPermissions, ObjectDetails,
+    UserThreadPhase,
+};
+
 use core::num::NonZeroU64;
 
 pub use crate::handle::Koid;

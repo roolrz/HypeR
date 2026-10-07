@@ -65,7 +65,7 @@ pub const SHELL_TASK_INSPECTOR_CONTRACT: StartupContract = StartupContract::exac
 pub const SHELL_OBJECT_INSPECTOR_CONTRACT: StartupContract = StartupContract::exact(
     OBJECT_INSPECTOR_NAME,
     startup::OBJECT_INSPECTOR,
-    delegated(Rights::INSPECT),
+    delegated(Rights::INSPECT.union(Rights::INSPECT_DETAILS)),
 );
 pub const SHELL_MEMORY_INSPECTOR_CONTRACT: StartupContract = StartupContract::exact(
     MEMORY_INSPECTOR_NAME,
