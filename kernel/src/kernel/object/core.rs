@@ -9,12 +9,13 @@ use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
 #[cfg(test)]
 use core::num::NonZeroU32;
-use core::num::NonZeroU64;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
+use core::sync::atomic::{AtomicUsize, Ordering, fence};
 
 use hyper::mm::{AllocationError, DeferredArcDrop, FallibleArc, WeakFallibleArc, try_box};
 use hyper::sync::{InterruptSpinLock, SpinLock};
 
+pub(crate) use super::identity::Koid;
+use super::identity::KoidReservation;
 use super::{Rights, signals::SignalSource};
 
 const RETIRED: usize = 1 << (usize::BITS - 1);
@@ -84,8 +85,6 @@ const _: () = assert!(VIRTUAL_MACHINE_OBJECT_KIND != 0);
 const _: () = assert!(VIRTUAL_CPU_OBJECT_KIND != 0);
 const _: () = assert!(VIRTUAL_SERIAL_OBJECT_KIND != 0);
 
-static NEXT_KOID: AtomicU64 = AtomicU64::new(1);
-
 #[cfg(not(test))]
 type FinalReapQueueLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
@@ -103,35 +102,6 @@ impl hyper::hal::interrupt::InterruptMask for TestReapQueueMask {
 
 #[cfg(test)]
 type FinalReapQueueLock<T> = InterruptSpinLock<T, TestReapQueueMask>;
-
-/// Diagnostic identity which never confers authority.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct Koid(NonZeroU64);
-
-impl Koid {
-    fn allocate() -> Result<Self, ObjectCreationError> {
-        let mut current = NEXT_KOID.load(Ordering::Relaxed);
-        loop {
-            let value = NonZeroU64::new(current).ok_or(ObjectCreationError::KoidExhausted)?;
-            let next = current
-                .checked_add(1)
-                .ok_or(ObjectCreationError::KoidExhausted)?;
-            match NEXT_KOID.compare_exchange_weak(
-                current,
-                next,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Ok(Self(value)),
-                Err(observed) => current = observed,
-            }
-        }
-    }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0.get()
-    }
-}
 
 /// Stable object-kind identity used by the handle ABI.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -440,7 +410,6 @@ impl<T: KernelObject> ErasedKernelObject for T {
 }
 
 struct ObjectHeader {
-    koid: Koid,
     kind: ObjectKind,
     supported_rights: Rights,
     transfer_class: TransferClass,
@@ -465,6 +434,9 @@ struct SharedObject {
     // deferred owners keep every linked allocation initialized, and only the
     // final-reap queue lock may inspect or replace this link.
     final_reap_next: SpinLock<Option<DeferredArcDrop<SharedObject>>>,
+    // Return the identity slot only after directory detachment and payload
+    // destruction, including destructors which may create another object.
+    identity: KoidReservation<'static>,
 }
 
 /// Private type-erased allocation owner used to implement typed references.
@@ -597,8 +569,12 @@ static FINAL_REAP_QUEUE: FinalReapQueueLock<FinalReapQueue> =
 impl ObjectRef {
     /// Heap bytes required by the erased owner and one concrete payload.
     pub(crate) const fn allocation_size<T: KernelObject>() -> Option<usize> {
-        let object =
-            FallibleArc::<SharedObject>::allocation_size().checked_add(core::mem::size_of::<T>());
+        let object = match FallibleArc::<SharedObject>::allocation_size()
+            .checked_add(core::mem::size_of::<T>())
+        {
+            Some(bytes) => bytes.checked_add(KoidReservation::allocation_size()),
+            None => None,
+        };
         #[cfg(not(test))]
         {
             match object {
@@ -630,12 +606,11 @@ impl ObjectRef {
             object_invariant_violation();
         }
         let payload: Box<dyn ErasedKernelObject> = try_box(payload)?;
-        let koid = Koid::allocate()?;
+        let identity = super::identity::reserve()?;
         let object = SharedObject {
             #[cfg(not(test))]
-            directory: super::directory::Membership::new(koid),
+            directory: super::directory::Membership::new(identity.koid()),
             header: ObjectHeader {
-                koid,
                 kind: T::KIND,
                 supported_rights,
                 transfer_class: T::TRANSFER_CLASS,
@@ -649,6 +624,7 @@ impl ObjectRef {
             payload,
             retirement_next: SpinLock::new(None),
             final_reap_next: SpinLock::new(None),
+            identity,
         };
         let object = Self {
             allocation: ManuallyDrop::new(FallibleArc::try_new(object)?),
@@ -660,7 +636,7 @@ impl ObjectRef {
     }
 
     pub(crate) fn koid(&self) -> Koid {
-        self.allocation.header.koid
+        self.allocation.identity.koid()
     }
 
     pub(crate) fn kind(&self) -> ObjectKind {
@@ -891,6 +867,11 @@ impl<T: KernelObject> KernelRef<T, OperationPin> {
 }
 
 impl<T: KernelObject, C: ReferenceClass> KernelRef<T, C> {
+    #[cfg(test)]
+    pub(crate) fn downgrade_for_test(&self) -> WeakObjectRef {
+        self.owner.downgrade()
+    }
+
     fn from_owner(owner: ObjectRef) -> Self {
         if owner.downcast_ref::<T>().is_none() || owner.class.index() != C::KIND.index() {
             object_invariant_violation();

@@ -220,7 +220,7 @@ int64_t __hyper_std_process_id(uint64_t process, uint64_t *id)
 	hyper_native_object_basic_info_t info = {0};
 	int64_t status = hyper_object_get_basic_info(process, &info).status;
 	if (status == 0)
-		*id = info.koid;
+		*id = info.koid & HYPER_NATIVE_KOID_SLOT_MASK;
 	return status;
 }
 
@@ -372,5 +372,6 @@ uint64_t __hyper_std_current_process_id(void)
 	hyper_call_result_t result = hyper_process_get_current_id();
 	if (result.status != 0)
 		hyper_process_exit(result.status);
-	return result.value0;
+	/* Rust exposes a reusable u32 process ID, not the full diagnostic KOID. */
+	return result.value0 & HYPER_NATIVE_KOID_SLOT_MASK;
 }

@@ -275,8 +275,16 @@ decision to publish a supported userspace ABI.
 
 ## Objects, handles, and rights
 
-An object has a non-reused `Koid` for diagnostics and tracing. A KOID cannot
-open an object or authorize an operation.
+An object has a 64-bit `Koid` for diagnostics and tracing. Its low 32 bits hold
+a nonzero reusable slot; its high 32 bits hold a generation. A slot is returned
+only after final payload destruction; reuse advances its generation, and generation
+exhaustion permanently retires that slot. Full KOIDs never repeat within a
+boot. Neither a KOID nor its slot can open an object or authorize an operation.
+Diagnostic consumers must compare the full value and must not infer creation
+order from it. Language runtimes with a 32-bit process-ID surface may expose
+the slot using `HYPER_NATIVE_KOID_SLOT_MASK`; that value is unique while the
+object remains alive and reusable afterward. Native interfaces retain the full
+KOID, and process operations continue to require handles.
 
 Every owning object reference shares one private erased allocation, but its
 Rust type records both the payload type and ownership class. The sealed

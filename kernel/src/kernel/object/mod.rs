@@ -12,6 +12,7 @@ use crate::kernel::authority::Rights;
 mod core;
 mod directory;
 mod event;
+mod identity;
 mod signals;
 mod wait;
 mod wait_set;

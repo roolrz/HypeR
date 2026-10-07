@@ -369,6 +369,21 @@ it does not resolve process-local handle values through a global kernel handle
 table. Userspace handle tables wrap the same allocation with process-local
 generations, rights, and flags only at the ABI boundary.
 
+Object identity uses a reusable 32-bit slot and a 32-bit generation, encoded
+as a nonzero 64-bit KOID with the slot in its low bits. A linear reservation
+belongs to the canonical allocation until directory detachment and final
+payload destruction finish.
+Abandoned construction returns its reservation through the same path. Reuse
+advances the generation; exhausted generations retire their slots permanently,
+so stale snapshots never identify a replacement object. Object-directory
+pagination uses a separate registration sequence rather than KOID ordering.
+The allocator retains one 16-byte free-list node per reusable slot at the
+object high-water mark on 64-bit targets, including outstanding reservations
+and deferred finalizers. Active-object storage accounting includes this node;
+returned nodes become kernel-owned reusable metadata. Allocation and
+deallocation happen outside its IRQ-masked lock, and final release requires no
+allocation.
+
 Persistent references declare their ownership class. Scheduler residence,
 object-to-object edges, userspace authority, and temporary resolved operations
 all contribute to the object's total lifetime count while remaining separately

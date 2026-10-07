@@ -195,10 +195,13 @@ duplicatable ByteChannels; `Stdio::null` drains output on a runtime thread and
 supplies EOF for input. File-backed stdio is unsupported because Native
 ProcessBuilder currently accepts channels for these services.
 
-`process::id` and child IDs expose observation-only kernel object identities;
-Rust's u32 ID surface cannot represent a KOID above u32::MAX and rejects that
-case rather than aliasing identities. Signals, fork, exec-in-place and Unix
-process groups are not provided.
+`process::id` and child IDs expose the nonzero 32-bit slot of the Process KOID.
+Slots are unique while their objects remain alive and may be reused after final
+object destruction. Retaining a child Process handle keeps its slot reserved.
+Native inspection and `hyper_os::task::current_process_id` retain the complete
+64-bit generation-qualified KOID for durable correlation. Both forms are
+observation-only; process operations use handles. Signals, fork, exec-in-place
+and Unix process groups are not provided.
 
 Native acceptance checks cover file content and namespace changes, metadata,
 UTC progression, rename-stable cwd, recursive deletion around symlinks, and
