@@ -3,6 +3,7 @@
 
 pub mod console;
 pub mod interrupt;
+pub mod iommu;
 pub mod pci;
 pub mod platform;
 pub mod power;
