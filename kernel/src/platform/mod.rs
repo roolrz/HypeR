@@ -4,6 +4,7 @@
 pub(crate) mod bcm2712;
 pub mod chosen;
 pub mod fdt;
+mod pci;
 
 pub const MAX_MEMORY_REGIONS: usize = 8;
 pub const MAX_RESERVED_REGIONS: usize = 32;
