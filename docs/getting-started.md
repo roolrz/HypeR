@@ -42,8 +42,9 @@ for the package boundary and default QEMU deployment.
 `make run` uses the already packaged appliance and needs no package argument.
 
 The kernel's early boot log includes its crate version, Git revision and UTC
-build time, for example `HypeR version 0.1.0-0123456789ab-dirty (built
-2026-10-06T00:00:00Z)`. Uncommitted changes and untracked source files add the
+build time, for example
+`HypeR version 0.1.0-0123456789ab-dirty (built 2026-10-06T00:00:00Z)`.
+Uncommitted changes and untracked source files add the
 `-dirty` suffix; a source archive without Git metadata reports `unknown`.
 Incremental `make` builds refresh the identity when source state changes and
 retain the timestamp when the kernel is not recompiled. `SOURCE_DATE_EPOCH`

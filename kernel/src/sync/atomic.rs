@@ -9,16 +9,23 @@
 //! Only stable `core` atomic types are exported; Rust does not yet stabilize its
 //! 128-bit integer atomic API.
 
+// Keep standard-library documentation and its book links at their upstream URLs.
+#[doc(no_inline)]
 pub use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering, compiler_fence, fence};
 
+#[doc(no_inline)]
 #[cfg(target_has_atomic = "8")]
 pub use core::sync::atomic::{AtomicI8, AtomicU8};
+#[doc(no_inline)]
 #[cfg(target_has_atomic = "16")]
 pub use core::sync::atomic::{AtomicI16, AtomicU16};
+#[doc(no_inline)]
 #[cfg(target_has_atomic = "32")]
 pub use core::sync::atomic::{AtomicI32, AtomicU32};
+#[doc(no_inline)]
 #[cfg(target_has_atomic = "64")]
 pub use core::sync::atomic::{AtomicI64, AtomicU64};
+#[doc(no_inline)]
 #[cfg(target_has_atomic = "ptr")]
 pub use core::sync::atomic::{AtomicIsize, AtomicUsize};
 
