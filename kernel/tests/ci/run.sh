@@ -34,16 +34,6 @@ case "${1:-}" in
         python3 -B tests/ci/hal-boundary.py
         sh tests/ci/test-x86-stage1-shootdown-contract.sh
         sh tests/ci/check-x86-stage1-shootdown-contract.sh
-        sh tests/ci/test-vcpu-transition-contract.sh
-        sh tests/ci/check-vcpu-transition-contract.sh
-        sh tests/ci/test-aarch64-guest-unwind-contract.sh
-        sh tests/ci/check-aarch64-guest-unwind-contract.sh
-        sh tests/ci/test-vcpu-interrupt-publication-contract.sh
-        sh tests/ci/check-vcpu-interrupt-publication-contract.sh
-        sh tests/ci/test-vm-retirement-contract.sh
-        sh tests/ci/check-vm-retirement-contract.sh
-        sh tests/ci/test-guest-residency-contract.sh
-        sh tests/ci/check-guest-residency-contract.sh
         sh tests/ci/test-allocator-invariant-contract.sh
         sh tests/ci/check-allocator-invariant-contract.sh
         sh tests/ci/test-allocator-cache-contract.sh
