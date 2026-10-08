@@ -7,6 +7,21 @@ import re
 
 
 def verify_command_options(run):
+    run('ldd --help', rb'Inspect Native ELF')
+    dependencies = run('ldd /bin/vmm', rb'libhyper_vm_policy_shared.so => /lib64/')
+    if dependencies.count(b'libhyper_rust_std.so =>') != 1:
+        raise AssertionError(f'ldd did not deduplicate transitive dependencies: {dependencies!r}')
+    run('ldd --tree /svc/vm-runtime', rb'libhyper_vm_support_shared.so =>')
+    direct = run('ldd --direct /bin/vmm', rb'\(interpreter\)')
+    names = re.findall(rb'\n    (lib\S+) =>', direct)
+    if names != [b'libhyper_vm_policy_shared.so', b'libhyper_rust_std.so', b'libhyper.so']:
+        raise AssertionError(f'ldd --direct did not report the ELF dependency list: {direct!r}')
+    run('ldd -v /bin/vmm', rb'ELF64 (aarch64|riscv64), OS ABI 0x3f')
+    run('ldd /bin/echo-static', rb'statically linked')
+    run('ldd /etc/hyper/vms.json /bin/echo-static', rb'statically linked', failed=True)
+    run('mkdir /missing-libraries')
+    run('ldd --library-dir /missing-libraries /bin/vmm', rb'libhyper.so => not found', failed=True)
+    run('rmdir /missing-libraries')
     run('mkdir -v /tool-options', rb'created directory /tool-options')
     run("echo -e 'one\\n\\ntwo\\n\\n\\nthree' > /tool-options/text")
     run('cat -bs /tool-options/text', rb'1\tone\n\n\s+2\ttwo\n\n\s+3\tthree\n')

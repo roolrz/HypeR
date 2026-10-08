@@ -20,6 +20,11 @@ Initial dependencies are global; `hyper_dlopen_at` additionally supports local
 symbol scopes. Loading is eager and bounded, with `RELA` and `RELR`
 support and no writable-executable mapping transition.
 
+The Native [`ldd` command](../../app/README.md#ldd-shared-library-dependency-inspection)
+inspects interpreter and dependency metadata against the standard library layout
+without executing the target. It does not replace loader symbol or relocation
+validation, nor can it infer a different library Directory delegated to a process.
+
 `hyper_dlclose` currently releases a logical caller reference but deliberately
 does not run destructors or reclaim mappings. This conservative lifetime rule
 avoids invalidating code while other threads may still execute it; unload will

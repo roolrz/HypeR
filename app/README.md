@@ -140,7 +140,7 @@ manager; `vmm --help` does not require a running manager.
 ```text
 app/
   Cargo.toml          Workspace, dependency versions, and shared lints
-  cat/ chmod/ cp/ echo/ free/ grep/ handle/ ln/ ls/ mkdir/ mv/ ps/ rm/ rmdir/ top/ touch/
+  cat/ chmod/ cp/ echo/ free/ grep/ handle/ ldd/ ln/ ls/ mkdir/ mv/ ps/ rm/ rmdir/ top/ touch/
   console-input/ console-output/
   init/
     config/           Service manifests for VM-enabled and console-only startup
@@ -276,6 +276,44 @@ handle scans report both handle counts and distinct object counts, so duplicated
 handles do not look like additional objects. `--all --summary` aggregates across
 visible processes without implying an atomic snapshot.
 See the [inspection reference](../docs/applications.md#object-and-capability-inspection).
+
+### `ldd`: shared-library dependency inspection
+
+[ldd](ldd/) reads an executable or shared object's ELF metadata and reports its
+interpreter and complete `DT_NEEDED` dependency graph. It does not execute the
+input, load it into executable memory, or call constructors. The default flat
+listing includes each dependency name once; paths resolve symbolic links, so
+the normal `/lib` alias is displayed as `/lib64/<arch>-hyper-hyper/`.
+
+```text
+ldd /bin/vmm
+ldd --tree /svc/vm-runtime
+ldd --direct /bin/ps
+ldd -v /bin/vmm /bin/handle
+ldd --library-dir /data/candidate-libraries /bin/vmm
+```
+
+`--tree` shows which object requires each library, marking cycles and already
+shown subtrees. `--direct` checks only the input's immediate dependencies and
+interpreter. `-v` includes architecture, ELF OS ABI/version and SONAME. Static
+executables are identified explicitly. Missing libraries print `not found`;
+unreadable, malformed or incompatible files have specific diagnostics. Multiple
+operands are processed independently, with a failing exit status if any inspected
+dependency cannot be resolved or validated.
+
+The lookup directory defaults to `/lib/<arch>-hyper-hyper/` for the input ELF
+architecture. `--library-dir` inspects an alternate set of libraries; it does not
+change the target program's runtime policy or its absolute interpreter path.
+No environment search path, RPATH or RUNPATH is applied. The command needs only
+ordinary filesystem read authority, not inspector privileges. This describes
+the standard system deployment; a process supplied a different library Directory
+capability can see different files. Inspection is not atomic across file changes.
+
+Parsing bounds metadata reads and dependency traversal to the Native loader's
+object/name limits. Debug sections and entire library contents are not read.
+The tool does not verify symbols, relocations, future `dlopen` calls or process
+capability grants; a successful listing is not proof that the image can run.
+No runtime load addresses are invented for files that have not been executed.
 
 ### `ps`: process and thread inventory
 

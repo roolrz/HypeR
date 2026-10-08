@@ -194,6 +194,16 @@
       ]
     },
     {
+      "binary": "hyper-ldd",
+      "staged": "ldd",
+      "destination": "bin/ldd",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
       "binary": "hyper-free",
       "staged": "free",
       "destination": "bin/free",

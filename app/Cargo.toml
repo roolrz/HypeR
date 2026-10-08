@@ -30,6 +30,7 @@ members = [
     "ps",
     "handle",
     "ls",
+    "ldd",
     "free",
     "top",
     "vm-manager",

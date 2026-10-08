@@ -19,9 +19,10 @@ options (`echo` uses `-n`, `-e` and `-E`; its unknown options are literal text).
 | `free` | `free`, `free --bytes`, `free -m -c 5 -s 0.5`; physical totals, ownership and reclaimable cache pages. `-b/-k/-m/-g` select units; `-c` is a finite sample count (default 1), `-s` the interval. |
 | `top` | `top -d 0.5`, `top -b -n 3`; interactive refresh with q/Ctrl-C to quit, or plain finite batch snapshots. Rows sort by CPU usage; `--sort name/koid`, `-p KOID`, `--name TEXT` and `--limit NUM` select the view. |
 | `handle` | `handle shell`, `handle --kind physical-device`, `handle --all --object KOID`; inspect objects, process capabilities, and the processes holding an object. |
+| `ldd` | `ldd /bin/vmm`, `ldd --tree /svc/vm-runtime`, `ldd --direct /bin/ps`, `ldd -v FILE...`; inspect ELF interpreter and direct/transitive library dependencies without executing code. `--library-dir DIR` checks an alternate library set; unresolved or incompatible dependencies cause a failing exit status. |
 | `echo` | `echo hello world`, `echo -n text`, `echo -e 'one\ntwo'`; `-n` suppresses the newline, `-e` enables escapes and `-E` restores literal backslashes. |
 
-`cat` and `ls` report an error per failed path, continue with remaining paths,
+`cat`, `ls` and `ldd` report an error per failed path, continue with remaining paths,
 and return failure if any path failed. The interactive shell merges unredirected
 stdout and stderr into one terminal queue before displaying its next prompt.
 `echo` is an ordinary application, not a second implementation inside the shell.
@@ -34,6 +35,13 @@ Native std provides `std::os::hyper::fs::MetadataExt::mode()` for permission and
 special mode bits. File type is queried separately. `metadata` follows symbolic
 links; `symlink_metadata` inspects the final link itself.
 `std::os::hyper::fs` supplies Native symlink and permission extensions.
+
+`ldd` follows the standard `/lib/<arch>-hyper-hyper/` deployment and prints
+resolved filesystem paths, including the `/lib -> lib64` alias. Its alternate
+directory option does not modify runtime loader policy. It checks dependency
+metadata and architecture/ELF ABI compatibility, not symbol bindings or
+relocations. See [the command reference](../app/README.md#ldd-shared-library-dependency-inspection)
+for scope and diagnostics.
 
 ## Object and capability inspection
 
