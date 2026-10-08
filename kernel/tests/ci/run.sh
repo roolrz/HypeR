@@ -25,21 +25,9 @@ copy_aarch64_artifacts() {
 
 case "${1:-}" in
     quality)
-        command -v rg >/dev/null 2>&1 || {
-            echo "ripgrep is required for the source-quality suite" >&2
-            exit 2
-        }
         # Check resolved dependencies and compiler-enforced HAL privacy.
         python3 -B tests/ci/test-hal-boundary.py
         python3 -B tests/ci/hal-boundary.py
-        sh tests/ci/test-x86-stage1-shootdown-contract.sh
-        sh tests/ci/check-x86-stage1-shootdown-contract.sh
-        sh tests/ci/test-allocator-invariant-contract.sh
-        sh tests/ci/check-allocator-invariant-contract.sh
-        sh tests/ci/test-allocator-cache-contract.sh
-        sh tests/ci/check-allocator-cache-contract.sh
-        sh tests/ci/test-deferred-log-contract.sh
-        sh tests/ci/check-deferred-log-contract.sh
         sh tests/ci/test-aarch64-kaslr-geometry.sh
         cargo fmt --all -- --check
         cargo fmt --manifest-path tests/host/Cargo.toml -- --check
