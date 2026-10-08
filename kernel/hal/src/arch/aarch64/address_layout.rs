@@ -9,6 +9,8 @@ pub const KASLR_ALIGNMENT: u64 = 2 * 1024 * 1024;
 const BOOT_STACK_RESERVATION_SIZE: u64 = 2 * 1024 * 1024;
 pub const KASLR_WINDOW_SIZE: u64 = 1 << 39;
 pub const BOOT_STACK_PAGES: usize = 64;
+// Allocation-free firmware discovery retains its bounded scratch data here.
+const _: () = assert!(BOOT_STACK_PAGES as u64 * PAGE_SIZE >= 256 * 1024);
 const STACK_GUARD_PAGES: u64 = 1;
 pub const MAX_RUNTIME_STACK_PAGES: u64 = 64;
 const STACK_SLOT_PAGES: u64 = STACK_GUARD_PAGES + MAX_RUNTIME_STACK_PAGES;

@@ -29,13 +29,9 @@ case "${1:-}" in
             echo "ripgrep is required for the source-quality suite" >&2
             exit 2
         }
-        sh tests/ci/test-boot-stack-contract.sh
-        sh tests/ci/check-boot-stack-contract.sh
-        # Cargo enforces dependency direction; rustc enforces HAL privacy.
-        sh tests/ci/test-arch-boundaries.sh
-        sh tests/ci/check-arch-boundaries.sh
-        sh tests/ci/test-arch-facades.sh
-        sh tests/ci/check-arch-facades.sh
+        # Check resolved dependencies and compiler-enforced HAL privacy.
+        python3 -B tests/ci/test-hal-boundary.py
+        python3 -B tests/ci/hal-boundary.py
         sh tests/ci/test-irq-registration-contract.sh
         sh tests/ci/check-irq-registration-contract.sh
         sh tests/ci/test-irq-transition-contract.sh

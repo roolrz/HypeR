@@ -34,6 +34,7 @@ mod startup_readiness;
 mod support;
 mod thread_migration;
 mod thread_sleep;
+mod type_contracts;
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod user_memory_access;
 #[cfg(CONFIG_ARCH_AARCH64)]
