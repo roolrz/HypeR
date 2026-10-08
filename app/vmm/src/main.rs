@@ -3,6 +3,9 @@
 
 //! Unified VM management and virtual-console client.
 
+#[cfg(target_os = "hyper")]
+extern crate hyper_vm_policy_shared as hyper_vm_policy;
+
 use std::mem::MaybeUninit;
 
 use clap::Parser;

@@ -174,8 +174,6 @@ app/
   session/
   shell/
   io-runtime/ vm-manager/ vm-runtime/ vm-smoke/ vmm/
-  vm-support/         Shared guest-image, device and protocol mechanisms
-  vm-policy/          Resource policy shared by init and the VM manager
 ```
 
 Each executable is its own Cargo package with `src/main.rs`. Its clap types
@@ -191,6 +189,10 @@ all workspace members. Target executable names and installed paths are unchanged
 
 Reusable OS interaction belongs to `sdk/rust/hyper-os`; application-local
 service and command policy remains under `app`.
+
+Shared application implementations and Native delivery libraries live under
+[`lib/`](../lib/README.md) and belong to this Cargo workspace. Runtime images
+install them in `/lib64/<arch>-hyper-hyper/`, with `/lib -> lib64`.
 
 ## File tools
 

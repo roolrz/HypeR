@@ -21,6 +21,14 @@ const CORE_HANDLE_COUNT: usize = 11;
 
 const HAS_VM_AUTHORITY: bool = crate::hal::vm::userspace_vm_lifecycle_available();
 const HAS_DEVICE_AUTHORITY: bool = crate::kernel::device::assigned::available();
+// The loader receives this exact directory, not a root from which to search
+// other architectures. Applications inherit or narrow the same authority.
+#[cfg(target_arch = "aarch64")]
+const LIBRARY_DIRECTORY: &str = "/lib/aarch64-hyper-hyper";
+#[cfg(target_arch = "riscv64")]
+const LIBRARY_DIRECTORY: &str = "/lib/riscv64-hyper-hyper";
+#[cfg(target_arch = "x86_64")]
+const LIBRARY_DIRECTORY: &str = "/lib/x86_64-hyper-hyper";
 pub(super) const HANDLE_COUNT: usize =
     CORE_HANDLE_COUNT + HAS_VM_AUTHORITY as usize + HAS_DEVICE_AUTHORITY as usize;
 
@@ -113,7 +121,7 @@ fn prepare_handles(
     let root = crate::kernel::vfs::root_directory(domain).map_err(Error::RootDirectory)?;
     handles[4] = Some(prepare_handle(
         ObjectPublication::try_new(
-            root.open_directory("/lib", domain)
+            root.open_directory(LIBRARY_DIRECTORY, domain)
                 .map_err(Error::RootDirectory)?,
         )
         .map_err(Error::Object)?,

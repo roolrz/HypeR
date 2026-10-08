@@ -28,14 +28,20 @@ hyper-os = { workspace = true, features = ["std"] }
 hyper-rt.workspace = true
 hyper-service.workspace = true
 hyper-vm-image.workspace = true
-hyper-vm-support.workspace = true
-hyper-vm-policy.workspace = true
 
 [lints]
 workspace = true
 
 [features]
-startup-profile = ["hyper-vm-support/startup-profile"]
+startup-profile = ["hyper-vm-support/startup-profile", "hyper-vm-support-shared/startup-profile"]
 broker-test = []
 test-runtime-crash = []
 test-power-crash = []
+
+[target.'cfg(target_os = "hyper")'.dependencies]
+hyper-vm-policy-shared.workspace = true
+hyper-vm-support-shared.workspace = true
+
+[target.'cfg(not(target_os = "hyper"))'.dependencies]
+hyper-vm-policy.workspace = true
+hyper-vm-support.workspace = true

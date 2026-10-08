@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # SDK assembly and application build/check contracts.
+# Native-only Rust DSO targets export SDK calls that have no host implementation.
+# Test their implementation crates on the host; exercise delivery through QEMU.
+APP_HOST_EXCLUDES := --exclude hyper-tool-args-shared --exclude hyper-vm-policy-shared \
+	--exclude hyper-vm-support-shared --exclude hyper-rust-std
 sdk:
 	cd "$(SDK_ABI_SOURCE)" && \
 		CARGO_TARGET_DIR="$(SDK_ABI_TARGET)" $(CARGO) run \
@@ -79,7 +83,7 @@ app: app-fetch
 		HYPER_CLANG="$(CLANG)" HYPER_LD="$(HYPER_LD)" \
 		HYPER_RUST_STD=1 "$(SDK_OUTPUT)/bin/hyper-cargo" build \
 		--manifest-path "app/Cargo.toml" --workspace --release --locked --offline \
-		$$app_bins
+		--lib $$app_bins
 	python3 -B scripts/app-deployment.py install --manifest "$(APP_DEPLOYMENT)" \
 		--build "$(APP_CARGO_OUTPUT)/$(NATIVE_RUST_TARGET)/release" --output "$(APP_OUTPUT)"
 
@@ -117,7 +121,7 @@ app-check: app-fetch
 
 app-test:
 	CARGO_TARGET_DIR="$(CURDIR)/target/app-host-tests" $(CARGO) test \
-		--manifest-path "app/Cargo.toml" $(if $(APP_TEST_PACKAGE),-p "$(APP_TEST_PACKAGE)",--workspace) --lib \
+		--manifest-path "app/Cargo.toml" $(if $(APP_TEST_PACKAGE),-p "$(APP_TEST_PACKAGE)",--workspace $(APP_HOST_EXCLUDES)) --lib \
 		--target "$(HOST_TARGET)" --locked $(APP_TEST_ARGS) \
 		--config "patch.crates-io.hyper-abi.path = '$(SDK_ABI_SOURCE)'" \
 		--config "patch.crates-io.hyper-os.path = '$(SDK_RUST_SOURCE)/hyper-os'" \
@@ -128,7 +132,7 @@ app-test:
 
 app-sdk-test: app-fetch
 	CARGO_TARGET_DIR="$(CURDIR)/target/app-host-tests" $(CARGO) test \
-		--manifest-path "app/Cargo.toml" --workspace --lib \
+		--manifest-path "app/Cargo.toml" --workspace $(APP_HOST_EXCLUDES) --lib \
 		--target "$(HOST_TARGET)" --locked --offline \
 		--config "patch.crates-io.hyper-abi.path = '$(SDK_OUTPUT)/share/hyper/abi'" \
 		--config "patch.crates-io.hyper-os.path = '$(SDK_OUTPUT)/share/hyper/rust/hyper-os'" \

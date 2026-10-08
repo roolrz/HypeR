@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "hyper-rust-std"
+workspace = "../../app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["dylib"]
+test = false
+bench = false
+doctest = false
+
+[lints]
+workspace = true

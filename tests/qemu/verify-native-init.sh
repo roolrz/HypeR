@@ -330,7 +330,8 @@ while :; do
         ls_root)
             if grep -Fxq 'bin/' "$native_output" &&
                 grep -Fxq 'etc/' "$native_output" &&
-                grep -Fxq 'lib/' "$native_output"; then
+                grep -Fxq 'lib@' "$native_output" &&
+                grep -Fxq 'lib64/' "$native_output"; then
                 send_commands 3 'cd /bin\npwd\nls -1\n'
                 command_phase='ls_bin'
             fi

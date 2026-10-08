@@ -82,7 +82,8 @@ The process loader also recognizes an absolute `PT_INTERP` path. It maps the
 trusted interpreter at 256 MiB and transfers the main image's program-header,
 entry, and interpreter-base values through standard auxiliary entries. The
 userspace interpreter performs eager architecture-specific symbol relocation, seals
-`PT_GNU_RELRO`, and resolves dependencies relative to a delegated `/lib`
+`PT_GNU_RELRO`, and resolves dependencies relative to a delegated
+`/lib/<arch>-hyper-hyper` (physically `/lib64/<arch>-hyper-hyper`)
 Directory capability. A dynamic main image must expose its mapped program
 header table through one consistent `PT_PHDR` entry. Main images remain below
 the interpreter, and runtime libraries occupy a separate range beginning at
@@ -146,7 +147,7 @@ initial set can use the existing batch reservation and publication transaction.
 
 The production init transaction reserves and writes only the authorities init
 currently consumes: the root `ResourceDomain`, root `TaskGroup`,
-`TaskFactory`, root and `/lib` `Directory` capabilities, system `TaskInspector`
+`TaskFactory`, root and `/lib/<arch>-hyper-hyper` `Directory` capabilities, system `TaskInspector`
 and `ObjectInspector` views, the process root VMAR, the runtime-owned initial
 stack VMAR, and (when available) Console, VM creation and device-assignment
 authorities. Future handle values are

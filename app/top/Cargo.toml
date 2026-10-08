@@ -24,3 +24,9 @@ clap.workspace = true
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "hyper")'.dependencies]
+hyper-tool-args-shared.workspace = true
+
+[target.'cfg(not(target_os = "hyper"))'.dependencies]
+hyper-tool-args.workspace = true

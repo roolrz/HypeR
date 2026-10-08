@@ -3,6 +3,9 @@
 
 //! Fleet manager process entry.
 
+#[cfg(target_os = "hyper")]
+extern crate hyper_vm_policy_shared as hyper_vm_policy;
+
 mod manager;
 
 use hyper_os::startup::Startup;

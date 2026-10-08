@@ -286,7 +286,7 @@
     },
     {
       "source": "{apps}/libdynamic-probe.so",
-      "destination": "lib/libdynamic-probe.so",
+      "destination": "lib64/{arch}-hyper-hyper/libdynamic-probe.so",
       "mode": "0755",
       "profiles": [
         "development"
@@ -294,7 +294,7 @@
     },
     {
       "source": "{sdk}/lib/ld-hyper-{arch}.so",
-      "destination": "lib/ld-hyper-{arch}.so",
+      "destination": "lib64/{arch}-hyper-hyper/ld-hyper-{arch}.so",
       "mode": "0755",
       "profiles": [
         "system",
@@ -303,8 +303,57 @@
     },
     {
       "source": "{sdk}/lib/libhyper.so",
-      "destination": "lib/libhyper.so",
+      "destination": "lib64/{arch}-hyper-hyper/libhyper.so",
       "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "library": "libhyper_tool_args_shared.so",
+      "staged": "lib/libhyper_tool_args_shared.so",
+      "destination": "lib64/{arch}-hyper-hyper/libhyper_tool_args_shared.so",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "library": "libhyper_rust_std.so",
+      "staged": "lib/libhyper_rust_std.so",
+      "destination": "lib64/{arch}-hyper-hyper/libhyper_rust_std.so",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "library": "libhyper_vm_policy_shared.so",
+      "staged": "lib/libhyper_vm_policy_shared.so",
+      "destination": "lib64/{arch}-hyper-hyper/libhyper_vm_policy_shared.so",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "library": "libhyper_vm_support_shared.so",
+      "staged": "lib/libhyper_vm_support_shared.so",
+      "destination": "lib64/{arch}-hyper-hyper/libhyper_vm_support_shared.so",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "symlink": "lib64",
+      "destination": "lib",
+      "mode": "0777",
       "profiles": [
         "system",
         "development"
