@@ -13,6 +13,13 @@ locally.
 The `quality` suite requires ripgrep, while the `scripts` suite requires
 ShellCheck; GitHub Actions installs both tools explicitly.
 
+The separate `Documentation` workflow builds the complete Markdown, Rustdoc
+and Doxygen site on every pull request and push to `main`. Its build job checks
+documentation diagnostics and local links in the generated HTML artifact. Only
+the default-branch deployment job receives Pages write permission. See the
+[documentation build guide](../../docs/documentation.md) for local reproduction
+and the one-time Pages/required-check setup.
+
 | Suite | Required contract |
 | --- | --- |
 | `quality` | Parsed workspace declarations, resolved Cargo graph, HAL privacy compilation, formatting, host and Loom concurrency tests, Kconfig, and kallsyms tests |

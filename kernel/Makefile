@@ -94,7 +94,7 @@ GUEST_FETCH := tools/guest/fetch-alpine-x86_64.sh
 GUEST_ASSET_STAMP := $(GUEST_OUTPUT)/.alpine-3.23.5.stamp
 endif
 
-.PHONY: all prepare-config config defconfig olddefconfig guest-assets clean-guest-assets build image release check test test-image test-timer test-qemu test-vhe-required verify verify-runtime verify-image verify-boot verify-smp run clean
+.PHONY: all prepare-config config defconfig olddefconfig guest-assets clean-guest-assets build image release check test doc test-image test-timer test-qemu test-vhe-required verify verify-runtime verify-image verify-boot verify-smp run clean
 
 all: image
 
@@ -168,6 +168,9 @@ check: prepare-config
 	$(KERNEL_CONFIG_ENV) $(CARGO) clippy --manifest-path $(CONCURRENCY_TEST_MANIFEST) --target $(HOST_TARGET) --all-targets --locked -- -D warnings
 	$(CARGO) clippy --manifest-path $(KCONFIG_MANIFEST) --target $(HOST_TARGET) -- -D warnings
 	$(CARGO) clippy --manifest-path $(KALLSYMS_MANIFEST) --target $(HOST_TARGET) -- -D warnings
+
+doc: prepare-config
+	$(KERNEL_CONFIG_ENV) $(CARGO) doc --no-deps --package hyper --package hyper-core --package hyper-hal --package hyper-abi --document-private-items --locked --target $(TARGET)
 
 test: prepare-config
 	$(KERNEL_CONFIG_ENV) $(CARGO) test --manifest-path $(HOST_TEST_MANIFEST) --target $(HOST_TARGET)
