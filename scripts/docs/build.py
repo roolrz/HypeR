@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 from check_links import check_site
+from rustdoc import fix_upstream_links
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / 'target/documentation'
@@ -143,6 +144,11 @@ def program_doc_flags(library_view):
 
 def copy_rustdoc(source, destination):
     shutil.copytree(source, destination)
+    for page in destination.rglob('*.html'):
+        original = page.read_text()
+        updated = fix_upstream_links(original)
+        if updated != original:
+            page.write_text(updated)
     # Cargo doc does not create a workspace landing page by default, but the
     # generated help/settings pages link back to one.
     crates = sorted(path.name for path in destination.iterdir()

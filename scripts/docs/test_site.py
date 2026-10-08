@@ -4,6 +4,8 @@
 """Behavioral fixtures for source links and the final Pages artifact."""
 
 import importlib.util
+from html.parser import HTMLParser
+import json
 import os
 from pathlib import Path
 import shutil
@@ -15,8 +17,10 @@ from build import (DOC_FLAGS, documented_crates, program_doc_flags,
                    reference_doc_flags, workspace_packages)
 from check_links import References, check_site
 from markdown import markdown
+from mkdocs.config import load_config
 from mkdocs.structure.files import File, Files
 from pymdownx.superfences import fence_div_format
+from rustdoc import fix_upstream_links
 from types import SimpleNamespace
 from xml.etree import ElementTree
 
@@ -24,6 +28,40 @@ from xml.etree import ElementTree
 spec = importlib.util.spec_from_file_location('documentation_site', Path(__file__).with_name('site.py'))
 site = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(site)
+
+
+class GuideContent(HTMLParser):
+    def __init__(self, html):
+        super().__init__(convert_charrefs=True)
+        self.inline_code = []
+        self.block_code = []
+        self.checkboxes = []
+        self.in_pre = False
+        self.in_code = False
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'pre':
+            self.in_pre = True
+            self.block_code.append('')
+        elif tag == 'code':
+            self.in_code = True
+            if not self.in_pre:
+                self.inline_code.append('')
+        elif tag == 'input':
+            self.checkboxes.append(dict(attrs))
+
+    def handle_endtag(self, tag):
+        if tag == 'pre':
+            self.in_pre = False
+        elif tag == 'code':
+            self.in_code = False
+
+    def handle_data(self, data):
+        if self.in_pre:
+            self.block_code[-1] += data
+        elif self.in_code:
+            self.inline_code[-1] += data
 
 
 class DocumentationLinks(unittest.TestCase):
@@ -37,6 +75,42 @@ class DocumentationLinks(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
         return path
+
+    def render_guide(self, text):
+        self.write('input/guide.md', text)
+        self.write('manifest.json', json.dumps({
+            'revision': 'abcdef', 'sources': ['guide.md'], 'nav': [{'Guide': 'guide.md'}],
+        }))
+        config = load_config(str(Path(__file__).with_name('mkdocs.yml')),
+                             docs_dir=str(self.root / 'input'), site_dir=str(self.root / 'output'))
+        site.on_config(config)
+        page = SimpleNamespace(file=File('guide.md', config.docs_dir, config.site_dir, True))
+        site.on_page_markdown(text, page)
+        return GuideContent(markdown(
+            text, extensions=config.markdown_extensions,
+            extension_configs=config.mdx_configs))
+
+    def test_inline_code_wraps_as_spaces_without_changing_code_blocks(self):
+        for newline in ('\n', '\r\n'):
+            with self.subTest(newline=repr(newline)):
+                article = self.render_guide(newline.join([
+                    'Run `handle', '--objects` or ``echo  `literal`', '<value>``.', '',
+                    '```sh', 'handle', '--objects', '```', '',
+                    '    echo  one', '    echo two', '',
+                ]))
+                self.assertEqual(article.inline_code,
+                                 ['handle --objects', 'echo  `literal` <value>'])
+                self.assertEqual(article.block_code, ['handle\n--objects', 'echo  one\necho two\n'])
+
+    def test_task_lists_keep_completion_state_and_code_examples_literal(self):
+        article = self.render_guide('- [ ] Pending\n- [x] Done\n- [X] Also done\n\n'
+                                    '```text\n- [x] Literal example\n```\n')
+        boxes = article.checkboxes
+        self.assertEqual(len(boxes), 3)
+        self.assertEqual([node.get('type') for node in boxes], ['checkbox'] * 3)
+        self.assertEqual(['checked' in node for node in boxes], [False, True, True])
+        self.assertTrue(all('disabled' in node for node in boxes))
+        self.assertEqual(article.block_code, ['- [x] Literal example'])
 
     def test_document_source_and_asset_links(self):
         self.write('kernel/src/task.rs', '// source')
@@ -191,6 +265,40 @@ class DocumentationLinks(unittest.TestCase):
                              documentation / 'local_sdk/struct.Thing.html')
         external_links = References((documentation / 'local_sdk/fn.value.html').read_text()).links
         self.assertIn('https://example.org/vendor/hyper_vendor/struct.Value.html', external_links)
+
+    def test_portable_atomics_link_to_upstream_standard_library_docs(self):
+        atomic = Path(__file__).resolve().parents[2] / 'kernel/src/sync/atomic.rs'
+        manifest = self.write('fixture/Cargo.toml', '[package]\nname = "atomic-doc-probe"\n'
+                              'version = "0.1.0"\nedition = "2024"\n[workspace]\n')
+        self.write('fixture/src/lib.rs', f'#![no_std]\n#[path = {json.dumps(str(atomic))}]\n'
+                   'pub mod atomic;\n')
+        target = self.root / 'build'
+        subprocess.run(['cargo', 'doc', '--manifest-path', str(manifest), '--offline', '--no-deps'],
+                       env=os.environ | {'CARGO_TARGET_DIR': str(target), 'RUSTDOCFLAGS': DOC_FLAGS},
+                       check=True, capture_output=True)
+        docs = target / 'doc/atomic_doc_probe/atomic'
+        links = References((docs / 'index.html').read_text()).links
+        for item in ('enum.Ordering.html', 'type.AtomicBool.html', 'fn.fence.html'):
+            self.assertTrue(any(url.startswith('https://doc.rust-lang.org/')
+                                and url.endswith('/core/sync/atomic/' + item) for url in links))
+            self.assertFalse((docs / item).exists())
+        self.assertTrue((docs / 'struct.AtomicFlag.html').is_file())
+
+    def test_inherited_rustdoc_link_is_fixed_without_rewriting_source_text(self):
+        broken = 'Ord#lexicographical-comparison'
+        untouched = (f'<pre>&lt;a href="{broken}"&gt;example&lt;/a&gt;</pre>\n'
+                     f'<script>const example = \'<a href="{broken}">\';</script>\n'
+                     f'<!-- <a href="{broken}"> -->\n')
+        original = (untouched + f'<p>π\u2028 <a title="x &amp; y" href="{broken}">order</a> '
+                    '<a href="struct.Local.html#method.cmp">local</a></p>')
+        updated = fix_upstream_links(original)
+        self.assertTrue(updated.startswith(untouched))
+        self.assertIn('title="x &amp; y"', updated)
+        self.assertEqual(References(updated).links, {
+            'https://doc.rust-lang.org/core/cmp/trait.Ord.html#lexicographical-comparison',
+            'struct.Local.html#method.cmp',
+        })
+        self.assertEqual(fix_upstream_links(updated), updated)
 
     def test_root_url_and_symlink_are_rejected(self):
         self.write('index.html', '<a href="/api/">Wrong base path</a>')

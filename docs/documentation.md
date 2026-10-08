@@ -14,6 +14,10 @@ references into one GitHub Pages artifact. The intended public address is
 - MkDocs publishes project Markdown files in their existing repository paths.
   Navigation is generated from page titles; adding a tracked Markdown guide
   does not require maintaining a second copy or editing a page inventory.
+  Task lists render as disabled checkboxes. Line breaks in inline code become
+  spaces so copied commands stay on one line; code blocks retain their layout.
+  Keep each inline code span on one source line for consistent GitHub rendering,
+  especially when a continuation would start with a list marker such as `+`.
 - Rustdoc generates kernel, core, HAL and ABI references separately for AArch64,
   RISC-V and x86-64, using their normal QEMU configurations. It also generates
   application, installed SDK and ABI references for both HypeR Native targets,
@@ -44,6 +48,11 @@ The pipeline excludes private `.agent`, `.agents` and `.codex` files, ignored
 build output and symlinked source files. Third-party prose is not imported as
 project guidance. Rustdoc links between HypeR crates stay within the site;
 external type and trait links use upstream documentation where available.
+The portable atomic facade links its standard-library re-exports upstream
+instead of inlining their descriptions and relative Rust book links.
+Inherited `Iterator::cmp` descriptions contain an unresolved `Ord` section link
+in the pinned Rustdoc version; packaging restores that known upstream URL in
+HTML anchors while preserving source examples and other page content.
 Test-only configurations are not enabled.
 Build scripts and other tools remain accessible through repository source links
 and their existing guides; they are not given synthetic function descriptions.

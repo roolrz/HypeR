@@ -689,8 +689,8 @@ consistent point-in-time observation, not a transaction across CPUs.
 These observations are exposed only through typed, read-only inspector
 handles. Applications cannot map or modify accounting storage, and delegating
 an inspector follows the ordinary handle rights and transfer rules. Memory
-observations contain identities that consumers can validate (`total = reserved
-+ managed`, `managed = free + used`, and the ownership categories sum to
+observations contain identities that consumers can validate
+(`total = reserved + managed`, `managed = free + used`, and the ownership categories sum to
 `used`). CPU categories describe scheduler-entity residency—idle, kernel
 Thread, user Thread, and vCPU—not architectural privilege-level cycle counts.
 The configured scheduler tick frequency is part of every CPU observation.
