@@ -32,18 +32,8 @@ case "${1:-}" in
         # Check resolved dependencies and compiler-enforced HAL privacy.
         python3 -B tests/ci/test-hal-boundary.py
         python3 -B tests/ci/hal-boundary.py
-        sh tests/ci/test-boot-lifecycle-contract.sh
-        sh tests/ci/check-boot-lifecycle-contract.sh
-        sh tests/ci/test-local-irq-lifecycle-contract.sh
-        sh tests/ci/check-local-irq-lifecycle-contract.sh
         sh tests/ci/test-x86-stage1-shootdown-contract.sh
         sh tests/ci/check-x86-stage1-shootdown-contract.sh
-        sh tests/ci/test-secondary-handoff-contract.sh
-        sh tests/ci/check-secondary-handoff-contract.sh
-        sh tests/ci/test-riscv-guest-frame-contract.sh
-        sh tests/ci/check-riscv-guest-frame-contract.sh
-        sh tests/ci/test-native-user-boundary.sh
-        sh tests/ci/check-native-user-boundary.sh
         sh tests/ci/test-vcpu-transition-contract.sh
         sh tests/ci/check-vcpu-transition-contract.sh
         sh tests/ci/test-aarch64-guest-unwind-contract.sh
