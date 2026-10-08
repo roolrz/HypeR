@@ -36,6 +36,8 @@ SDK_LIB_TEST_OUTPUT := $(CURDIR)/target/sdk-lib-tests
 APP_OUTPUT ?= $(CURDIR)/target/app/$(NATIVE_ARCH)
 APP_CARGO_OUTPUT := $(CURDIR)/target/app-cargo/$(NATIVE_ARCH)
 APP_DEPLOYMENT := $(CURDIR)/app/deployment.json
+APP_FEATURES ?=
+APP_EXTRA_BINS ?=
 NATIVE_IMAGE_PROFILE ?= development
 ifeq ($(filter $(NATIVE_IMAGE_PROFILE),development system),)
 $(error NATIVE_IMAGE_PROFILE must be development or system)

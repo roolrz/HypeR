@@ -58,4 +58,7 @@ architecture, SONAME and required dynamic
 symbols. Missing or mismatched libraries fail the build before replacing the
 previous image. Feature-specific fixtures must package a coherent set of binaries
 and DSOs; copying only a newly built binary over an older library set can fail
-this check.
+this check. The fixture targets therefore use `make app` with `APP_FEATURES` and
+an isolated `APP_OUTPUT` to stage the whole application/library set; extra probe
+binaries are selected with `APP_EXTRA_BINS`. Board images take the I/O runtime
+from this staged set, just like the other services.

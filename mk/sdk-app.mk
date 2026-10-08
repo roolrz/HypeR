@@ -83,7 +83,8 @@ app: app-fetch
 		HYPER_CLANG="$(CLANG)" HYPER_LD="$(HYPER_LD)" \
 		HYPER_RUST_STD=1 "$(SDK_OUTPUT)/bin/hyper-cargo" build \
 		--manifest-path "app/Cargo.toml" --workspace --release --locked --offline \
-		--lib $$app_bins
+		--lib $$app_bins $(addprefix --bin ,$(APP_EXTRA_BINS)) \
+		$(if $(strip $(APP_FEATURES)),--features "$(APP_FEATURES)")
 	python3 -B scripts/app-deployment.py install --manifest "$(APP_DEPLOYMENT)" \
 		--build "$(APP_CARGO_OUTPUT)/$(NATIVE_RUST_TARGET)/release" --output "$(APP_OUTPUT)"
 
@@ -140,4 +141,3 @@ app-sdk-test: app-fetch
 		--config "patch.crates-io.hyper-service.path = '$(SDK_OUTPUT)/share/hyper/rust/hyper-service'" \
 		--config "patch.crates-io.hyper-vm-image.path = '$(SDK_OUTPUT)/share/hyper/rust/hyper-vm-image'" \
 		--config "patch.crates-io.hyper-sys.path = '$(SDK_OUTPUT)/share/hyper/rust/hyper-sys'"
-

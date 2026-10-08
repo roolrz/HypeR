@@ -95,6 +95,13 @@ static/dynamic linking probes
 and Rust std smoke programs. Specialized VM smoke binaries remain owned by their
 acceptance targets.
 
+Feature-specific fixtures also build the complete workspace and stage its
+executables and DSOs together. `APP_FEATURES` selects package-qualified Cargo
+features; `APP_EXTRA_BINS` selects additional acceptance binaries. Use a separate
+`APP_OUTPUT` to keep instrumented applications and libraries out of the ordinary
+deployment. Updating only a runtime binary can leave its Rust generic symbols
+incompatible with previously staged libraries, even when their SONAMEs match.
+
 [app/deployment.json](../app/deployment.json) is the shared installation and
 initramfs payload manifest. A binary entry defines its Cargo binary, staged
 filename, archive destination, mode, and image membership. Shared libraries use

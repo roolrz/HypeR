@@ -113,20 +113,17 @@ test-io-vm: image app-fetch fit-pack $(NEWC_PACK)
 test-runtime-crash: image native-initramfs
 	@test "$(NATIVE_TEST_VM)" = 1 || { echo "VM runtime acceptance is not implemented for $(ARCH)" >&2; exit 2; }
 	python3 -B tests/qemu/vm_fixtures.py "$(NATIVE_VM_CONFIG)" "$(APP_OUTPUT)/fleet-fixtures"
-	CARGO_TARGET_DIR="$(APP_CARGO_OUTPUT)" HYPER_ARCH="$(NATIVE_ARCH)" \
-		HYPER_SYSROOT="$(SDK_OUTPUT)" HYPER_RUST_STD=1 \
-		HYPER_CLANG="$(CLANG)" HYPER_LD="$(HYPER_LD)" \
-		"$(SDK_OUTPUT)/bin/hyper-cargo" build --manifest-path app/Cargo.toml \
-		-p hyper-vm-runtime --features test-runtime-crash --release --locked --offline
+	$(MAKE) -o app-fetch app APP_OUTPUT="$(APP_OUTPUT)/runtime-crash-apps" \
+		APP_FEATURES=hyper-vm-runtime/test-runtime-crash
 	$(MAKE) -o app native-initramfs \
+		APP_OUTPUT="$(APP_OUTPUT)/runtime-crash-apps" \
 		NATIVE_VM_CONFIG="$(APP_OUTPUT)/fleet-fixtures/victim-first.json" \
-		NATIVE_VM_RUNTIME="$(APP_CARGO_OUTPUT)/$(NATIVE_RUST_TARGET)/release/hyper-vm-runtime" \
 		NATIVE_INITRAMFS="$(APP_OUTPUT)/runtime-crash.cpio"
 	$(NATIVE_QEMU_ENV) python3 tests/qemu/verify-runtime-crash.py "$(QEMU)" "$(KERNEL_IMAGE)" \
 		"$(APP_OUTPUT)/runtime-crash.cpio" "$(APP_OUTPUT)/runtime-crash.log"
 	$(MAKE) -o app native-initramfs \
+		APP_OUTPUT="$(APP_OUTPUT)/runtime-crash-apps" \
 		NATIVE_VM_CONFIG="$(APP_OUTPUT)/fleet-fixtures/survivor-first.json" \
-		NATIVE_VM_RUNTIME="$(APP_CARGO_OUTPUT)/$(NATIVE_RUST_TARGET)/release/hyper-vm-runtime" \
 		NATIVE_INITRAMFS="$(APP_OUTPUT)/runtime-crash-reordered.cpio"
 	$(NATIVE_QEMU_ENV) python3 tests/qemu/verify-runtime-crash.py "$(QEMU)" "$(KERNEL_IMAGE)" \
 		"$(APP_OUTPUT)/runtime-crash-reordered.cpio" "$(APP_OUTPUT)/runtime-crash-reordered.log" \
@@ -169,16 +166,13 @@ test-power-crash: image app
 
 power-crash-case:
 	@case "$(POWER_CRASH_STATE)" in dormant|pending|powered-off) ;; *) exit 2 ;; esac
-	CARGO_TARGET_DIR="$(APP_CARGO_OUTPUT)" HYPER_ARCH="$(NATIVE_ARCH)" \
-		HYPER_SYSROOT="$(SDK_OUTPUT)" HYPER_RUST_STD=1 \
-		HYPER_CLANG="$(CLANG)" HYPER_LD="$(HYPER_LD)" \
-		HYPER_TEST_POWER_CRASH="$(POWER_CRASH_STATE)" \
-		"$(SDK_OUTPUT)/bin/hyper-cargo" build --manifest-path app/Cargo.toml \
-		-p hyper-vm-runtime --features test-power-crash --release --locked --offline
+	HYPER_TEST_POWER_CRASH="$(POWER_CRASH_STATE)" \
+		$(MAKE) -o app-fetch app APP_OUTPUT="$(APP_OUTPUT)/power-crash-$(POWER_CRASH_STATE)-apps" \
+		APP_FEATURES=hyper-vm-runtime/test-power-crash
 	$(MAKE) -o app native-initramfs ARCH=aarch64 \
+		APP_OUTPUT="$(APP_OUTPUT)/power-crash-$(POWER_CRASH_STATE)-apps" \
 		NATIVE_VM_CONFIG="$(CURDIR)/app/init/tests/config/vms-power-crash.json" \
 		NATIVE_GUEST_ITB="$(KERNEL_DIRECTORY)/target/guest/aarch64/alpine-smp.itb" \
-		NATIVE_VM_RUNTIME="$(APP_CARGO_OUTPUT)/$(NATIVE_RUST_TARGET)/release/hyper-vm-runtime" \
 		NATIVE_INITRAMFS="$(APP_OUTPUT)/power-crash-$(POWER_CRASH_STATE).cpio"
 	$(NATIVE_QEMU_ENV) python3 -B tests/qemu/verify-power-crash.py "$(QEMU)" "$(KERNEL_IMAGE)" \
 		"$(APP_OUTPUT)/power-crash-$(POWER_CRASH_STATE).cpio" \
