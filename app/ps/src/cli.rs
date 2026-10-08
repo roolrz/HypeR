@@ -8,12 +8,11 @@ use clap::Parser;
 pub struct Ps {
     #[arg(short = 'T', long)]
     pub threads: bool,
-    /// Select one process by KOID.
-    #[arg(short = 'p', long)]
-    pub process: Option<std::num::NonZeroU64>,
-    /// Show process names containing this text.
+    #[command(flatten)]
+    pub filter: hyper_tool_args::ProcessFilter,
+    /// Print rows only, suitable for pipelines.
     #[arg(long)]
-    pub name: Option<String>,
+    pub no_headers: bool,
 }
 
 #[cfg(test)]

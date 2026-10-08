@@ -177,14 +177,14 @@ while :; do
             fi
             ;;
         ps)
-            if grep -Eq '^process  [[:space:]]*[0-9]+[[:space:]]+-[[:space:]]+[^[:space:]]+[[:space:]]+(created|running|stopping|stopped|retiring|retired)' "$native_output"; then
+            if grep -Eq '^process  [[:space:]]*0x[0-9a-f]+[[:space:]]+-[[:space:]]+[^[:space:]]+[[:space:]]+(created|running|stopping|stopped|retiring|retired)' "$native_output"; then
                 send_commands 1 '/bin/ps --threads\n'
                 command_phase='threads'
             fi
             ;;
         threads)
-            if grep -Eq '^  thread [[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+user/(resident|retiring) process=[^[:space:]]+' "$native_output" &&
-                grep -Eq '^  thread [[:space:]]*[0-9]+[[:space:]]+kernel[[:space:]]+[^[:space:]]+[[:space:]]+(bootstrap|idle|kernel|vcpu)/(resident|retiring) process=kernel' "$native_output" &&
+            if grep -Eq '^  thread [[:space:]]*0x[0-9a-f]+[[:space:]]+0x[0-9a-f]+[[:space:]]+[^[:space:]]+[[:space:]]+user/(resident|retiring) process=[^[:space:]]+' "$native_output" &&
+                grep -Eq '^  thread [[:space:]]*0x[0-9a-f]+[[:space:]]+kernel[[:space:]]+[^[:space:]]+[[:space:]]+(bootstrap|idle|kernel|vcpu)/(resident|retiring) process=kernel' "$native_output" &&
                 grep -Eq '[[:space:]]kernel[[:space:]]+idle/0[[:space:]]+idle/resident' "$native_output"; then
                 send_commands 1 '/bin/echo HYPER_NATIVE_PS_OK\n'
                 command_phase='ps_done'
@@ -192,7 +192,7 @@ while :; do
             ;;
         ps_done)
             if grep -Fxq 'HYPER_NATIVE_PS_OK' "$native_output"; then
-                process_koid=$(awk '/^process  [[:space:]]*[0-9]+/ && $4 == "shell" { print $2; exit }' "$native_output")
+                process_koid=$(awk '/^process  [[:space:]]*0x[0-9a-f]+/ && $4 == "shell" { print $2; exit }' "$native_output")
                 if [ -z "$process_koid" ]; then
                     echo "could not select a persistent Process observation" >&2
                     exit 1
@@ -396,7 +396,7 @@ while :; do
         grep -q 'HypeR: starting Native init process' "$log" &&
         grep -Fxq 'HypeR session: console ready' "$native_output" &&
         grep -Fxq 'HypeR virtual console: ready' "$native_output" &&
-        grep -Fxq 'TYPE     KOID       OWNER      NAME                 STATE' "$native_output" &&
+        grep -Eq '^TYPE[[:space:]]+KOID[[:space:]]+OWNER[[:space:]]+NAME[[:space:]]+STATE$' "$native_output" &&
         grep -Eq '^HANDLE[[:space:]]+OBJECT[[:space:]]+KIND[[:space:]]+RIGHTS$' "$native_output" &&
         grep -Eq '^KOID[[:space:]]+KIND[[:space:]]+STATE[[:space:]]+HANDLES[[:space:]]+REFS$' "$native_output" &&
         grep -Fxq 'HYPER_DYNAMIC_LINK_OK' "$native_output" &&

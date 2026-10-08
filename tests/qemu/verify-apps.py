@@ -159,8 +159,8 @@ def main():
         run('ls /file-tools', failed=True)
         run('top -b -n 1 -d 0.1', rb'CPU: user-thread')
         run('free --bytes', rb'Mem:\s+\d+ B')
-        run('ps --name shell', rb'process\s+\d+.*shell')
-        run('ps -T --name shell', rb'thread\s+\d+\s+\d+\s+shell\s+user/resident')
+        run('ps --name shell', rb'process\s+0x[0-9a-f]{16}.*shell')
+        run('ps -T --name shell', rb'thread\s+0x[0-9a-f]{16}\s+0x[0-9a-f]{16}\s+shell\s+user/resident')
         verify_handles(run)
         verify_command_options(run)
         if verify_vm:

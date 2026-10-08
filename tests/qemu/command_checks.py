@@ -36,3 +36,16 @@ def verify_command_options(run):
     run('rm -dv /tool-options/dest', rb'removed /tool-options/dest')
     run('rm -d /tool-options', failed=True)
     run('rm -r /tool-options')
+
+    processes = run('ps --name shell --no-headers')
+    row = re.search(rb'\nprocess\s+(0x[0-9a-f]{16})\s+-\s+shell\s', processes)
+    if not row or b'TYPE ' in processes:
+        raise AssertionError(f'invalid ps rows: {processes!r}')
+    koid = row[1].decode()
+    run(f'ps -p {koid} -T', rb'thread\s+0x[0-9a-f]{16}')
+    run(f'top -b -n 1 -d 0.1 -p {koid} --sort name --limit 1', row[1] + rb'\s+[\d.]+%\s+\d+\s+shell')
+    samples = run('free -m -c 2 -s 0.1')
+    if len(re.findall(rb'\nMem:.*MiB', samples)) != 2:
+        raise AssertionError(f'free did not report two MiB samples: {samples!r}')
+    run('handle shell --summary --kind directory --no-headers', rb'\ndirectory\s+[1-9]\d*\s+[1-9]\d*\n')
+    run('handle --summary --kind process', rb'\nprocess\s+[1-9]\d*\n')

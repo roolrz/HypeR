@@ -29,18 +29,18 @@ fn list_tasks(
             Ok(())
         })?;
     }
-    output.write_all(b"TYPE     KOID       OWNER      NAME                 STATE\n")?;
+    if !args.no_headers {
+        output.write_all(
+            b"TYPE     KOID                OWNER               NAME                 STATE\n",
+        )?;
+    }
     let mut cursor = Some(ScanCursor::START);
     while let Some(position) = cursor {
         let page = inspector.scan_processes(position)?;
         for process in page.entries() {
-            if args
-                .process
-                .is_some_and(|koid| koid.get() != process.koid.get())
-                || args
-                    .name
-                    .as_ref()
-                    .is_some_and(|name| !process.name.as_str().contains(name))
+            if !args
+                .filter
+                .matches(process.koid.get(), process.name.as_str())
             {
                 continue;
             }
@@ -51,7 +51,7 @@ fn list_tasks(
         }
         cursor = page.next();
     }
-    if args.threads && args.process.is_none() && args.name.is_none() {
+    if args.threads && args.filter.is_empty() {
         write_kernel_threads(&threads, output)?;
     }
     Ok(())
@@ -63,7 +63,7 @@ fn write_process(
 ) -> Result<(), Box<dyn std::error::Error>> {
     write!(
         output,
-        "process  {:<10} -          {:<20} {} threads={} pending={}",
+        "process  0x{:016x} -                   {:<20} {} threads={} pending={}",
         process.koid.get(),
         process.name.as_str(),
         process.phase.name(),
@@ -126,7 +126,7 @@ fn write_thread(
 ) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         output,
-        "  thread {:<10} {:<10} {:<20} {}/{} process={}",
+        "  thread 0x{:016x} {:<18} {:<20} {}/{} process={}",
         thread.koid.get(),
         Owner(thread.process_koid),
         thread.name.as_str(),
@@ -143,7 +143,7 @@ impl std::fmt::Display for Owner {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let width = formatter.width().unwrap_or(0);
         match self.0 {
-            Some(koid) => write!(formatter, "{:<width$}", koid.get()),
+            Some(koid) => write!(formatter, "0x{:016x}", koid.get()),
             None => write!(formatter, "{:<width$}", "kernel"),
         }
     }
