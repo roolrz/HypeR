@@ -6,20 +6,20 @@ SPDX-License-Identifier: Apache-2.0
 # Native applications
 
 Applications use the installed SDK, Rust std, and clap. Run `APP --help` for
-options (echo treats option-looking arguments as literal text).
+options (`echo` uses `-n`, `-e` and `-E`; its unknown options are literal text).
 
 ## Files and system information
 
 | Command | Examples and behavior |
 | --- | --- |
-| `cat` | `cat FILE...`, `cat -n FILE`, `cat -`; streams bytes without UTF-8 conversion, with continuous optional line numbering. No files means stdin. |
-| `grep` | `grep -in PATTERN FILE`, `grep -F TEXT`, `grep -v PATTERN`; filters files or stdin, with counting, filename and quiet modes. |
-| `ls` | `ls /etc/hyper`, `ls FILE DIRECTORY`, `ls -a`, `ls --sort size -r`; defaults to permission mode, IEC size, and sorted names. `--bytes` gives exact file sizes; `-1` prints names only. Directory sizes are shown as `-`. |
-| `ps` | `ps -T`, `ps -p KOID`, `ps --name vm-runtime`; select a process or filter names, optionally including threads. Thread rows include `process=NAME`; kernel-owned threads use `OWNER=kernel`, and per-CPU idle threads are named `idle/CPU`. |
-| `free` | `free`, `free --bytes`; physical totals, ownership and reclaimable cache pages, in human-readable units or exact bytes. |
-| `top` | `top -d 0.5`, `top -b -n 3`; interactive refresh with q/Ctrl-C to quit, or plain finite batch snapshots. |
+| `cat` | `cat FILE...`, `cat -n FILE`, `cat -bs FILE`, `cat -`; streams bytes without UTF-8 conversion. Number all lines with `-n`, only nonblank lines with `-b`, and squeeze repeated blank lines with `-s`. Numbering spans inputs. |
+| `grep` | `grep -in PATTERN FILE`, `grep -F TEXT`, `grep -v PATTERN`; filters files or stdin, with counting, filename and quiet modes; `-m NUM` limits selected lines per input and `-x` matches whole lines. |
+| `ls` | `ls /etc/hyper`, `ls FILE DIRECTORY`, `ls -a`, `ls --sort size -r`; defaults to permission mode, IEC size, and sorted names. `--bytes` gives exact file sizes; `-1` prints names only, `-d` lists a directory itself, `-t` sorts newest first, and `-S` sorts largest first. Directory sizes are shown as `-`. |
+| `ps` | `ps -T`, `ps -p KOID`, `ps --name vm-runtime`; select decimal/hex KOIDs (repeat `-p` or use commas) and intersect with a name substring, optionally including threads. IDs print in hexadecimal; `--no-headers` prints rows only. Thread rows include `process=NAME`; kernel-owned threads use `OWNER=kernel`, and per-CPU idle threads are named `idle/CPU`. |
+| `free` | `free`, `free --bytes`, `free -m -c 5 -s 0.5`; physical totals, ownership and reclaimable cache pages. `-b/-k/-m/-g` select units; `-c` is a finite sample count (default 1), `-s` the interval. |
+| `top` | `top -d 0.5`, `top -b -n 3`; interactive refresh with q/Ctrl-C to quit, or plain finite batch snapshots. Rows sort by CPU usage; `--sort name/koid`, `-p KOID`, `--name TEXT` and `--limit NUM` select the view. |
 | `handle` | `handle shell`, `handle --kind physical-device`, `handle --all --object KOID`; inspect objects, process capabilities, and the processes holding an object. |
-| `echo` | `echo hello world`; prints arguments literally, followed by a newline. |
+| `echo` | `echo hello world`, `echo -n text`, `echo -e 'one\ntwo'`; `-n` suppresses the newline, `-e` enables escapes and `-E` restores literal backslashes. |
 
 `cat` and `ls` report an error per failed path, continue with remaining paths,
 and return failure if any path failed. The interactive shell merges unredirected
@@ -60,7 +60,7 @@ handle --list-rights
 
 The IDs above are examples; use those reported by your running system. Handle,
 process and object IDs print in full-width hexadecimal; input accepts decimal
-(including KOIDs from `ps`) or `0x` hexadecimal. A handle number is local to its
+or `0x` hexadecimal; `ps` also prints full-width hexadecimal KOIDs. A handle number is local to its
 process; use the OBJECT KOID to correlate the same object across processes.
 Both forms include their generation. Neither an observed ID nor this command
 grants access to the observed object.
@@ -138,6 +138,12 @@ lock after retaining its immutable mapping snapshot. Concurrent map changes can
 skip or repeat mappings; a stale cursor fails rather than implying an atomic
 snapshot. All detail callbacks run after registry and handle-table locks release.
 
+`handle --summary` counts matching registry objects by kind. With a process or
+`--all`, it reports matching handle counts and distinct object counts per kind;
+duplicate handles to the same object count once in the object column. Filters
+apply before aggregation, and `--no-headers` also works for summary output.
+Counts describe the scan's visible observations, not an atomic system snapshot.
+
 ## Named virtual machines
 
 ```text
@@ -161,6 +167,17 @@ discards input still buffered locally. Delete requires the VM to be stopped and 
 only its definition, leaving its image intact. Stop cancels a pending restart.
 Start/restart acceptance means the lifecycle request was accepted; use status to
 observe `starting`, `running`, `stopping`, `stopped`, or `failed`.
+
+Use `vmm start alpine --wait`, `vmm stop alpine --wait` or
+`vmm restart alpine --wait --timeout 60` to wait for `running`/`stopped`. The
+default total deadline is 30 seconds, including command admission and replies.
+A failed/unavailable VM, manager error or timeout produces a failing exit status.
+Timeout does not cancel or undo the operation; inspect status before retrying.
+A running state proves vCPU execution, not completion of Linux boot, DHCP or
+application startup. Concurrent clients can still change the VM's state; waiting
+observes manager state and does not acquire an exclusive lifecycle lock.
+Ordinary command exchanges also have a 30-second response deadline; attached
+console sessions remain interactive without that time limit.
 
 Each VM owns a separate runtime process, resource domain, task group, lifecycle
 tracker, and console session. The current policy allows eight definitions and budgets up to eight business

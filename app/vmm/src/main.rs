@@ -6,15 +6,18 @@
 #[cfg(target_os = "hyper")]
 extern crate hyper_vm_policy_shared as hyper_vm_policy;
 
+mod output;
+mod session;
+mod transport;
+
 use std::mem::MaybeUninit;
 
 use clap::Parser;
 use hyper_os::capability_channel::{CapabilityChannel, CapabilityReceiveSlot};
 use hyper_os::handle::{ByteChannelObject, OwnedHandle};
 use hyper_os::startup::Startup;
-use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_service::vm;
-use hyper_vm_policy::fleet::{self, Action, Request, Response};
+use hyper_vm_policy::fleet::{Action, Request, Response};
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -31,22 +34,17 @@ fn application_main(mut startup: Startup<'_>) -> ExitCode {
 fn run(startup: &mut Startup<'_>) -> Result<(), Box<dyn std::error::Error>> {
     let args = hyper_vmm::cli::Vmm::parse();
     hyper_os::require_core_abi()?;
-    let input = hyper_rt::process::stdin()?;
     let mut output = std::io::stdout().lock();
     let control = startup.take(vm::CLIENT_CONTROL)?;
     let capabilities = CapabilityChannel::from_handle(startup.take(vm::CLIENT_CAPABILITIES)?);
     let command = args.command.unwrap_or(hyper_vmm::cli::VmCommand::List);
+    let completion = command.completion();
+    let timeout = completion
+        .as_ref()
+        .map_or(std::time::Duration::from_secs(30), |wait| wait.timeout);
+    let deadline = hyper_os::time::deadline_after(timeout)?.as_raw();
     let command = command.request()?;
-    let bytes = fleet::encode(&command).map_err(std::io::Error::other)?;
-    match control.as_byte_channel().send(&bytes) {
-        Ok(()) | Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)) => {
-            // Admission can reject and close before we send. ByteChannel keeps
-            // its queued response readable after peer closure; report that
-            // reason instead of losing it behind the failed request send.
-        }
-        Err(error) => return Err(error.into()),
-    }
-    let response = receive_response(&control)?;
+    let response = transport::exchange(&control, &command, deadline).map_err(command_error)?;
     if let Response::Error { message } = response {
         return Err(std::io::Error::other(message).into());
     }
@@ -58,221 +56,56 @@ fn run(startup: &mut Startup<'_>) -> Result<(), Box<dyn std::error::Error>> {
         if !matches!(response, Response::Accepted) {
             return Err(std::io::Error::other("invalid console response").into());
         }
-        let console_channel = receive_console(&capabilities)?;
+        let console_channel = receive_console(&capabilities, deadline)?;
         writeln!(
             output,
             "Connected to {name}. Press Ctrl-] for the control menu."
         )?;
-        return console_session(input, &mut output, &console_channel);
+        return session::console_session(
+            hyper_rt::process::stdin()?,
+            &mut output,
+            &console_channel,
+        );
     }
-    write_response(&mut output, response)
+    if let Some(completion) = completion {
+        if !matches!(response, Response::Accepted) {
+            return Err(std::io::Error::other("invalid lifecycle response").into());
+        }
+        transport::complete(&control, &completion, deadline).map_err(command_error)?;
+        writeln!(output, "{}: {}", completion.name, completion.target)?;
+        Ok(())
+    } else {
+        output::write_response(&mut output, response)
+    }
 }
 
-fn receive_response(
-    control: &OwnedHandle<ByteChannelObject>,
-) -> Result<Response, Box<dyn std::error::Error>> {
-    let mut bytes = vec![0; fleet::MAX_MESSAGE_BYTES];
-    let length = control.as_byte_channel().receive(&mut bytes)?;
-    fleet::response(&bytes[..length]).map_err(|error| std::io::Error::other(error).into())
+fn command_error(error: Box<dyn std::error::Error>) -> Box<dyn std::error::Error> {
+    if matches!(
+        error.downcast_ref::<hyper_os::Error>(),
+        Some(hyper_os::Error::Status(hyper_os::Status::TIMED_OUT))
+    ) {
+        std::io::Error::new(std::io::ErrorKind::TimedOut,
+            "deadline expired; operation may still be in progress (not cancelled); inspect vmm status").into()
+    } else {
+        error
+    }
 }
 
 fn receive_console(
     capabilities: &CapabilityChannel,
+    deadline: u64,
 ) -> hyper_os::Result<OwnedHandle<ByteChannelObject>> {
     let mut bytes = [MaybeUninit::<u8>::uninit(); vm::MESSAGE_BYTES];
     let mut slots = [CapabilityReceiveSlot::new::<ByteChannelObject>(
         vm::CONSOLE_SESSION_RIGHTS,
     )];
-    let message = capabilities.receive(hyper_os::DEADLINE_INFINITE, &mut bytes, &mut slots)?;
+    let message = capabilities.receive(deadline, &mut bytes, &mut slots)?;
     if vm::ConsoleCapability::decode(message.bytes()).is_none() || message.capability_count() != 1 {
         return Err(hyper_os::Error::InvalidResponse);
     }
     slots[0]
         .take::<ByteChannelObject>()?
         .ok_or(hyper_os::Error::MissingHandle)
-}
-
-fn write_response(
-    output: &mut impl Write,
-    response: Response,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match response {
-        Response::AffinityAccepted { vcpu } => writeln!(
-            output,
-            "vCPU {vcpu}: affinity accepted; inspect vmm status for placement"
-        )?,
-        Response::Accepted => writeln!(output, "accepted")?,
-        Response::Error { message } => return Err(std::io::Error::other(message).into()),
-        Response::Entries { mut machines } => {
-            machines.sort_by(|a, b| a.name.cmp(&b.name));
-            writeln!(
-                output,
-                "NAME                              STATE      AUTOSTART  ACCESS      IMAGE"
-            )?;
-            if machines.is_empty() {
-                writeln!(
-                    output,
-                    "(no virtual machines; use 'vmm create NAME --config PATH')"
-                )?;
-            }
-            for machine in machines {
-                writeln!(
-                    output,
-                    "{:<32}  {:<11}  {:<9}  {:<10}  {}",
-                    machine.name,
-                    machine.state,
-                    if machine.autostart { "yes" } else { "no" },
-                    if machine.read_only {
-                        "read-only"
-                    } else {
-                        "managed"
-                    },
-                    machine.image
-                )?;
-                if let Some(network) = &machine.network {
-                    writeln!(
-                        output,
-                        "  network: {}; MAC: {}; I/O client: {}",
-                        network.network, network.mac, network.client
-                    )?;
-                }
-                for placement in &machine.placement {
-                    writeln!(
-                        output,
-                        "  vCPU {}: pCPU {}",
-                        placement.vcpu,
-                        placement
-                            .host_cpu
-                            .map_or_else(|| "unassigned".into(), |cpu| cpu.to_string())
-                    )?;
-                }
-                if let (Some(vcpus), Some(bytes)) = (machine.vcpus, machine.memory_bytes) {
-                    writeln!(
-                        output,
-                        "  vCPUs: {vcpus}; RAM capacity: {} MiB",
-                        bytes / (1024 * 1024)
-                    )?;
-                    if let Some(resident) = machine.resident_memory_bytes {
-                        writeln!(
-                            output,
-                            "  allocated VM backing: {resident} bytes ({} KiB)",
-                            resident / 1024
-                        )?;
-                    } else {
-                        writeln!(output, "  allocated VM backing: unavailable")?;
-                    }
-                } else if !matches!(machine.state, fleet::State::Stopped | fleet::State::Failed) {
-                    writeln!(output, "  VM metrics: unavailable")?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn console_session(
-    input: &OwnedHandle<ByteChannelObject>,
-    output: &mut impl Write,
-    console_channel: &OwnedHandle<ByteChannelObject>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use hyper_vmm::console::{Input, InputAction};
-    let mut bytes = [0u8; hyper_os::channel::MAX_MESSAGE_BYTES];
-    let mut keyboard = Input::default();
-    loop {
-        if keyboard.is_pending() {
-            match console_channel
-                .as_byte_channel()
-                .try_send(keyboard.pending())
-            {
-                Ok(()) => keyboard.sent(),
-                Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {}
-                Err(error) => return console_error(output, b"write", error),
-            }
-        }
-        let mut guest_signals = ObjectSignals::<ByteChannelObject>::READABLE
-            .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED);
-        if keyboard.is_pending() {
-            guest_signals = guest_signals.union(ObjectSignals::<ByteChannelObject>::WRITABLE);
-        }
-        let waits = [
-            WaitItem::new(
-                input.as_handle_ref(),
-                ObjectSignals::<ByteChannelObject>::READABLE
-                    .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
-            ),
-            WaitItem::new(console_channel.as_handle_ref(), guest_signals),
-        ];
-        // stdout is line-buffered. Publish prompts and partial guest output
-        // before waiting for more input from either peer.
-        output.flush()?;
-        let observation = match wait_many(&waits, hyper_os::DEADLINE_INFINITE) {
-            Ok(observation) => observation,
-            Err(error) => return console_error(output, b"wait", error),
-        };
-        if observation.index == 1 {
-            if ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observation.observed) {
-                let count = match console_channel.as_byte_channel().try_receive(&mut bytes) {
-                    Ok(count) => count,
-                    Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => continue,
-                    Err(error) => return console_error(output, b"read", error),
-                };
-                output.write_all(&bytes[..count])?;
-                continue;
-            }
-            if !ObjectSignals::<ByteChannelObject>::PEER_CLOSED.is_present_in(observation.observed)
-            {
-                continue; // Writable: retry the buffered input on the next pass.
-            }
-            output.write_all(b"\n[vmm] virtual machine disconnected\n")?;
-            return Ok(());
-        }
-        if observation.index != 0
-            || !ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observation.observed)
-        {
-            return Ok(());
-        }
-        let count = match input.as_byte_channel().try_receive(&mut bytes) {
-            Ok(count) => count,
-            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => continue,
-            Err(error) => return console_error(output, b"input", error),
-        };
-        for byte in bytes[..count].iter().copied() {
-            match keyboard.push(byte) {
-                InputAction::Continue => {}
-                InputAction::Menu => output.write_all(b"\n[vmm] d/q: detach, any other key: resume\n")?,
-                InputAction::Resume => output.write_all(b"\n[vmm] resumed\n")?,
-                InputAction::Overflow => output.write_all(b"\n[vmm] guest input buffer full; excess input discarded (Ctrl-] still works)\n")?,
-                InputAction::Detach => {
-                    output.write_all(b"\n[vmm] detached\n")?;
-                    return Ok(());
-                }
-            }
-        }
-    }
-}
-
-fn console_error(
-    output: &mut impl Write,
-    operation: &[u8],
-    error: hyper_os::Error,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = output.write_all(b"\n[vmm] console ");
-    let _ = output.write_all(operation);
-    let _ = output.write_all(b" failed: ");
-    let reason: &[u8] = match error {
-        hyper_os::Error::Status(hyper_os::Status::ACCESS_DENIED) => b"access denied",
-        hyper_os::Error::Status(hyper_os::Status::BAD_HANDLE) => b"bad handle",
-        hyper_os::Error::Status(hyper_os::Status::BAD_STATE) => b"bad state",
-        hyper_os::Error::Status(hyper_os::Status::BUSY) => b"busy",
-        hyper_os::Error::Status(hyper_os::Status::FAULT) => b"fault",
-        hyper_os::Error::Status(hyper_os::Status::INVALID_ARGUMENT) => b"invalid argument",
-        hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED) => b"disconnected",
-        hyper_os::Error::Status(_) => b"kernel error",
-        _ => b"invalid response",
-    };
-    let _ = output.write_all(reason);
-    let _ = output.write_all(b"\n");
-    Err(error.into())
 }
 
 fn main() -> ExitCode {
