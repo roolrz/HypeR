@@ -15,6 +15,9 @@ use std::{fs, io};
     about = "Change permissions using octal modes or symbolic clauses such as u+rw,go-rwx"
 )]
 pub struct Args {
+    /// Report each processed path and its resulting mode.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
     /// Recurse through directories without following nested symbolic links.
     #[arg(short = 'R', long)]
     pub recursive: bool,
@@ -128,7 +131,13 @@ impl Mode {
     }
 }
 
-pub fn change(path: &Path, mode: &Mode, recursive: bool) -> io::Result<()> {
+pub fn change(
+    path: &Path,
+    mode: &Mode,
+    recursive: bool,
+    verbose: bool,
+    output: &mut impl io::Write,
+) -> io::Result<()> {
     let mut pending = vec![(path.to_path_buf(), false, true)];
     while let Some((path, visited, operand)) = pending.pop() {
         let link_metadata = fs::symlink_metadata(&path)?;
@@ -143,12 +152,16 @@ pub fn change(path: &Path, mode: &Mode, recursive: bool) -> io::Result<()> {
             }
             continue;
         }
-        fs::set_permissions(
-            &path,
-            fs::Permissions::from_mode(
-                mode.apply(metadata.permissions().mode(), metadata.is_dir()),
-            ),
-        )?;
+        let original = metadata.permissions().mode() & 0o7777;
+        let updated = mode.apply(original, metadata.is_dir());
+        fs::set_permissions(&path, fs::Permissions::from_mode(updated))?;
+        if verbose {
+            writeln!(
+                output,
+                "{}: {original:04o} -> {updated:04o}",
+                path.display()
+            )?;
+        }
     }
     Ok(())
 }
@@ -156,7 +169,13 @@ pub fn change(path: &Path, mode: &Mode, recursive: bool) -> io::Result<()> {
 pub fn run(args: Args) -> bool {
     let mut success = true;
     for path in args.paths {
-        if let Err(error) = change(&path, &args.mode, args.recursive) {
+        if let Err(error) = change(
+            &path,
+            &args.mode,
+            args.recursive,
+            args.verbose,
+            &mut io::stdout().lock(),
+        ) {
             eprintln!("chmod: {}: {error}", path.display());
             success = false;
         }

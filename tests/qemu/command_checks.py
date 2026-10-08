@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
+"""User-facing command options exercised through Native processes and the VFS."""
+
+import re
+
+
+def verify_command_options(run):
+    run('mkdir -v /tool-options', rb'created directory /tool-options')
+    run("echo -e 'one\\n\\ntwo\\n\\n\\nthree' > /tool-options/text")
+    run('cat -bs /tool-options/text', rb'1\tone\n\n\s+2\ttwo\n\n\s+3\tthree\n')
+    run('grep -xm 1 two /tool-options/text', rb'\ntwo\n')
+    run('grep -cm 0 . /tool-options/text', rb'\n0\n', failed=True)
+    run('echo -n short > /tool-options/short')
+    run('ls --bytes /tool-options/short', rb'\s5\s+/tool-options/short')
+    run('cp -nv /tool-options/text /tool-options/short')
+    run('ls --bytes /tool-options/short', rb'\s5\s+/tool-options/short')
+    run('cp -v /tool-options/text /tool-options/copy', rb'text -> /tool-options/copy')
+    run('mkdir /tool-options/dest')
+    run('cp -T /tool-options/text /tool-options/dest', failed=True)
+    run('mv -vT /tool-options/copy /tool-options/renamed', rb'copy -> /tool-options/renamed')
+    run('chmod -v 600 /tool-options/renamed', rb'-> 0600')
+    run('ln -sv dest /tool-options/link', rb'link -> dest')
+    run('ln -sn file /tool-options/link', failed=True)
+    run('ls -d /tool-options/dest', rb'/tool-options/dest/')
+    run('touch -d @100 /tool-options/text')
+    run('touch -d @200 /tool-options/short')
+    listing = run('ls -1t /tool-options')
+    if listing.index(b'\nshort\n') > listing.index(b'\ntext\n'):
+        raise AssertionError(f'ls -t did not put newer files first: {listing!r}')
+    run('mkdir -p /tool-options/remove/a/b')
+    run('cd /tool-options')
+    run('rmdir -pv remove/a/b', rb'removed directory remove\n')
+    run('cd /')
+    run('rm -dv /tool-options/dest', rb'removed /tool-options/dest')
+    run('rm -d /tool-options', failed=True)
+    run('rm -r /tool-options')

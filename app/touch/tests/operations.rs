@@ -3,6 +3,30 @@
 
 use super::*;
 
+#[test]
+fn explicit_epoch_timestamp_preserves_nanoseconds_and_rejects_overflow()
+-> Result<(), Box<dyn std::error::Error>> {
+    let time = parse_timestamp("@123.000000007")?;
+    assert_eq!(
+        time.duration_since(SystemTime::UNIX_EPOCH)?,
+        std::time::Duration::new(123, 7)
+    );
+    for value in ["123", "@-1", "@1.", "@1.1234567890", "@18446744074", "@NaN"] {
+        assert!(parse_timestamp(value).is_err(), "{value}");
+    }
+    assert!(Args::try_parse_from(["touch", "-d", "@1", "-r", "ref", "file"]).is_err());
+    let d = Directory::new()?;
+    let args = Args::try_parse_from([
+        "touch",
+        "-d",
+        "@123.000000007",
+        d.path("file").to_str().ok_or("path")?,
+    ])?;
+    assert!(run(args));
+    assert_eq!(fs::metadata(d.path("file"))?.modified()?, time);
+    Ok(())
+}
+
 struct Directory(std::path::PathBuf);
 impl Directory {
     fn new() -> std::io::Result<Self> {
@@ -59,7 +83,8 @@ fn reference_and_selective_timestamps() -> Result<(), Box<dyn std::error::Error>
         modification: false,
         no_create: false,
         reference: Some(d.path("ref")),
-        paths: vec![d.path("file")]
+        paths: vec![d.path("file")],
+        date: None,
     }));
     let m = fs::metadata(d.path("file"))?;
     assert_eq!(m.accessed()?, a);

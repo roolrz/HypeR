@@ -10,6 +10,7 @@ import time
 
 from session import Session, native_command
 from handle_checks import verify_handles
+from command_checks import verify_command_options
 
 
 def main():
@@ -49,6 +50,12 @@ def main():
         await_text(rb'hyper-sh\$ ')
         if verify_vm:
             state('alpine', 'running')
+        run('ls -d /lib', rb'l[rwx-]{9}\s+.* /lib@')
+        architecture = re.search(rb'\n((?:aarch64|riscv64)-hyper-hyper)/\n', run('ls -1 /lib/'))
+        if architecture is None:
+            raise AssertionError('missing architecture-specific library directory')
+        for prefix in ('/lib/', '/lib64/'):
+            run(f'ls -1 {prefix}{architecture[1].decode()}', rb'\nlibhyper_rust_std.so\n')
         # Pipelines run concurrently, close unused endpoints, and preserve
         # file-open/truncation semantics without buffering whole commands.
         run('grep --help', rb'Usage:')
@@ -155,6 +162,7 @@ def main():
         run('ps --name shell', rb'process\s+\d+.*shell')
         run('ps -T --name shell', rb'thread\s+\d+\s+\d+\s+shell\s+user/resident')
         verify_handles(run)
+        verify_command_options(run)
         if verify_vm:
             # This archive grants no I/O broker capability. A name alone must
             # not fabricate an entry or determine its access permissions.

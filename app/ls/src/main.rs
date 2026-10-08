@@ -20,7 +20,7 @@ struct Entry {
 fn list(path: &Path, args: &Ls, output: &mut impl Write) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     let mut entries = Vec::new();
-    if metadata.is_dir() {
+    if metadata.is_dir() && !args.directory {
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -38,13 +38,34 @@ fn list(path: &Path, args: &Ls, output: &mut impl Write) -> io::Result<()> {
             metadata,
         });
     }
-    entries.sort_by(|a, b| match args.sort {
+    let sort = if args.newest {
+        Sort::Time
+    } else if args.largest {
+        Sort::Size
+    } else {
+        args.sort
+    };
+    // Read timestamps before sorting: an unavailable timestamp is an error,
+    // not an invented epoch value that could silently reorder the listing.
+    let mut entries: Vec<_> = entries
+        .into_iter()
+        .map(|entry| {
+            let modified = if matches!(sort, Sort::Time) {
+                Some(entry.metadata.modified()?)
+            } else {
+                None
+            };
+            Ok((entry, modified))
+        })
+        .collect::<io::Result<_>>()?;
+    entries.sort_by(|(a, a_time), (b, b_time)| match sort {
         Sort::Name => a.name.cmp(&b.name),
         Sort::Size => b
             .metadata
             .len()
             .cmp(&a.metadata.len())
             .then(a.name.cmp(&b.name)),
+        Sort::Time => b_time.cmp(a_time).then(a.name.cmp(&b.name)),
     });
     if args.reverse {
         entries.reverse();
@@ -52,7 +73,7 @@ fn list(path: &Path, args: &Ls, output: &mut impl Write) -> io::Result<()> {
     if !args.names_only {
         writeln!(output, "MODE                 SIZE  NAME")?;
     }
-    for entry in entries {
+    for (entry, _) in entries {
         let directory = entry.metadata.is_dir();
         let symlink = entry.metadata.file_type().is_symlink();
         let name: String = entry.name.chars().flat_map(char::escape_default).collect();

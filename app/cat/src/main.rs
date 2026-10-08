@@ -14,13 +14,18 @@ fn run() -> io::Result<bool> {
     }
     let mut output = io::stdout().lock();
     let mut lines = hyper_cat::Lines::default();
+    let options = hyper_cat::Options {
+        number: args.number,
+        number_nonblank: args.number_nonblank,
+        squeeze_blank: args.squeeze_blank,
+    };
     let mut failed = false;
     for path in args.files {
         let result = if path == std::path::Path::new("-") {
-            lines.copy(io::stdin().lock(), &mut output, args.number)
+            lines.copy(io::stdin().lock(), &mut output, options)
         } else {
             File::open(&path)
-                .and_then(|file| lines.copy(BufReader::new(file), &mut output, args.number))
+                .and_then(|file| lines.copy(BufReader::new(file), &mut output, options))
         };
         if let Err(error) = result {
             if error.kind() == io::ErrorKind::BrokenPipe {

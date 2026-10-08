@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::Parser;
+use std::io::Write;
 #[cfg(target_os = "hyper")]
 use std::os::hyper::fs::PermissionsExt;
 #[cfg(unix)]
@@ -9,9 +10,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Default, Parser)]
 #[command(name = "mkdir", about = "Create directories")]
 pub struct Args {
+    /// Report each newly created operand directory.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
     /// Create missing parents and accept existing directories.
     #[arg(short = 'p', long)]
     pub parents: bool,
@@ -29,7 +33,7 @@ fn parse_mode(value: &str) -> Result<u32, String> {
     u32::from_str_radix(value, 8).map_err(|e| e.to_string())
 }
 
-pub fn create(path: &Path, parents: bool, mode: Option<u32>) -> io::Result<()> {
+pub fn create(path: &Path, parents: bool, mode: Option<u32>) -> io::Result<bool> {
     if parents && let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
@@ -38,10 +42,10 @@ pub fn create(path: &Path, parents: bool, mode: Option<u32>) -> io::Result<()> {
             if let Some(mode) = mode {
                 fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
             }
-            Ok(())
+            Ok(true)
         }
         Err(error) if parents && error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => {
-            Ok(())
+            Ok(false)
         }
         Err(error) => Err(error),
     }
@@ -50,7 +54,13 @@ pub fn create(path: &Path, parents: bool, mode: Option<u32>) -> io::Result<()> {
 pub fn run(args: Args) -> bool {
     let mut success = true;
     for path in args.paths {
-        if let Err(error) = create(&path, args.parents, args.mode) {
+        if let Err(error) = create(&path, args.parents, args.mode).and_then(|created| {
+            if created && args.verbose {
+                writeln!(io::stdout().lock(), "created directory {}", path.display())
+            } else {
+                Ok(())
+            }
+        }) {
             eprintln!("mkdir: {}: {error}", path.display());
             success = false;
         }
