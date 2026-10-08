@@ -32,6 +32,11 @@ fn would_block(error: &hyper_os::Error) -> bool {
     *error == hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)
 }
 impl ClientSlot {
+    /// Advances one binding without waiting for a Linux mailbox reply.
+    ///
+    /// An outstanding transaction is serviced before retirement can reuse its
+    /// mailbox. `true` requests another progress pass; `false` lets the broker
+    /// wait for readiness or a deadline instead of spinning on this client.
     pub(super) fn service(&mut self) -> Result<bool> {
         let Some(binding) = self.binding.as_mut() else {
             return Ok(false);
@@ -336,6 +341,11 @@ impl ClientBinding {
         Ok(true)
     }
 
+    /// Advances mapping retirement while retaining backing until release succeeds.
+    ///
+    /// A busy first release after PREPARE enters the backend reset/drain path.
+    /// Transport contention instead schedules a bounded retry of the same
+    /// release, without issuing another reset or dropping the mapping owner.
     fn release_mapping(&mut self) -> Result<bool> {
         if self.retry_at != 0 && check_deadline(self.retry_at).is_ok() {
             check_deadline(self.limit)?;

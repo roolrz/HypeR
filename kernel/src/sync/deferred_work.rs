@@ -3,7 +3,10 @@
 
 //! Lost-wakeup-safe ownership for IRQ-prompted deferred workers.
 
+#[cfg(not(loom))]
 use super::atomic::{AtomicU8, Ordering};
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicU8, Ordering};
 
 /// Result of transferring a worker toward its blocking wait.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,7 +32,16 @@ const WAKE_OUTSTANDING: u8 = 1 << 1;
 const IRQ_PROMPTED: u8 = 1 << 2;
 
 impl DeferredWork {
+    #[cfg(not(loom))]
     pub const fn new() -> Self {
+        Self {
+            state: AtomicU8::new(0),
+        }
+    }
+
+    // Loom atomics register with the running model and cannot be const.
+    #[cfg(loom)]
+    pub fn new() -> Self {
         Self {
             state: AtomicU8::new(0),
         }

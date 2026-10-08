@@ -348,6 +348,10 @@ impl ProcessBuilder {
     }
 
     /// Starts the sealed process and returns only supervisor authority.
+    ///
+    /// A rejected kernel operation returns the builder in [`StartFailure`].
+    /// A malformed successful response is instead a committed failure: the
+    /// builder has been consumed, so the caller must not retry it as a fresh start.
     pub fn start(self) -> core::result::Result<OwnedHandle<ProcessObject>, StartFailure> {
         let result = raw_ops::start(self.handle.as_handle_ref());
         let status = Status::from_raw(result.status);

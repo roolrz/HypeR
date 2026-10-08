@@ -298,6 +298,12 @@ impl FilesystemInstance {
         content.length(|| self.attributes(node).map(|attributes| attributes.size()))
     }
 
+    /// Reads into kernel scratch under the content gate shared by all opens.
+    ///
+    /// Check backend health even on a cache hit, and retain the same content
+    /// revision through lookup, backend reads and copying. The caller must copy
+    /// to userspace only after this call releases the gate. Cache admission is
+    /// opportunistic; inability to retain a page does not fail a backend read.
     pub(super) fn read_file(
         &self,
         node: &NodeLease,
@@ -373,6 +379,11 @@ impl FilesystemInstance {
         }
     }
 
+    /// Obtains an executable snapshot while excluding concurrent file mutation.
+    ///
+    /// The returned snapshot owns its bytes independently of this open node.
+    /// `None` means the backend cannot supply an executable file at this node;
+    /// backend and allocation failures remain errors.
     pub(crate) fn executable_snapshot(
         &self,
         node: &NodeLease,
@@ -386,6 +397,12 @@ impl FilesystemInstance {
         }
     }
 
+    /// Writes at an explicit offset, or appends when `offset` is `None`.
+    ///
+    /// Returns the byte count and resulting offset. Advance the content
+    /// revision before entering the backend: even an error may follow a partial
+    /// mutation. The shared content gate also serializes append positioning
+    /// against other opens of the file.
     pub(super) fn write_at(
         &self,
         node: &NodeLease,

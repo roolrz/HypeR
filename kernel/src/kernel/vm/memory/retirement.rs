@@ -9,6 +9,12 @@ use super::{Error, GuestAddressSpace, Stage2Identifier};
 use crate::kernel::vm::residency_state::Stage2AllocationIdentity;
 
 impl GuestAddressSpace {
+    /// Cuts off new residency and retains the VMID until CPU acknowledgements.
+    ///
+    /// The registry owner must already have excluded future VM entry and
+    /// reserved the cross-call transport. The returned transaction identifies
+    /// every CPU that may retain translations; beginning retirement alone does
+    /// not permit page-table or VMID reuse.
     pub(in crate::kernel) fn begin_retirement(
         &mut self,
         capability: &crate::hal::vm::GuestStage2RetirementCapability,
@@ -57,6 +63,11 @@ impl GuestAddressSpace {
         })
     }
 
+    /// Completes retirement after all targets acknowledge this exact allocation.
+    ///
+    /// The caller must finish the transaction's local invalidation requests
+    /// before passing it back. Identity mismatches fail-stop; successful
+    /// completion retires the residency record and releases the hardware VMID.
     pub(in crate::kernel) fn finish_retirement(&mut self, retirement: GuestStage2Retirement) {
         let GuestStage2Retirement { cut, allocation } = retirement;
         let identity_matches = match &self.identifier {

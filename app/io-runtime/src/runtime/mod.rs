@@ -51,6 +51,11 @@ fn check_deadline(limit: u64) -> Result<()> {
     }
 }
 
+/// Loads the board-configured I/O VM and owns its physical-device lifetime.
+///
+/// After installation, every failure goes through guest stop/retirement,
+/// hardware-worker shutdown and final log draining. Cleanup attempts preserve
+/// the original failure rather than replacing it with a later cleanup error.
 fn run(
     startup: &mut Startup<'_>,
     readiness: &mut Option<OwnedHandle<ByteChannelObject>>,
@@ -316,6 +321,12 @@ fn drain(guest: &mut InstalledGuest, guest_log: &mut GuestLog) -> Result<()> {
     Ok(())
 }
 
+/// Negotiates the backend, publishes storage readiness, and services its clients.
+///
+/// With Native storage configured, consume the readiness endpoint only after
+/// mounting `/data` and sending the ready record. Until then the outer owner
+/// retains it through failure cleanup. Broker progress shares this loop with
+/// guest console and power events instead of blocking on individual clients.
 fn supervise(
     startup: &Startup<'_>,
     guest: &mut InstalledGuest,

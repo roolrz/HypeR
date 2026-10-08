@@ -270,6 +270,11 @@ impl<E: Environment> Controller<E> {
         Ok(pending)
     }
 
+    /// Consumes one hardware event without applying fault containment itself.
+    ///
+    /// Handle returned evidence with [`Self::quarantine_fault`] before changing
+    /// stream ownership: events identify a stream, not its assignment generation.
+    /// Queue overflow closes admission instead of acknowledging lost evidence.
     pub fn next_event(&mut self) -> Result<Option<Event>, Error> {
         self.check()?;
         if self.pending_events()? == 0 {
@@ -332,6 +337,12 @@ impl<E: Environment> Controller<E> {
         self.synchronize()
     }
 
+    /// Takes one page allocation and publishes an IOVA mapping with the given rights.
+    ///
+    /// Success includes domain invalidation completion. Before publication an
+    /// error drops the supplied allocation; after publication a command failure
+    /// retains it in the controller. An error therefore does not imply rollback
+    /// of the mapping or permission to reuse its backing.
     pub fn map_page(
         &mut self,
         id: DomainId,
@@ -433,6 +444,11 @@ impl<E: Environment> Controller<E> {
         self.synchronize()
     }
 
+    /// Denies a stream and retires its cached configuration and translations.
+    ///
+    /// Remove the software binding only after both completion fences succeed;
+    /// failure retains the binding and its domain backing. This does not reset
+    /// the device or free the domain's mapped pages.
     pub fn detach(&mut self, stream: u32) -> Result<(), Error> {
         self.check()?;
         if self.stream_quarantined(stream) {

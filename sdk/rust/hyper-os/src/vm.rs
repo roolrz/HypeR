@@ -156,6 +156,11 @@ impl<T: crate::handle::ObjectType> ConsumingFailure<T> {
     }
 }
 
+/// Derives creation authority sponsored by `domain` without creating a VM.
+///
+/// Pass the resulting lease to [`create`]. The domain supplies the new VM's
+/// resource accounting; the parent authority and domain handles remain owned
+/// by the caller.
 pub fn derive_creation_lease(
     authority: HandleRef<'_, VirtualMachineCreationAuthorityObject>,
     domain: HandleRef<'_, ResourceDomainObject>,
@@ -175,6 +180,11 @@ pub fn derive_creation_lease(
     )
 }
 
+/// Consumes a creation lease to produce an unpublished, configurable VM.
+///
+/// A rejected call returns the original lease in [`ConsumingFailure`]. After
+/// success, attach memory and bootstrap state, then call [`seal`] and [`install`];
+/// creation alone neither installs the VM nor starts a vCPU.
 pub fn create(
     lease: OwnedHandle<VirtualMachineCreationLeaseObject>,
     configuration: Configuration,
@@ -264,12 +274,22 @@ pub fn set_bootstrap(
     .into_result()
 }
 
+/// Validates the pending configuration and prepares resources for [`install`].
+///
+/// Success ends configuration but does not make the VM runnable. An incomplete
+/// configuration is rejected before preparation. Once resource preparation
+/// begins, a failure leaves the pending VM failed and requires recreating it.
 pub fn seal(pending: HandleRef<'_, PendingVirtualMachineObject>) -> Result<()> {
     // SAFETY: the handle remains borrowed for the complete call.
     Status::from_raw(unsafe { hyper_sys::pending_virtual_machine_seal(pending.raw().get()) })
         .into_result()
 }
 
+/// Publishes a sealed VM and returns its VM handle and dormant boot-vCPU handle.
+///
+/// Success consumes `pending`; rejection returns it in [`ConsumingFailure`].
+/// Execution is a separate step through [`start_vcpu`], so callers can finish
+/// device binding and affinity setup before submitting the first vCPU.
 pub fn install(
     pending: OwnedHandle<PendingVirtualMachineObject>,
 ) -> core::result::Result<
@@ -363,6 +383,10 @@ pub fn abort(
     Ok(())
 }
 
+/// Requests asynchronous VM shutdown without waiting for resource retirement.
+///
+/// Use [`wait_terminated`] when the next operation depends on acknowledged
+/// retirement; a successful stop request alone does not establish that boundary.
 pub fn request_stop(machine: HandleRef<'_, VirtualMachineObject>) -> Result<()> {
     // SAFETY: the handle remains borrowed for the complete call.
     Status::from_raw(unsafe { hyper_sys::virtual_machine_request_stop(machine.raw().get()) })

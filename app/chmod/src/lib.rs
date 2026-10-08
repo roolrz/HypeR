@@ -18,7 +18,7 @@ pub struct Args {
     /// Recurse through directories without following nested symbolic links.
     #[arg(short = 'R', long)]
     pub recursive: bool,
-    /// Octal 0000..7777 or comma-separated [ugoa][+-=][rwxXstugo] clauses. Omitted who means all.
+    /// Octal 0000..7777 or comma-separated `[ugoa][+-=][rwxXstugo]` clauses. Omitted who means all.
     pub mode: Mode,
     #[arg(required = true)]
     pub paths: Vec<PathBuf>,

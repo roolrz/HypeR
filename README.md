@@ -226,6 +226,10 @@ when adopting changed board policy or guest startup files.
 
 ## Explore and contribute
 
+- [Documentation website and local build](docs/documentation.md): generated
+  Markdown, Rustdoc and C SDK references, checked on pull requests and published
+  to GitHub Pages after updates to `main`.
+
 - [Reading the code](docs/reading-the-code.md): a contributor’s guide to code paths,
   subsystem ownership, debugging and tests—from boot and scheduling to memory,
   IPC, virtualization, storage and image packaging.

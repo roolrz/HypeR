@@ -17,6 +17,7 @@ const LEVEL_SIZES: [u64; 4] = [1 << 39, 1 << 30, 1 << 21, PAGE_SIZE];
 const ENTRIES: usize = 512;
 // Retained through allocation-free firmware discovery and kernel boot.
 const STACK_PAGES: usize = 64;
+const _: () = assert!(STACK_PAGES as u64 * PAGE_SIZE >= 256 * 1024);
 const STACK_SLOT_PAGES: usize = 65;
 const REGION_SIZE: u64 = 1 << 40;
 const STACK_ARENA_BASE: u64 = registers::PML4_STACK_BASE + 2 * 1024 * 1024;

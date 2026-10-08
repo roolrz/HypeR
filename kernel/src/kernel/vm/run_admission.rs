@@ -8,7 +8,10 @@
 //! still stop and join every vCPU, wait for the admitted count to drain, and
 //! retire stage-2 translations before registry ownership can be withdrawn.
 
+#[cfg(not(loom))]
 use core::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicUsize, Ordering};
 
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const COUNT_MASK: usize = CLOSED - 1;
@@ -19,7 +22,16 @@ pub(super) struct RunAdmission {
 }
 
 impl RunAdmission {
+    #[cfg(not(loom))]
     pub(super) const fn new(owner: u64) -> Self {
+        Self {
+            owner,
+            state: AtomicUsize::new(0),
+        }
+    }
+
+    #[cfg(loom)]
+    pub(super) fn new(owner: u64) -> Self {
         Self {
             owner,
             state: AtomicUsize::new(0),

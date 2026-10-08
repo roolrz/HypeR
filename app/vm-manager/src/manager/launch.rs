@@ -40,6 +40,11 @@ impl FleetManager {
         result
     }
 
+    /// Starts a per-VM runtime with its resource domain and delegated capabilities.
+    ///
+    /// Publish the instance only after the process builder starts successfully.
+    /// Keep the manager's I/O session endpoint until the runtime reports
+    /// installation; process creation alone is too early for broker admission.
     fn launch_instance(&mut self, vm: usize) -> hyper_os::Result<()> {
         let definition = &self.machines[vm];
         let connection = definition
