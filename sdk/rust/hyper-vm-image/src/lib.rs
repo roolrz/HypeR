@@ -40,6 +40,10 @@ pub trait ReadAt {
     type Error;
 
     fn length(&self) -> Result<u64, Self::Error>;
+    /// Fills the entire output from `offset`, or reports a source error.
+    ///
+    /// A short read, including premature EOF, must not be reported as success.
+    /// On error the output may already contain a partially copied prefix.
     fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> Result<(), Self::Error>;
 }
 

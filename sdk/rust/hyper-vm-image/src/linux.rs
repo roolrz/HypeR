@@ -87,6 +87,12 @@ pub enum Error<E> {
     UnsupportedPlatformProfile,
 }
 
+/// Validates the selected Linux boot protocol and guest-physical payload layout.
+///
+/// Architecture validators check image headers, RAM bounds and payload/DTB
+/// overlap before a runtime allocates guest RAM. The returned plan contains
+/// addresses and bootstrap arguments; payload copying and DTB generation remain
+/// the caller's responsibility.
 pub fn validate_reference<S: ReadAt>(
     source: &S,
     image: ConfiguredImage,

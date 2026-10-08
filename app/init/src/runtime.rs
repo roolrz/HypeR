@@ -238,6 +238,11 @@ impl ServiceGraphLauncher for Runtime {
 }
 
 impl Runtime {
+    /// Starts the service graph, provisions the VM fleet, then supervises services.
+    ///
+    /// Storage unavailability stops its provider and publishes an unavailable
+    /// fleet configuration while keeping the Native service graph running.
+    /// Failures after service launch request service shutdown before return.
     #[inline(never)]
     fn launch_validated_graph(
         &mut self,

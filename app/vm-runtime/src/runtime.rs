@@ -15,6 +15,11 @@ use hyper_service::vm as vm_contract;
 use hyper_vm_image::linux;
 use std::time::Instant;
 
+/// Revalidates the image, installs one guest, and supervises it until termination.
+///
+/// `Installed` opens I/O broker admission after kernel installation. `Running`
+/// is sent only after device binding and boot-vCPU submission; it does not
+/// certify that guest code has executed or that guest userspace is ready.
 #[inline(never)]
 pub(super) fn run(
     startup: &mut Startup<'_>,
@@ -188,6 +193,11 @@ struct InstalledGuest {
     vcpus: Vec<hyper_os::OwnedHandle<hyper_os::handle::VirtualCpuObject>>,
 }
 
+/// Builds an installed, dormant guest and retains handles for every vCPU.
+///
+/// I/O guests use a stable memory grant that can later be shared with the
+/// backend. The returned vCPU handles also support stop/retirement observation;
+/// opening secondary handles here does not start those CPUs.
 fn install_guest(
     lease: hyper_os::OwnedHandle<hyper_os::handle::VirtualMachineCreationLeaseObject>,
     memory: &WritableVmo,

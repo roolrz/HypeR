@@ -421,6 +421,11 @@ pub(crate) fn derive_creation_lease(
     )?)
 }
 
+/// Replaces one creation lease with a pending VM in the caller's handle table.
+///
+/// Reserve the output and claim the input before constructing the object.
+/// Recoverable errors restore the lease and abort the reservation; publication
+/// commits both handle ownership and accounting together.
 pub(crate) fn create_pending(
     process: &Process,
     lease: HandleValue,
@@ -561,6 +566,12 @@ pub(crate) fn seal(process: &Process, pending: HandleValue) -> Result<(), Error>
     Ok(())
 }
 
+/// Publishes a sealed VM and replaces its pending handle with VM/vCPU handles.
+///
+/// Prepare output ownership before taking the sealed resources. After that
+/// irreversible take, registry publication must succeed: failure is an internal
+/// invariant violation, not a recoverable error with an intact pending VM.
+/// The boot vCPU remains dormant until a separate start request.
 pub(crate) fn install(
     process: &Process,
     pending_value: HandleValue,

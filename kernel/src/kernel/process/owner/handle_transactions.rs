@@ -350,6 +350,12 @@ impl PreparedDirectProcessHandleTransfer {
         source.rollback();
     }
 
+    /// Commits source removal, destination publication and quota transfer together.
+    ///
+    /// Process locks are ordered by ID, including the same-process case, and
+    /// both lifecycles are checked before table mutation. Rejection returns the
+    /// complete transaction for explicit rollback; retired storage is dropped
+    /// only after the locks have been released.
     // The failure owns this complete linear transaction and is intentionally
     // large: allocating an error owner would make rollback fallible.
     #[allow(clippy::result_large_err)]

@@ -86,6 +86,11 @@ impl Scheduler {
         })
     }
 
+    /// Prepares a park, or consumes an outcome that won before queue insertion.
+    ///
+    /// Queue membership and wait phase change under the current CPU lock.
+    /// A `Park` result contains a prepared context switch; the caller still
+    /// performs the handoff after leaving the scheduler's locked state.
     pub fn park_shared(
         &self,
         cpu: CpuIndex,
@@ -175,6 +180,12 @@ impl Scheduler {
         })
     }
 
+    /// Arbitrates one generation-qualified wake, timeout or cancellation.
+    ///
+    /// Stale and already-completed tickets lose without running `on_commit`.
+    /// The winner calls it under the owner CPU lock, after selecting the outcome
+    /// and before publishing a queued thread as ready. It must not block or
+    /// re-enter the scheduler. Resolving an armed wait need not enqueue a thread.
     pub fn resolve_wait_shared(
         &self,
         ticket: WaitTicket,
@@ -261,6 +272,12 @@ impl Scheduler {
         }
     }
 
+    /// Removes one current queue head and makes it ready after `before_ready`.
+    ///
+    /// Head discovery is retried under the owner CPU lock so competing timeout
+    /// or cancellation cannot select the same waiter twice. The callback runs
+    /// at most once, outside the queue lock but inside the CPU lock; it must not
+    /// block or re-enter the scheduler.
     pub fn notify_one_shared(
         &self,
         wait_queue: &WaitQueue,
