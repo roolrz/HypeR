@@ -53,6 +53,8 @@ instead of inlining their descriptions and relative Rust book links.
 Inherited `Iterator::cmp` descriptions contain an unresolved `Ord` section link
 in the pinned Rustdoc version; packaging restores that known upstream URL in
 HTML anchors while preserving source examples and other page content.
+Cross-crate `Source` links with a stale crate-index-relative path are repaired
+only when the exact referenced file exists in that view's source tree.
 Test-only configurations are not enabled.
 Build scripts and other tools remain accessible through repository source links
 and their existing guides; they are not given synthetic function descriptions.
@@ -68,9 +70,9 @@ The checks reject Rustdoc broken intra-document links and invalid HTML/code-bloc
 attributes, Doxygen generation warnings, MkDocs warnings and missing guide
 anchors. A final HTML pass validates links and assets from guide and C reference
 pages, including their links into Rust references and the `/HypeR/` project prefix.
-Rustdoc checks Rust intra-document links during compilation. Its own generated
-HTML is not checked as a static link graph: it contains JavaScript-generated
-anchors, optional trait scripts and dependency documentation outside this project.
+It also checks file targets of hyperlinks from every Rustdoc page. Rustdoc checks
+Rust intra-document links during compilation; its JavaScript-generated anchors
+and optional trait scripts are excluded from the generated-HTML check.
 The artifact must also fit the GitHub Pages 1 GB site limit and contain no symlinks.
 External website availability is not a merge gate. Code examples and Mermaid
 diagrams are rendered as documentation rather than executed as application tests.

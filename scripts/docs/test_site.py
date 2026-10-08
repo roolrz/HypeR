@@ -20,7 +20,7 @@ from markdown import markdown
 from mkdocs.config import load_config
 from mkdocs.structure.files import File, Files
 from pymdownx.superfences import fence_div_format
-from rustdoc import fix_upstream_links
+from rustdoc import fix_rustdoc_links
 from types import SimpleNamespace
 from xml.etree import ElementTree
 
@@ -165,17 +165,22 @@ class DocumentationLinks(unittest.TestCase):
         self.assertEqual(list(node), [])
         self.assertEqual(node.text, diagram)
 
-    def test_links_into_rustdoc_are_checked_without_scanning_its_own_links(self):
+    def test_rustdoc_files_are_checked_without_requiring_dynamic_anchors_or_scripts(self):
         self.write('index.html', '<a href="api/rust/item.html#impl-T%3CU%3E">Type</a>'
                    '<a href="api/rust/item.html#12-15">Source</a>')
         self.write('api/rust/item.html', '<meta name="generator" content="rustdoc">'
                    '<div id="impl-T%3CU%3E"></div><a id="12"></a><a id="15"></a>'
-                   '<a href="optional-runtime-target">Generated runtime link</a>')
+                   '<a href="item.html#dynamic-anchor">Generated anchor</a>'
+                   '<script src="optional-trait.js"></script>')
         check_site(self.root, rustdoc_roots=('api/rust',))
         self.write('index.html', '<a href="api/rust/item.html#missing">Broken anchor</a>')
         with self.assertRaisesRegex(ValueError, 'missing anchor'):
             check_site(self.root, rustdoc_roots=('api/rust',))
         self.write('index.html', '<a href="api/rust/missing.html">Missing API page</a>')
+        with self.assertRaisesRegex(ValueError, 'missing file'):
+            check_site(self.root, rustdoc_roots=('api/rust',))
+        self.write('index.html', '<p>Home</p>')
+        self.write('api/rust/item.html', '<a href="missing-source.html">Source</a>')
         with self.assertRaisesRegex(ValueError, 'missing file'):
             check_site(self.root, rustdoc_roots=('api/rust',))
 
@@ -291,14 +296,33 @@ class DocumentationLinks(unittest.TestCase):
                      f'<!-- <a href="{broken}"> -->\n')
         original = (untouched + f'<p>π\u2028 <a title="x &amp; y" href="{broken}">order</a> '
                     '<a href="struct.Local.html#method.cmp">local</a></p>')
-        updated = fix_upstream_links(original)
+        updated = fix_rustdoc_links(original)
         self.assertTrue(updated.startswith(untouched))
         self.assertIn('title="x &amp; y"', updated)
         self.assertEqual(References(updated).links, {
             'https://doc.rust-lang.org/core/cmp/trait.Ord.html#lexicographical-comparison',
             'struct.Local.html#method.cmp',
         })
-        self.assertEqual(fix_upstream_links(updated), updated)
+        self.assertEqual(fix_rustdoc_links(updated), updated)
+
+    def test_cross_crate_source_links_use_the_actual_page_depth(self):
+        source = self.write('view/src/dependency/lib.rs.html', 'source')
+        for item in ('crate/index.html', 'crate/module/item.html', 'crate/deep/module/item.html'):
+            page = self.write('view/' + item, '')
+            broken = '../src/dependency/lib.rs.html#39-41'
+            html = f'<a class="src rightside" href="{broken}">Source</a>'
+            fixed = fix_rustdoc_links(html, page, self.root / 'view')
+            links = References(fixed).links
+            self.assertEqual(len(links), 1)
+            path, fragment = next(iter(links)).split('#')
+            self.assertEqual((page.parent / path).resolve(), source)
+            self.assertEqual(fragment, '39-41')
+            self.assertEqual(fix_rustdoc_links(fixed, page, self.root / 'view'), fixed)
+            if item == 'crate/index.html':
+                self.assertEqual(fixed, html)
+        for html in ('<a href="../src/dependency/lib.rs.html">ordinary link</a>',
+                     '<a class="src" href="../src/missing.rs.html">Source</a>'):
+            self.assertEqual(fix_rustdoc_links(html, page, self.root / 'view'), html)
 
     def test_root_url_and_symlink_are_rejected(self):
         self.write('index.html', '<a href="/api/">Wrong base path</a>')
