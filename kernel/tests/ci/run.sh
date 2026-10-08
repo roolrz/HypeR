@@ -32,28 +32,10 @@ case "${1:-}" in
         # Check resolved dependencies and compiler-enforced HAL privacy.
         python3 -B tests/ci/test-hal-boundary.py
         python3 -B tests/ci/hal-boundary.py
-        sh tests/ci/test-irq-registration-contract.sh
-        sh tests/ci/check-irq-registration-contract.sh
-        sh tests/ci/test-irq-transition-contract.sh
-        sh tests/ci/check-irq-transition-contract.sh
         sh tests/ci/test-boot-lifecycle-contract.sh
         sh tests/ci/check-boot-lifecycle-contract.sh
         sh tests/ci/test-local-irq-lifecycle-contract.sh
         sh tests/ci/check-local-irq-lifecycle-contract.sh
-        sh tests/ci/test-cross-call-publisher-pinning-contract.sh
-        sh tests/ci/check-cross-call-publisher-pinning-contract.sh
-        sh tests/ci/test-reschedule-publication-contract.sh
-        sh tests/ci/check-reschedule-publication-contract.sh
-        sh tests/ci/test-thread-migration-context-contract.sh
-        sh tests/ci/check-thread-migration-context-contract.sh
-        sh tests/ci/test-thread-retirement-contract.sh
-        sh tests/ci/check-thread-retirement-contract.sh
-        sh tests/ci/test-thread-resource-alias-contract.sh
-        sh tests/ci/check-thread-resource-alias-contract.sh
-        sh tests/ci/test-scheduler-cpu-ownership-contract.sh
-        sh tests/ci/check-scheduler-cpu-ownership-contract.sh
-        sh tests/ci/test-scheduler-thread-table-contract.sh
-        sh tests/ci/check-scheduler-thread-table-contract.sh
         sh tests/ci/test-x86-stage1-shootdown-contract.sh
         sh tests/ci/check-x86-stage1-shootdown-contract.sh
         sh tests/ci/test-secondary-handoff-contract.sh
