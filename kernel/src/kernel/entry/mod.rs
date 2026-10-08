@@ -24,3 +24,15 @@ mod thread_affinity_test;
     any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)
 ))]
 pub(crate) use thread_affinity_test::verify_thread_affinity_creation_for_test;
+
+#[cfg(all(
+    feature = "kernel-self-test",
+    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)
+))]
+#[path = "../../../tests/kernel/object_details.rs"]
+mod object_details_test;
+#[cfg(all(
+    feature = "kernel-self-test",
+    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)
+))]
+pub(crate) use object_details_test::verify_object_details_for_test;

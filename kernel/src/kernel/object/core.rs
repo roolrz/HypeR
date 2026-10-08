@@ -349,6 +349,16 @@ pub(crate) trait KernelObject: private::Sealed + Any + Send + Sync {
     const SUPPORTED_RIGHTS: Rights;
     const TRANSFER_CLASS: TransferClass = TransferClass::Never;
 
+    /// Capture bounded local metadata after all registry/handle locks are released.
+    /// This may take the object's own metadata lock, but must not walk unrelated
+    /// objects, touch hardware, allocate, copy user memory, or retain live pointers.
+    fn diagnostic_details(
+        &self,
+        _cursor: u64,
+    ) -> Result<super::diagnostics::Details, super::diagnostics::DetailError> {
+        Err(super::diagnostics::DetailError::Unsupported)
+    }
+
     /// Rights supported by this particular immutable object instance.
     ///
     /// Most payloads use the type-wide ceiling. Sum types whose variants have
@@ -390,12 +400,22 @@ pub(crate) trait UserExportableObject: KernelObject + private::UserExportable {}
 impl<T> UserExportableObject for T where T: KernelObject + private::UserExportable {}
 
 trait ErasedKernelObject: Any + Send + Sync {
+    fn diagnostic_details(
+        &self,
+        cursor: u64,
+    ) -> Result<super::diagnostics::Details, super::diagnostics::DetailError>;
     fn as_any(&self) -> &dyn Any;
     fn signal_source(&self) -> Option<SignalSource<'_>>;
     fn on_zero_active_handles(&self, retirement: &mut ObjectRetirement);
 }
 
 impl<T: KernelObject> ErasedKernelObject for T {
+    fn diagnostic_details(
+        &self,
+        cursor: u64,
+    ) -> Result<super::diagnostics::Details, super::diagnostics::DetailError> {
+        KernelObject::diagnostic_details(self, cursor)
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -974,6 +994,13 @@ impl<T: UserExportableObject, C: ReferenceClass> Clone for PublishableRef<T, C> 
 }
 
 impl<T: UserExportableObject> ObjectPublication<T> {
+    pub(crate) fn object(&self) -> &T {
+        self.reference.object()
+    }
+
+    pub(crate) fn koid(&self) -> Koid {
+        self.reference.koid()
+    }
     pub(crate) fn try_new(payload: T) -> Result<Self, ObjectCreationError> {
         Ok(Self {
             reference: KernelRef::from_owner(ObjectRef::try_new(
@@ -1018,7 +1045,26 @@ impl<C: ReferenceClass> ErasedKernelRef<C> {
     }
 }
 
+impl ErasedKernelRef<Diagnostic> {
+    pub(crate) fn details(
+        &self,
+        cursor: u64,
+    ) -> Result<super::diagnostics::ObjectDetails, super::diagnostics::DetailError> {
+        Ok(super::diagnostics::ObjectDetails {
+            koid: self.koid(),
+            kind: self.kind(),
+            details: self.owner.allocation.payload.diagnostic_details(cursor)?,
+        })
+    }
+}
+
 impl ActiveHandleOwner {
+    pub(crate) fn pin_diagnostic(&self) -> ErasedKernelRef<Diagnostic> {
+        ErasedKernelRef {
+            owner: self.object().owner.clone_as(ReferenceKind::Diagnostic),
+            marker: PhantomData,
+        }
+    }
     fn object(&self) -> &ErasedKernelRef<UserAuthority> {
         match self.object.as_ref() {
             Some(object) => object,

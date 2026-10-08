@@ -148,6 +148,7 @@ fn prepare_handles(
         Rights::DUPLICATE
             .union(Rights::TRANSFER)
             .union(Rights::INSPECT)
+            .union(Rights::INSPECT_DETAILS)
             .union(Rights::DERIVE),
     )?);
     handles[7] = Some(prepare_handle(

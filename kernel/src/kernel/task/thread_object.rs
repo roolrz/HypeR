@@ -102,6 +102,7 @@ impl ThreadObjectSnapshotPage {
 }
 
 pub(super) struct SystemThreadObject {
+    tid: super::thread::ThreadId,
     role: ThreadRole,
     _object_charge: Option<CommittedCharge>,
 }
@@ -109,6 +110,31 @@ pub(super) struct SystemThreadObject {
 impl private::Sealed for SystemThreadObject {}
 
 impl KernelObject for SystemThreadObject {
+    fn diagnostic_details(
+        &self,
+        cursor: u64,
+    ) -> Result<
+        crate::kernel::object::diagnostics::Details,
+        crate::kernel::object::diagnostics::DetailError,
+    > {
+        use crate::kernel::object::diagnostics::{DetailRecord, Details};
+        let role = match self.role {
+            ThreadRole::Bootstrap => 1,
+            ThreadRole::Idle => 2,
+            ThreadRole::Kernel => 3,
+            ThreadRole::User => 4,
+            ThreadRole::Vcpu => 5,
+        };
+        Details::last(
+            DetailRecord::Thread {
+                tid: Some(self.tid.get()),
+                role,
+                phase: 0,
+            },
+            cursor,
+        )
+    }
+
     const KIND: ObjectKind = ObjectKind::THREAD;
     // Exportability is enforced by the absence of `private::UserExportable`.
     // Rights describe supported operations, not the authority boundary.
@@ -138,11 +164,15 @@ impl ThreadObject {
         }
     }
 
-    pub(super) fn try_system(role: ThreadRole) -> Result<Self, ObjectCreationError> {
+    pub(super) fn try_system(
+        tid: super::thread::ThreadId,
+        role: ThreadRole,
+    ) -> Result<Self, ObjectCreationError> {
         if role == ThreadRole::User {
             thread_object_invariant_violation();
         }
         KernelRef::try_new_scheduler(SystemThreadObject {
+            tid,
             role,
             _object_charge: None,
         })
@@ -150,6 +180,7 @@ impl ThreadObject {
     }
 
     pub(super) fn try_accounted_system(
+        tid: super::thread::ThreadId,
         role: ThreadRole,
         object_charge: CommittedCharge,
     ) -> Result<Self, ObjectCreationError> {
@@ -157,6 +188,7 @@ impl ThreadObject {
             thread_object_invariant_violation();
         }
         KernelRef::try_new_scheduler(SystemThreadObject {
+            tid,
             role,
             _object_charge: Some(object_charge),
         })

@@ -19,9 +19,30 @@ use crate::kernel::abi::native::wire::{
 use crate::kernel::inspect::{OBJECT_PAGE_CAPACITY, Page};
 use hyper::abi::native::{
     HYPER_NATIVE_CPU_OBSERVATION_MIN_SIZE, HYPER_NATIVE_MEMORY_OBSERVATION_MIN_SIZE,
-    HyperNativeCpuObservation, HyperNativeMemoryObservation, HyperNativeObjectInspection,
-    HyperNativeTaskProcess, HyperNativeTaskThread,
+    HYPER_NATIVE_OBJECT_DETAILS_MIN_SIZE, HyperNativeCpuObservation, HyperNativeMemoryObservation,
+    HyperNativeObjectDetails, HyperNativeObjectInspection, HyperNativeTaskProcess,
+    HyperNativeTaskThread,
 };
+
+#[inline(never)]
+pub(in crate::kernel::abi::native) fn sys_object_inspector_read_details(
+    services: &impl InspectServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        let request = prepare_info_request(
+            &[arguments[0], arguments[4], arguments[5], 0, 0, 0],
+            HYPER_NATIVE_OBJECT_DETAILS_MIN_SIZE,
+            core::mem::size_of::<HyperNativeObjectDetails>(),
+        )?;
+        let value = services
+            .read_object_details(request.value, arguments[1], arguments[2], arguments[3])
+            .map_err(status_from_inspection_error)?;
+        let record = crate::kernel::abi::native::wire::encode_object_details(&value);
+        copy_info_record(services, request, &record)
+    })();
+    DeferredAction::Return(info_result(result))
+}
 
 #[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_task_inspector_scan_processes(

@@ -202,13 +202,13 @@ while :; do
             fi
             ;;
         handles)
-            if grep -Eq '^0x[0-9a-f]+[[:space:]]+[0-9]+[[:space:]]+[a-z][a-z-]+[[:space:]]+[a-z][a-z|-]+' "$native_output"; then
+            if grep -Eq '^0x[0-9a-f]{16}[[:space:]]+0x[0-9a-f]{16}[[:space:]]+[a-z][a-z-]+[[:space:]]+[a-z][a-z|-]+' "$native_output"; then
                 send_commands 1 '/bin/handle --objects\n'
                 command_phase='objects'
             fi
             ;;
         objects)
-            if grep -Eq '^[0-9]+[[:space:]]+[a-z][a-z-]+[[:space:]]+(unpublished|active|retired)' "$native_output"; then
+            if grep -Eq '^0x[0-9a-f]{16}[[:space:]]+[a-z][a-z-]+[[:space:]]+(unpublished|active|retired)' "$native_output"; then
                 send_commands 1 '/bin/dynamic-test\n'
                 command_phase='dynamic'
             fi
@@ -280,7 +280,7 @@ while :; do
             fi
             ;;
         cli_handle)
-            if grep -Fq 'Inspect Native kernel objects or a process' "$native_output"; then
+            if grep -Fq -- '--list-kinds' "$native_output"; then
                 send_commands 1 'ls --help\n'
                 command_phase='cli_ls'
             fi
@@ -396,8 +396,8 @@ while :; do
         grep -Fxq 'HypeR session: console ready' "$native_output" &&
         grep -Fxq 'HypeR virtual console: ready' "$native_output" &&
         grep -Fxq 'TYPE     KOID       OWNER      NAME                 STATE' "$native_output" &&
-        grep -Fxq 'HANDLE             OBJECT     KIND                    RIGHTS                           PURPOSE' "$native_output" &&
-        grep -Fxq 'KOID       KIND                    HANDLE-STATE HANDLES REFS PURPOSE' "$native_output" &&
+        grep -Eq '^HANDLE[[:space:]]+OBJECT[[:space:]]+KIND[[:space:]]+RIGHTS$' "$native_output" &&
+        grep -Eq '^KOID[[:space:]]+KIND[[:space:]]+STATE[[:space:]]+HANDLES[[:space:]]+REFS$' "$native_output" &&
         grep -Fxq 'HYPER_DYNAMIC_LINK_OK' "$native_output" &&
         grep -Fxq 'HYPER_STATIC_LINK_OK' "$native_output" &&
         grep -Fxq 'HYPER_STD_OK hello dynamic' "$native_output" &&

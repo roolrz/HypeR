@@ -97,3 +97,89 @@ fn resource(kind: u32, flags: u32, offset: u64, length: u64, bus: u64) -> [u8; 3
     output[24..32].copy_from_slice(&bus.to_le_bytes());
     output
 }
+
+impl PhysicalDevice {
+    pub(super) fn diagnostic(
+        &self,
+        cursor: u64,
+    ) -> Result<
+        crate::kernel::object::diagnostics::Details,
+        crate::kernel::object::diagnostics::DetailError,
+    > {
+        use crate::kernel::object::diagnostics::{DetailError, DetailRecord, Details};
+        let hw = &self.claim.hardware;
+        let resources = match &hw.profile {
+            Profile::Pci(transport) => transport.bars().iter().flatten().count(),
+            _ => 1 + hw.extra.iter().flatten().count(),
+        };
+        if cursor == 0 {
+            let state = self.state.with(|state| match state {
+                super::State::Claimed => 1,
+                super::State::Attached => 2,
+                super::State::Active(_) => 3,
+                super::State::Retired => 4,
+                super::State::Quarantined => 5,
+            });
+            return Ok(Details {
+                record: DetailRecord::Device {
+                    profile: u64::from(hw.profile.id()),
+                    device_id: u64::from(self.info().device_id),
+                    pci_identity: match &hw.profile {
+                        Profile::Pci(t) => u64::from(t.identity()),
+                        _ => 0,
+                    },
+                    irq_domain: u64::from(hw.domain.diagnostic_id()),
+                    interrupt: u64::from(hw.interrupt.get()),
+                    interrupt_count: u64::from(hw.interrupt_count),
+                    state,
+                    resource_count: resources as u64,
+                },
+                next_cursor: if resources == 0 { 0 } else { 1 },
+            });
+        }
+        let index = usize::try_from(cursor - 1).map_err(|_| DetailError::InvalidCursor)?;
+        if index >= resources {
+            return Err(DetailError::InvalidCursor);
+        }
+        let record = if let Profile::Pci(transport) = &hw.profile {
+            let bar = transport
+                .bars()
+                .iter()
+                .flatten()
+                .nth(index)
+                .ok_or(DetailError::InvalidCursor)?;
+            DetailRecord::DeviceResource {
+                kind: 0x200 + u64::from(bar.index),
+                base: bar.mapping.resource().start(),
+                length: bar.mapping.resource().size(),
+                offset: bar.offset,
+                flags: u64::from(bar.flags),
+            }
+        } else {
+            let window = if index == 0 {
+                Window {
+                    mapping: hw.mapping,
+                    offset: 0,
+                }
+            } else {
+                hw.extra
+                    .iter()
+                    .flatten()
+                    .nth(index - 1)
+                    .copied()
+                    .ok_or(DetailError::InvalidCursor)?
+            };
+            DetailRecord::DeviceResource {
+                kind: cursor,
+                base: window.mapping.resource().start(),
+                length: window.mapping.resource().size(),
+                offset: window.offset as u64,
+                flags: 0,
+            }
+        };
+        Ok(Details {
+            record,
+            next_cursor: if index + 1 < resources { cursor + 1 } else { 0 },
+        })
+    }
+}

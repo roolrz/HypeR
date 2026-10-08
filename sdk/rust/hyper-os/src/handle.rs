@@ -20,194 +20,14 @@ pub trait TypedObject: ObjectType {
     const KIND: ObjectKind;
 }
 
-macro_rules! object_types {
-    ($(($name:ident, $kind:ident)),+ $(,)?) => {
-        $(
-            #[doc = concat!("Type marker for Native `", stringify!($kind), "` objects.")]
-            pub enum $name {}
-
-            impl private::Sealed for $name {}
-            impl ObjectType for $name {}
-            impl TypedObject for $name {
-                const KIND: ObjectKind = ObjectKind::from_trusted_raw(
-                    hyper_abi::$kind,
-                );
-            }
-        )+
-    };
-}
+mod object_kind;
+pub use object_kind::*;
 
 /// Type-erased Native kernel object.
 pub enum AnyObject {}
 
 impl private::Sealed for AnyObject {}
 impl ObjectType for AnyObject {}
-
-object_types!(
-    (EventObject, HYPER_NATIVE_OBJECT_EVENT),
-    (WaitSetObject, HYPER_NATIVE_OBJECT_WAIT_SET),
-    (ByteChannelObject, HYPER_NATIVE_OBJECT_BYTE_CHANNEL),
-    (ThreadObject, HYPER_NATIVE_OBJECT_THREAD),
-    (ProcessObject, HYPER_NATIVE_OBJECT_PROCESS),
-    (TaskGroupObject, HYPER_NATIVE_OBJECT_TASK_GROUP),
-    (ResourceDomainObject, HYPER_NATIVE_OBJECT_RESOURCE_DOMAIN),
-    (TaskFactoryObject, HYPER_NATIVE_OBJECT_TASK_FACTORY),
-    (
-        ExecutableAuthorityObject,
-        HYPER_NATIVE_OBJECT_EXECUTABLE_AUTHORITY
-    ),
-    (VmoObject, HYPER_NATIVE_OBJECT_VMO),
-    (VmarObject, HYPER_NATIVE_OBJECT_VMAR),
-    (ConsoleObject, HYPER_NATIVE_OBJECT_CONSOLE),
-    (DirectoryObject, HYPER_NATIVE_OBJECT_DIRECTORY),
-    (FileObject, HYPER_NATIVE_OBJECT_FILE),
-    (
-        CapabilityChannelObject,
-        HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL
-    ),
-    (ProcessBuilderObject, HYPER_NATIVE_OBJECT_PROCESS_BUILDER),
-    (TaskInspectorObject, HYPER_NATIVE_OBJECT_TASK_INSPECTOR),
-    (ObjectInspectorObject, HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR),
-    (MemoryInspectorObject, HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR),
-    (CpuInspectorObject, HYPER_NATIVE_OBJECT_CPU_INSPECTOR),
-    (
-        VirtualMachineCreationAuthorityObject,
-        HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY
-    ),
-    (
-        VirtualMachineCreationLeaseObject,
-        HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE
-    ),
-    (
-        PendingVirtualMachineObject,
-        HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE
-    ),
-    (VirtualMachineObject, HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE),
-    (VirtualCpuObject, HYPER_NATIVE_OBJECT_VIRTUAL_CPU),
-    (
-        DeviceAssignmentAuthorityObject,
-        HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY
-    ),
-    (PhysicalDeviceObject, HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE),
-    (GuestMailboxObject, HYPER_NATIVE_OBJECT_GUEST_MAILBOX),
-    (
-        GuestNotificationObject,
-        HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION
-    ),
-    (GuestMemoryObject, HYPER_NATIVE_OBJECT_GUEST_MEMORY),
-    (GuestMappingObject, HYPER_NATIVE_OBJECT_GUEST_MAPPING),
-    (NativeBlockObject, HYPER_NATIVE_OBJECT_NATIVE_BLOCK),
-    (VirtualSerialObject, HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL),
-);
-
-/// One Native object-kind value reported by the kernel.
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ObjectKind(u32);
-
-impl ObjectKind {
-    const fn from_trusted_raw(raw: u32) -> Self {
-        Self(raw)
-    }
-
-    pub(crate) fn from_kernel(raw: u32) -> Result<Self> {
-        if raw == hyper_abi::HYPER_NATIVE_OBJECT_NONE {
-            Err(Error::InvalidResponse)
-        } else {
-            Ok(Self(raw))
-        }
-    }
-
-    #[must_use]
-    pub const fn as_raw(self) -> u32 {
-        self.0
-    }
-
-    /// Returns the stable Native name of this object kind.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self.0 {
-            hyper_abi::HYPER_NATIVE_OBJECT_EVENT => "event",
-            hyper_abi::HYPER_NATIVE_OBJECT_WAIT_SET => "wait-set",
-            hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL => "byte-channel",
-            hyper_abi::HYPER_NATIVE_OBJECT_THREAD => "thread",
-            hyper_abi::HYPER_NATIVE_OBJECT_PROCESS => "process",
-            hyper_abi::HYPER_NATIVE_OBJECT_TASK_GROUP => "task-group",
-            hyper_abi::HYPER_NATIVE_OBJECT_RESOURCE_DOMAIN => "resource-domain",
-            hyper_abi::HYPER_NATIVE_OBJECT_TASK_FACTORY => "task-factory",
-            hyper_abi::HYPER_NATIVE_OBJECT_EXECUTABLE_AUTHORITY => "executable-authority",
-            hyper_abi::HYPER_NATIVE_OBJECT_VMO => "vmo",
-            hyper_abi::HYPER_NATIVE_OBJECT_VMAR => "vmar",
-            hyper_abi::HYPER_NATIVE_OBJECT_CONSOLE => "console",
-            hyper_abi::HYPER_NATIVE_OBJECT_DIRECTORY => "directory",
-            hyper_abi::HYPER_NATIVE_OBJECT_FILE => "file",
-            hyper_abi::HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL => "capability-channel",
-            hyper_abi::HYPER_NATIVE_OBJECT_PROCESS_BUILDER => "process-builder",
-            hyper_abi::HYPER_NATIVE_OBJECT_TASK_INSPECTOR => "task-inspector",
-            hyper_abi::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => "object-inspector",
-            hyper_abi::HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR => "memory-inspector",
-            hyper_abi::HYPER_NATIVE_OBJECT_CPU_INSPECTOR => "cpu-inspector",
-            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY => {
-                "vm-creation-authority"
-            }
-            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE => {
-                "virtual-machine-creation-lease"
-            }
-            hyper_abi::HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE => "pending-virtual-machine",
-            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE => "virtual-machine",
-            hyper_abi::HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY => {
-                "device-assignment-authority"
-            }
-            hyper_abi::HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE => "physical-device",
-            hyper_abi::HYPER_NATIVE_OBJECT_GUEST_MAILBOX => "guest-mailbox",
-            hyper_abi::HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION => "guest-notification",
-            hyper_abi::HYPER_NATIVE_OBJECT_GUEST_MAPPING => "guest-mapping",
-            hyper_abi::HYPER_NATIVE_OBJECT_NATIVE_BLOCK => "native-block",
-            hyper_abi::HYPER_NATIVE_OBJECT_GUEST_MEMORY => "guest-memory",
-            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_CPU => "virtual-cpu",
-            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL => "virtual-serial",
-            _ => "unknown",
-        }
-    }
-
-    /// Summarizes the role carried by this object kind.
-    #[must_use]
-    pub const fn purpose(self) -> &'static str {
-        match self.0 {
-            hyper_abi::HYPER_NATIVE_OBJECT_EVENT => "notification",
-            hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL => "byte channel endpoint",
-            hyper_abi::HYPER_NATIVE_OBJECT_THREAD => "thread control",
-            hyper_abi::HYPER_NATIVE_OBJECT_PROCESS => "process supervision",
-            hyper_abi::HYPER_NATIVE_OBJECT_TASK_GROUP => "lifecycle group",
-            hyper_abi::HYPER_NATIVE_OBJECT_RESOURCE_DOMAIN => "resource accounting",
-            hyper_abi::HYPER_NATIVE_OBJECT_TASK_FACTORY => "process creation",
-            hyper_abi::HYPER_NATIVE_OBJECT_EXECUTABLE_AUTHORITY => "executable mapping",
-            hyper_abi::HYPER_NATIVE_OBJECT_VMO => "memory object",
-            hyper_abi::HYPER_NATIVE_OBJECT_VMAR => "address-space region",
-            hyper_abi::HYPER_NATIVE_OBJECT_CONSOLE => "system console",
-            hyper_abi::HYPER_NATIVE_OBJECT_DIRECTORY => "filesystem directory",
-            hyper_abi::HYPER_NATIVE_OBJECT_FILE => "filesystem file",
-            hyper_abi::HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL => "capability rendezvous",
-            hyper_abi::HYPER_NATIVE_OBJECT_PROCESS_BUILDER => "staged process construction",
-            hyper_abi::HYPER_NATIVE_OBJECT_TASK_INSPECTOR => "task observation",
-            hyper_abi::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => "object observation",
-            hyper_abi::HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR => "memory observation",
-            hyper_abi::HYPER_NATIVE_OBJECT_CPU_INSPECTOR => "CPU-time observation",
-            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY => {
-                "virtual-machine creation authority"
-            }
-            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE => {
-                "one-shot virtual-machine construction"
-            }
-            hyper_abi::HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE => {
-                "staged virtual-machine construction"
-            }
-            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE => "virtual-machine supervision",
-            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_CPU => "virtual-CPU supervision",
-            _ => "unrecognized object",
-        }
-    }
-}
 
 /// Stable observation identity which never grants object authority.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -241,6 +61,7 @@ impl Rights {
     pub const TRANSFER: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_TRANSFER);
     pub const WAIT: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_WAIT);
     pub const INSPECT: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_INSPECT);
+    pub const INSPECT_DETAILS: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_INSPECT_DETAILS);
     pub const READ: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_READ);
     pub const WRITE: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_WRITE);
     pub const MAP: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_MAP);
@@ -299,6 +120,19 @@ impl Rights {
         self.0 & required.0 == required.0
     }
 
+    /// Looks up one stable right name (the names returned by [`Self::names`]).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        RIGHT_NAMES
+            .iter()
+            .find_map(|(right, candidate)| (*candidate == name).then_some(*right))
+    }
+
+    /// Lists the vocabulary accepted by [`Self::from_name`].
+    pub fn known_names() -> impl Iterator<Item = &'static str> {
+        RIGHT_NAMES.iter().map(|(_, name)| *name)
+    }
+
     /// Iterates stable lower-case names for every right in this set.
     #[must_use]
     pub const fn names(self) -> RightNames {
@@ -314,6 +148,7 @@ const RIGHT_NAMES: &[(Rights, &str)] = &[
     (Rights::TRANSFER, "transfer"),
     (Rights::WAIT, "wait"),
     (Rights::INSPECT, "inspect"),
+    (Rights::INSPECT_DETAILS, "inspect-details"),
     (Rights::READ, "read"),
     (Rights::WRITE, "write"),
     (Rights::MAP, "map"),
@@ -340,6 +175,8 @@ const RIGHT_NAMES: &[(Rights, &str)] = &[
     (Rights::RESOURCE_DOMAIN_SPONSOR, "sponsor-domain"),
     (Rights::DERIVE, "derive"),
     (Rights::BIND_WAIT, "bind-wait"),
+    (Rights::SET_ATTRIBUTES, "set-attributes"),
+    (Rights::LOCK_FILE, "lock-file"),
     (Rights::CREATE_VIRTUAL_MACHINE, "create-virtual-machine"),
 ];
 
@@ -1019,8 +856,8 @@ mod tests {
             Ok(<ByteChannelObject as TypedObject>::KIND)
         );
         assert_eq!(
-            <ByteChannelObject as TypedObject>::KIND,
-            ObjectKind::from_trusted_raw(hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL)
+            <ByteChannelObject as TypedObject>::KIND.as_raw(),
+            hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL
         );
         Ok(())
     }
@@ -1032,10 +869,7 @@ mod tests {
         // SAFETY: the test backend treats this nonzero value as one owner.
         let handle = unsafe { OwnedHandle::<ByteChannelObject>::from_raw_owned(raw) };
         let info = handle.basic_info()?;
-        assert_eq!(
-            info.kind,
-            ObjectKind::from_trusted_raw(hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL)
-        );
+        assert_eq!(info.kind, <ByteChannelObject as TypedObject>::KIND);
         assert_eq!(info.koid.get(), raw.get() + 0x1_0000);
         assert_eq!(handle.as_handle_ref().basic_info()?, info);
         Ok(())
@@ -1083,8 +917,35 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_catalogs_cover_known_kinds_and_every_right_bit() {
+        for (index, kind) in ObjectKind::KNOWN.iter().copied().enumerate() {
+            assert_eq!(ObjectKind::from_name(kind.name()), Some(kind));
+            assert_ne!(kind.name(), "unknown");
+            assert_ne!(kind.purpose(), "object kind not known to this SDK");
+            assert!(!ObjectKind::KNOWN[..index].contains(&kind));
+        }
+        assert_eq!(ObjectKind::from_name("physcial-device"), None);
+        let bits = Rights::known_names()
+            .filter_map(Rights::from_name)
+            .fold(0, |bits, right| bits | right.bits());
+        assert_eq!(bits, hyper_abi::HYPER_NATIVE_RIGHTS_MASK);
+        assert_eq!(Rights::known_names().count(), bits.count_ones() as usize);
+        assert_eq!(Rights::from_name("wriet"), None);
+    }
+
+    #[test]
+    fn unknown_object_kind_preserves_numeric_identity() -> crate::Result<()> {
+        let future = ObjectKind::from_kernel(u32::MAX)?;
+        assert_eq!(future.as_raw(), u32::MAX);
+        assert_eq!(future.name(), "unknown");
+        assert_eq!(future.purpose(), "object kind not known to this SDK");
+        assert!(ObjectKind::from_kernel(0).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn object_metadata_and_right_names_are_stable() {
-        let kind = ObjectKind::from_trusted_raw(hyper_abi::HYPER_NATIVE_OBJECT_TASK_INSPECTOR);
+        let kind = <super::TaskInspectorObject as TypedObject>::KIND;
         assert_eq!(kind.name(), "task-inspector");
         assert_eq!(kind.purpose(), "task observation");
 

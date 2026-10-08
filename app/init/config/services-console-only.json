@@ -169,7 +169,8 @@
           "rights": [
             "duplicate",
             "transfer",
-            "inspect"
+            "inspect",
+            "inspect-details"
           ]
         },
         {

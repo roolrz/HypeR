@@ -1254,6 +1254,17 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     }
 
     impl InspectServices for RejectingServices {
+        fn read_object_details(
+            &self,
+            _inspector: HandleValue,
+            _process: u64,
+            _target: u64,
+            _cursor: u64,
+        ) -> Result<crate::kernel::object::diagnostics::ObjectDetails, crate::kernel::inspect::Error>
+        {
+            Err(crate::kernel::inspect::Error::Unavailable)
+        }
+
         fn scan_processes(
             &self,
             _: HandleValue,

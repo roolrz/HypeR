@@ -183,6 +183,12 @@ hyper_call_result_t hyper_task_inspector_scan_threads(hyper_native_handle_t insp
 						      uint64_t cursor,
 						      hyper_native_task_thread_t *records,
 						      size_t capacity);
+/* Requires INSPECT | INSPECT_DETAILS. process == 0 selects a global KOID;
+ * otherwise target is a full process-local handle. cursor starts at zero. */
+hyper_call_result_t hyper_object_inspector_read_details(hyper_native_handle_t inspector,
+						      uint64_t process, uint64_t target,
+						      uint64_t cursor,
+						      hyper_native_object_details_t *record);
 hyper_call_result_t hyper_object_inspector_scan_objects(hyper_native_handle_t inspector,
 							uint64_t cursor,
 							hyper_native_object_inspection_t *records,

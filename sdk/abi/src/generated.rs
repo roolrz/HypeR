@@ -121,6 +121,7 @@ pub const fn hyper_native_object_transfer_class(object_kind: u32) -> u32 {
     }
 }
 
+pub const HYPER_NATIVE_RIGHT_INSPECT_DETAILS: u64 = 1_u64 << 33;
 pub const HYPER_NATIVE_RIGHT_BIND_WAIT: u64 = 1_u64 << 30;
 pub const HYPER_NATIVE_RIGHT_DUPLICATE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_RIGHT_TRANSFER: u64 = 1_u64 << 1;
@@ -155,7 +156,7 @@ pub const HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE: u64 = 1_u64 << 29;
 pub const HYPER_NATIVE_RIGHT_SET_ATTRIBUTES: u64 = 1_u64 << 31;
 pub const HYPER_NATIVE_RIGHT_LOCK_FILE: u64 = 1_u64 << 32;
 
-pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 0x1ffffffff;
+pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 0x3ffffffff;
 
 pub const HYPER_NATIVE_SIGNAL_PHYSICAL_DEVICE_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_NATIVE_BLOCK_PEER_CLOSED: u64 = 1_u64 << 0;
@@ -183,6 +184,13 @@ pub const HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_WRITABLE: u64 = 1_u64 << 1;
 pub const HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_PEER_CLOSED: u64 = 1_u64 << 2;
 
+pub const HYPER_NATIVE_OBJECT_DETAIL_EMPTY: u64 = 0;
+pub const HYPER_NATIVE_OBJECT_DETAIL_THREAD: u64 = 1;
+pub const HYPER_NATIVE_OBJECT_DETAIL_VMAR: u64 = 2;
+pub const HYPER_NATIVE_OBJECT_DETAIL_MAPPING: u64 = 3;
+pub const HYPER_NATIVE_OBJECT_DETAIL_CHANNEL: u64 = 4;
+pub const HYPER_NATIVE_OBJECT_DETAIL_DEVICE: u64 = 5;
+pub const HYPER_NATIVE_OBJECT_DETAIL_DEVICE_RESOURCE: u64 = 6;
 pub const HYPER_NATIVE_KOID_SLOT_MASK: u64 = 4294967295;
 pub const HYPER_NATIVE_VMAR_ALLOCATE_EXACT: u64 = 1;
 pub const HYPER_NATIVE_SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT: u64 = 2;
@@ -526,6 +534,7 @@ pub const HYPER_NATIVE_SYS_DEVICE_IRQ_PENDING: u64 = 146;
 pub const HYPER_NATIVE_SYS_DEVICE_IRQ_COMPLETE: u64 = 147;
 pub const HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY: u64 = 148;
 pub const HYPER_NATIVE_SYS_SYSTEM_CONFIG: u64 = 149;
+pub const HYPER_NATIVE_SYS_OBJECT_INSPECTOR_READ_DETAILS: u64 = 150;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -539,6 +548,24 @@ pub const fn hyper_native_failure_result_mask(
         _ => 0,
     }
 }
+
+pub const HYPER_NATIVE_OBJECT_DETAILS_MIN_SIZE: usize = 88;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeObjectDetails {
+    pub koid: u64,
+    pub object_kind: u32,
+    pub record_kind: u32,
+    pub next_cursor: u64,
+    pub payload: [u8; 64],
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeObjectDetails>() == 88);
+const _: () = assert!(core::mem::align_of::<HyperNativeObjectDetails>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeObjectDetails, koid) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeObjectDetails, object_kind) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeObjectDetails, record_kind) == 12);
+const _: () = assert!(core::mem::offset_of!(HyperNativeObjectDetails, next_cursor) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeObjectDetails, payload) == 24);
 
 pub const HYPER_NATIVE_DEVICE_PROFILE_INFO_MIN_SIZE: usize = 32;
 #[repr(C)]

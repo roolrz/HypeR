@@ -8,6 +8,7 @@ mod pair;
 
 use alloc::boxed::Box;
 use core::num::NonZeroU64;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use hyper::mm::FallibleArc;
 
@@ -103,6 +104,7 @@ impl ByteMessageInfo {
 
 /// One endpoint of a shared ordered Channel pair.
 pub(crate) struct ByteChannel {
+    peer_koid: AtomicU64,
     pair: FallibleArc<Pair>,
     side: Side,
 }
@@ -138,10 +140,12 @@ impl ByteChannel {
             FallibleArc::try_new(Pair::new(charge)).map_err(|_| ByteChannelError::Allocation)?;
         Ok((
             Self {
+                peer_koid: AtomicU64::new(0),
                 pair: pair.clone(),
                 side: Side::First,
             },
             Self {
+                peer_koid: AtomicU64::new(0),
                 pair,
                 side: Side::Second,
             },
@@ -186,6 +190,20 @@ impl private::Sealed for ByteChannel {}
 impl private::UserExportable for ByteChannel {}
 
 impl KernelObject for ByteChannel {
+    fn diagnostic_details(
+        &self,
+        cursor: u64,
+    ) -> Result<
+        crate::kernel::object::diagnostics::Details,
+        crate::kernel::object::diagnostics::DetailError,
+    > {
+        crate::kernel::object::diagnostics::Details::last(
+            self.pair
+                .diagnostic(self.side, self.peer_koid.load(Ordering::Acquire)),
+            cursor,
+        )
+    }
+
     const KIND: ObjectKind = ObjectKind::BYTE_CHANNEL;
     const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
         .union(Rights::TRANSFER)
@@ -331,4 +349,11 @@ impl Drop for ReceivedByteMessage {
 #[cold]
 fn channel_invariant(message: &str) -> ! {
     crate::kernel::crash::fatal(format_args!("HypeR ByteChannel: {message}"))
+}
+
+impl crate::kernel::object::diagnostics::PairedObject for ByteChannel {
+    fn bind_peer_identity(&self, peer: crate::kernel::object::Koid) {
+        // Publication is one-shot; no strong peer reference or ownership cycle.
+        self.peer_koid.store(peer.get(), Ordering::Release);
+    }
 }

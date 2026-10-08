@@ -135,7 +135,7 @@ impl AuthorityPolicy for BootstrapPolicy {
             BootstrapAuthority::ObjectInspector => duplicate_authority(
                 authority,
                 ObjectInspectorObject::KIND.as_raw(),
-                inspector_rights(),
+                inspector_rights().union(Rights::INSPECT_DETAILS),
             ),
             BootstrapAuthority::MemoryInspector => duplicate_authority(
                 authority,
@@ -229,6 +229,7 @@ impl AuthorityPolicy for BootstrapPolicy {
             "transfer" => Some(Rights::TRANSFER.bits()),
             "wait" => Some(Rights::WAIT.bits()),
             "inspect" => Some(Rights::INSPECT.bits()),
+            "inspect-details" => Some(Rights::INSPECT_DETAILS.bits()),
             "read" => Some(Rights::READ.bits()),
             "write" => Some(Rights::WRITE.bits()),
             "execute" => Some(Rights::EXECUTE.bits()),

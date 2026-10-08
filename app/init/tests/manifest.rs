@@ -61,6 +61,7 @@ struct Policy;
 
 const READ: u64 = 0b0000_0001;
 const WRITE: u64 = 0b0000_0010;
+const INSPECT_DETAILS: u64 = 1 << 33;
 const INSPECT: u64 = 0b0000_0100;
 const WAIT: u64 = 0b0000_1000;
 const CREATE_PROCESS: u64 = 0b0001_0000;
@@ -212,7 +213,7 @@ impl AuthorityPolicy for Policy {
                 key: test_authority_key(source),
                 provider: None,
                 object_kind: 17,
-                rights: 0b1_1000_0100,
+                rights: 0b1_1000_0100 | INSPECT_DETAILS,
                 movable: false,
                 duplicable: true,
                 creatable: false,
@@ -334,7 +335,7 @@ impl AuthorityPolicy for Policy {
                 (307, 16, DUPLICATE | TRANSFER | INSPECT)
             }
             ("/bin/sh" | "/svc/session", "process.object-inspector") => {
-                (308, 17, DUPLICATE | TRANSFER | INSPECT)
+                (308, 17, DUPLICATE | TRANSFER | INSPECT | INSPECT_DETAILS)
             }
             ("/bin/sh" | "/svc/session", "process.memory-inspector") => {
                 (309, 18, DUPLICATE | TRANSFER | INSPECT)
@@ -387,6 +388,7 @@ impl AuthorityPolicy for Policy {
             "read" => Some(READ),
             "write" => Some(WRITE),
             "inspect" => Some(INSPECT),
+            "inspect-details" => Some(INSPECT_DETAILS),
             "wait" => Some(WAIT),
             "create-process" => Some(CREATE_PROCESS),
             "attach-process" => Some(ATTACH_PROCESS),

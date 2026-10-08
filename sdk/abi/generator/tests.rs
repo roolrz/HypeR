@@ -47,7 +47,11 @@ fn generated_bit_constants_preserve_schema_bit_positions() {
             .rust
             .contains("HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE: u64 = 1_u64 << 29;")
     );
-    for (name, bit) in [("SET_ATTRIBUTES", 31), ("LOCK_FILE", 32)] {
+    for (name, bit) in [
+        ("SET_ATTRIBUTES", 31),
+        ("LOCK_FILE", 32),
+        ("INSPECT_DETAILS", 33),
+    ] {
         assert!(
             generated
                 .rust
@@ -62,7 +66,7 @@ fn generated_bit_constants_preserve_schema_bit_positions() {
     assert!(
         generated
             .rust
-            .contains("HYPER_NATIVE_RIGHTS_MASK: u64 = 0x1ffffffff;")
+            .contains("HYPER_NATIVE_RIGHTS_MASK: u64 = 0x3ffffffff;")
     );
     assert!(
         generated
@@ -77,7 +81,7 @@ fn generated_bit_constants_preserve_schema_bit_positions() {
     assert!(
         generated
             .c
-            .contains("HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x1ffffffff)")
+            .contains("HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x3ffffffff)")
     );
 }
 

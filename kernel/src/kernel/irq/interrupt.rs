@@ -604,6 +604,10 @@ pub fn map(
 }
 
 impl IrqDomainId {
+    pub(crate) const fn diagnostic_id(self) -> u32 {
+        self.0
+    }
+
     /// Publishes a disabled mapping and handler context, then configures every
     /// participating CPU without making the source deliverable.
     ///

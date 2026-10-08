@@ -100,6 +100,25 @@ pub(super) struct Pair {
 }
 
 impl Pair {
+    pub(super) fn diagnostic(
+        &self,
+        side: Side,
+        peer_koid: u64,
+    ) -> crate::kernel::object::diagnostics::DetailRecord {
+        self.state.with(|state| {
+            let local = &state.endpoints[side.index()];
+            let peer = &state.endpoints[side.peer().index()];
+            crate::kernel::object::diagnostics::DetailRecord::Channel {
+                peer_koid,
+                local_open: local.lifecycle == SideLifecycle::Open,
+                peer_open: peer.lifecycle == SideLifecycle::Open,
+                queued: local.incoming.messages,
+                bytes: local.incoming.bytes,
+                byte_queue: true,
+            }
+        })
+    }
+
     pub(super) fn new(charge: CommittedCharge) -> Self {
         Self {
             state: PairLock::new(PairState {

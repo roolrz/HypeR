@@ -181,6 +181,15 @@ pub(crate) struct ProcessDiagnosticRef {
 }
 
 impl ProcessDiagnosticRef {
+    pub(crate) fn inspect_handle_object(
+        &self,
+        value: crate::kernel::capability::HandleValue,
+    ) -> Result<
+        crate::kernel::object::ErasedKernelRef<crate::kernel::object::Diagnostic>,
+        super::ProcessError,
+    > {
+        self.process.inspect_handle_object(value)
+    }
     pub(crate) fn clone_diagnostic(&self) -> Self {
         Self {
             process: self.process.clone(),
