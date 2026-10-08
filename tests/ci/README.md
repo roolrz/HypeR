@@ -44,7 +44,9 @@ and the one-time Pages/required-check setup.
 | `native-smp-gicv2` | Guest SMP on GICv2 with four host CPUs and abrupt runtime-exit retirement |
 | `native-smp-overcommit` | Guest SMP with one host CPU |
 | `native-retirement-stack` | Power-crash retirement in dormant/pending/powered-off states and stack limits |
-| `riscv64-native` | RISC-V SDK publication/consumer checks, Native static/dynamic std and application acceptance on one and four harts, file tools, paced shell input, userspace-managed guest boot and runtime-crash recovery |
+| `riscv64-native` | Serial aggregate of `riscv64-sdk` and `riscv64-runtime` |
+| `riscv64-sdk` | RISC-V SDK publication/consumer checks, app lint and host tests |
+| `riscv64-runtime` | Native static/dynamic std and application acceptance on one/four harts, file tools, paced shell input, userspace-managed guest boot, runtime-crash recovery and stack limits |
 | `io-vm` | Pinned I/O appliance, cross-VM storage reset and standby acceptance on GICv2/GICv3 |
 | `board-storage` | Configuration storage, Alpine rootfs, business guest, broker and userspace-device acceptance with stack watermarks |
 | `aarch64-build` | Serial aggregate of the three AArch64 image build suites below |
@@ -55,7 +57,8 @@ and the one-time Pages/required-check setup.
 | `riscv64-qemu` | RISC-V kernel startup, SMP admission, and standalone mechanism self-tests |
 | `x86_64-build` | Clippy and successful canonical/stripped image compilation; no runtime requirement yet |
 
-GitHub Actions runs the eight Native shards on independent runners. Each shard
+GitHub Actions runs eight AArch64 Native shards and two RISC-V Native shards
+on independent runners. Each shard
 builds its own prerequisites; no suite consumes mutable outputs from another.
 Use `sh tests/ci/run.sh native-gicv2`, for example, to reproduce one shard.
 The local aggregates stay serial because kernel feature variants and

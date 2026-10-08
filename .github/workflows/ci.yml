@@ -88,7 +88,7 @@ jobs:
       - name: Install Native SDK and QEMU tools
         uses: ./.github/actions/tools
         with:
-          packages: clang cmake cpio lld llvm make qemu-system-arm shellcheck squashfs-tools
+          packages: clang cmake cpio lld llvm make shellcheck ${{ matrix.suite != 'native-sdk' && 'qemu-system-arm squashfs-tools' || '' }}
       - name: Run Native validation shard
         run: sh tests/ci/run.sh "${{ matrix.suite }}"
       - name: Clean up AArch64 QEMU
@@ -146,18 +146,26 @@ jobs:
           retention-days: 7
 
   riscv64-native:
-    name: RISC-V / SDK, apps and guest VM
+    name: RISC-V / ${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: riscv64-sdk
+            name: SDK and app contracts
+          - suite: riscv64-runtime
+            name: apps and guest VM
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
       - name: Install Native SDK and RISC-V QEMU tools
         uses: ./.github/actions/tools
         with:
-          packages: clang cmake cpio lld llvm make qemu-system-misc shellcheck
+          packages: clang cmake cpio lld llvm make shellcheck ${{ matrix.suite == 'riscv64-runtime' && 'qemu-system-misc' || '' }}
       - name: Verify RISC-V Native applications and userspace Linux VMs
-        run: sh tests/ci/run.sh riscv64-native
+        run: sh tests/ci/run.sh "${{ matrix.suite }}"
       - name: Clean up RISC-V QEMU
         if: always()
         run: sh tests/ci/cleanup-qemu.sh riscv64
@@ -165,13 +173,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: riscv64-native-logs
+          name: ${{ matrix.suite }}-logs
           path: |
             target/app/riscv64/*.log
             target/stack-audit/riscv64/*.log
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload the RISC-V Native SDK
+        if: matrix.suite == 'riscv64-sdk'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hyper-sdk-riscv64-linux-x86_64

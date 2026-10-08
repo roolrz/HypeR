@@ -172,10 +172,16 @@ case "${1:-}" in
             STACK_AUDIT=1 CARGO_FEATURES='--features kernel-stack-audit'
         ;;
     riscv64-native)
+        sh tests/ci/run.sh riscv64-sdk
+        sh tests/ci/run.sh riscv64-runtime
+        ;;
+    riscv64-sdk)
         make sdk-check ARCH=riscv64
         make app-check ARCH=riscv64
         make app-test ARCH=riscv64
         make app-sdk-test ARCH=riscv64
+        ;;
+    riscv64-runtime)
         QEMU_TEST_LOG=target/app/riscv64/native-init-smp.log \
             make test-native ARCH=riscv64 QEMU_CPUS=4
         QEMU_TEST_LOG=target/app/riscv64/native-init-up.log \
