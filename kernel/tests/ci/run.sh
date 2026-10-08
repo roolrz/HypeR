@@ -31,6 +31,7 @@ case "${1:-}" in
         sh tests/ci/test-aarch64-kaslr-geometry.sh
         cargo fmt --all -- --check
         cargo fmt --manifest-path tests/host/Cargo.toml -- --check
+        cargo fmt --manifest-path tests/concurrency/Cargo.toml -- --check
         cargo fmt --manifest-path tools/kconfig/Cargo.toml -- --check
         cargo fmt --manifest-path tools/kallsyms/Cargo.toml -- --check
         make test ARCH=aarch64

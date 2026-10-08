@@ -15,7 +15,7 @@ ShellCheck; GitHub Actions installs both tools explicitly.
 
 | Suite | Required contract |
 | --- | --- |
-| `quality` | Parsed workspace declarations, resolved Cargo graph, HAL privacy compilation, formatting, host tests, Kconfig, and kallsyms tests |
+| `quality` | Parsed workspace declarations, resolved Cargo graph, HAL privacy compilation, formatting, host and Loom concurrency tests, Kconfig, and kallsyms tests |
 | `scripts` | Incremental build, deployment, board/package/rootfs, developer-entrypoint and QEMU transport Python tests; ShellCheck for test, acquisition and SDK scripts |
 | `native` | Serial local aggregate of the four AArch64 Native suites below |
 | `native-sdk` | SDK publication/consumer checks, portable runtime and app tests, and service-manifest validation |
@@ -73,6 +73,15 @@ transaction tests, and the AArch64 VHE raw-code EL0 proof: repeated direct
 `abi_query`, scheduling and lifecycle calls, Event creation/signal/wait,
 contained breakpoint fault,
 Process/Thread join, and acknowledged retirement.
+
+The standalone AArch64 runner explicitly uses multithreaded TCG. With at least
+three CPUs, its wait-arbitration test races two remote resolvers through Armed
+and queued waits, then checks worker retirement; smaller configurations require
+an explicit skip marker. Host `quality` additionally runs Loom scenarios
+against production publication/admission mechanisms. See the commands and
+coverage limits in [validation coverage](../../kernel/tests/VALIDATION.md).
+These are correctness tests; storage/network performance benchmarks remain
+manual and have no CI throughput or latency thresholds.
 
 Failed QEMU jobs retain their complete serial logs as CI artifacts. Guest
 Linux inputs are checksum-pinned by `kernel/tools/guest` and cached only as CI

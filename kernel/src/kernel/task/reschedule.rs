@@ -3,13 +3,22 @@
 
 //! Allocation-free publication of coalesced task reschedule requests.
 
+#[cfg(not(loom))]
 use hyper::sync::atomic::{AtomicBool, Ordering};
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicBool, Ordering};
 
 /// One per-CPU coalesced reschedule notification.
 pub(crate) struct PendingReschedule(AtomicBool);
 
 impl PendingReschedule {
+    #[cfg(not(loom))]
     pub const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    #[cfg(loom)]
+    pub fn new() -> Self {
         Self(AtomicBool::new(false))
     }
 

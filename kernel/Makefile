@@ -81,6 +81,7 @@ KALLSYMS_SEED_BLOB := $(KERNEL_OUTPUT)/hyper.kallsyms.seed
 KALLSYMS_BLOB := $(KERNEL_OUTPUT)/hyper.kallsyms
 KALLSYMS_ELF := $(KERNEL_OUTPUT)/hyper.with-kallsyms
 HOST_TEST_MANIFEST := tests/host/Cargo.toml
+CONCURRENCY_TEST_MANIFEST := tests/concurrency/Cargo.toml
 GUEST_OUTPUT := target/guest/$(ARCH)
 ifeq ($(ARCH),aarch64)
 GUEST_FETCH := tools/guest/fetch-alpine-aarch64.sh
@@ -164,17 +165,20 @@ check: prepare-config
 	$(KERNEL_CONFIG_ENV) $(CARGO) clippy --target $(TARGET) -- -D warnings
 	$(KERNEL_CONFIG_ENV) $(CARGO) clippy --target $(TARGET) --features kernel-self-test -- -D warnings
 	$(KERNEL_CONFIG_ENV) $(CARGO) clippy --manifest-path $(HOST_TEST_MANIFEST) --target $(HOST_TARGET) --all-targets -- -D warnings
+	$(KERNEL_CONFIG_ENV) $(CARGO) clippy --manifest-path $(CONCURRENCY_TEST_MANIFEST) --target $(HOST_TARGET) --all-targets --locked -- -D warnings
 	$(CARGO) clippy --manifest-path $(KCONFIG_MANIFEST) --target $(HOST_TARGET) -- -D warnings
 	$(CARGO) clippy --manifest-path $(KALLSYMS_MANIFEST) --target $(HOST_TARGET) -- -D warnings
 
 test: prepare-config
 	$(KERNEL_CONFIG_ENV) $(CARGO) test --manifest-path $(HOST_TEST_MANIFEST) --target $(HOST_TARGET)
+	$(KERNEL_CONFIG_ENV) $(CARGO) test --manifest-path $(CONCURRENCY_TEST_MANIFEST) --target $(HOST_TARGET) --release --locked
 	$(CARGO) test --manifest-path $(KCONFIG_MANIFEST) --target $(HOST_TARGET)
 	$(CARGO) test --manifest-path $(KALLSYMS_MANIFEST) --target $(HOST_TARGET)
 
 verify: check test
 	$(CARGO) fmt -- --check
 	$(CARGO) fmt --manifest-path $(HOST_TEST_MANIFEST) -- --check
+	$(CARGO) fmt --manifest-path $(CONCURRENCY_TEST_MANIFEST) -- --check
 	$(CARGO) fmt --manifest-path $(KCONFIG_MANIFEST) -- --check
 	$(CARGO) fmt --manifest-path $(KALLSYMS_MANIFEST) -- --check
 	$(MAKE) verify-runtime ARCH=$(ARCH)

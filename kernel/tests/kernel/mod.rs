@@ -43,6 +43,7 @@ mod virtual_serial;
 mod vm_registry;
 mod vm_wfi_wait;
 mod wait_arbitration;
+mod wait_races;
 
 /// Exercise rejection while secondary CPU admission has not completed yet.
 pub(crate) fn verify_early_startup() {
@@ -115,6 +116,7 @@ pub(crate) fn run() {
         channel_service::run,
     );
     run_case("kernel wait-arbitration tests", wait_arbitration::run);
+    run_case("concurrent wait-arbitration tests", wait_races::run);
     run_case("kernel startup-readiness tests", startup_readiness::run);
     let guest_execution = crate::hal::vm::guest_execution_available();
     if guest_execution {

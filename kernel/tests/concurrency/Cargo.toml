@@ -2,21 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "hyper-host-tests"
+name = "hyper-concurrency-tests"
 version = "0.0.0"
 edition = "2024"
 publish = false
 
-[dependencies]
+[dev-dependencies]
 hyper = { package = "hyper-core", path = "../../core" }
+loom = "0.7.2"
 
 [lints.clippy]
 expect_used = "deny"
-missing_safety_doc = "deny"
-undocumented_unsafe_blocks = "deny"
 unwrap_used = "deny"
 
 [workspace]
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

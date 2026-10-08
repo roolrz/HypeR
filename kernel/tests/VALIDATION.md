@@ -56,6 +56,52 @@ not a claim that every interleaving or failure path has been exhaustively tested
 | Deferred logging and crash diagnostics | Host `kernel_log.rs` and `crash_text.rs` execute ring, drain, formatting and emergency-gate mechanisms; `kernel/log_flush_barrier.rs` and console/crash QEMU acceptance exercise integration. |
 | CPU-local timer pinning | `kernel/reserved_timer.rs`, `kernel/thread_sleep.rs` and host `software_timers.rs` exercise timer ownership and cancellation. Comparator programming within the CPU pin remains a review obligation. |
 
+## Concurrent execution
+
+`tests/concurrency` is a host-only Loom suite. From the repository root, run:
+
+```sh
+cargo test --manifest-path kernel/tests/concurrency/Cargo.toml --release --locked
+```
+
+It is also part of `make -C kernel test` and the CI `quality` suite. Its local
+build script enables `cfg(loom)` only for this test crate, which includes the
+production `DeferredWork`, `PendingReschedule` and `RunAdmission` source files.
+Only their atomic imports and non-const test constructors differ. Do not set
+global `RUSTFLAGS=--cfg loom`: the rest of the kernel is not instrumented.
+The test dependency does not enter production images.
+
+The bounded scenarios cover the following boundaries:
+
+| Mechanism | Concurrent scenarios |
+| --- | --- |
+| `DeferredWork` | One or two producers racing worker sleep; one elected prompt and rearming after a completed batch; competing IRQ wake ownership after deferral; payload visibility at IRQ claim, batch start and a retained batch. |
+| `PendingReschedule` | Acquire observation and consuming requests; competing publishers electing one notifier across two reused epochs; a coalesced publication acquired by the current take or preserved as a new pending epoch. |
+| `RunAdmission` | Close racing one or two admission attempts; competing closers preserving live claims until the last release; quiescence acquiring both runners' final writes after concurrent releases. |
+
+Payloads are sampled before publisher joins so test synchronization cannot
+supply the missing publication edge. Assertions made after a join use those
+saved samples when checking visibility. Scenarios use finite operations instead
+of polling loops; the suite does not set an exploration/preemption limit. This
+explores the specified scenarios within Loom's memory model, not every kernel execution
+or every hardware weak-memory behavior.
+
+`kernel/wait_races.rs` runs 32 rounds with two resolver threads on separate
+CPUs, racing exact notification against cancellation or timeout arbitration.
+Half the rounds keep the registration Armed; the others require real queue
+publication and race the switch tail/parked wait. It checks one winning outcome,
+one notification callback only when notification wins, exactly one ready
+publication for queued waits, an empty queue and rejection of retired tickets.
+Worker completion is followed by real scheduler/reaper quiescence. This tests
+the timeout resolution path directly; timer interrupt delivery remains covered
+by the existing timed-wait tests.
+
+The SMP case needs at least three CPUs and explicitly skips otherwise. AArch64
+acceptance checks that marker and explicitly selects multithreaded TCG. These
+are correctness checks with progress deadlines, not performance benchmarks.
+Physical AArch64 stress remains necessary for hardware ordering and cache/TLB
+behavior; neither this suite nor QEMU qualifies physical DMA retirement.
+
 ## What needs review
 
 Retired source checks also searched for particular variable names, exact call
