@@ -6,19 +6,17 @@
 use crate::kernel::abi::native::Arguments;
 use crate::kernel::abi::native::services::{DeferredAction, VmServices};
 use crate::kernel::abi::native::status::{
-    console_io_result, failure, handle_result, info_result, status_from_vm_service_error,
-    status_only, success,
+    failure, handle_result, info_result, status_from_vm_service_error, status_only, success,
 };
 use crate::kernel::abi::native::wire::{
     copy_info_record, decode_virtual_cpu_bootstrap, decode_virtual_machine_configuration,
     encode_virtual_cpu_info, encode_virtual_machine_info, parse_affinity_request, parse_handle,
-    parse_single_handle, parse_two_handles, parse_virtual_serial_io, prepare_info_request,
-    require_zero,
+    parse_single_handle, parse_two_handles, prepare_info_request, require_zero,
 };
 use hyper::abi::native::{
-    HYPER_NATIVE_STATUS_INVALID_ARGUMENT, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE,
-    HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE, HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE,
-    HyperNativeVirtualCpuInfo, HyperNativeVirtualMachineInfo,
+    HYPER_NATIVE_STATUS_INVALID_ARGUMENT, HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE,
+    HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE, HyperNativeVirtualCpuInfo,
+    HyperNativeVirtualMachineInfo,
 };
 
 #[inline(never)]
@@ -73,75 +71,6 @@ pub(in crate::kernel::abi::native) fn sys_pending_virtual_machine_set_bootstrap(
             .map_err(status_from_vm_service_error)
     });
     DeferredAction::Return(status_only(result))
-}
-
-#[inline(never)]
-pub(in crate::kernel::abi::native) fn sys_pending_virtual_machine_set_virtual_serial(
-    services: &impl VmServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_two_handles(arguments).and_then(|[pending, serial]| {
-        services
-            .set_pending_virtual_machine_virtual_serial(pending, serial)
-            .map_err(status_from_vm_service_error)
-    });
-    DeferredAction::Return(status_only(result))
-}
-
-#[inline(never)]
-pub(in crate::kernel::abi::native) fn sys_virtual_serial_create(
-    services: &impl VmServices,
-    _arguments: &Arguments,
-) -> DeferredAction {
-    DeferredAction::Return(handle_result(
-        services
-            .create_virtual_serial()
-            .map_err(status_from_vm_service_error),
-    ))
-}
-
-#[inline(never)]
-pub(in crate::kernel::abi::native) fn sys_virtual_serial_register_output(
-    services: &impl VmServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    DeferredAction::Return(status_only(parse_two_handles(arguments).and_then(
-        |[serial, buffer]| {
-            services
-                .register_virtual_serial_output(serial, buffer)
-                .map_err(status_from_vm_service_error)
-        },
-    )))
-}
-
-#[inline(never)]
-pub(in crate::kernel::abi::native) fn sys_virtual_serial_acknowledge_output(
-    services: &impl VmServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = require_zero(&arguments[2..]).and_then(|()| {
-        let serial = crate::kernel::abi::native::wire::parse_handle(arguments[0])?;
-        services
-            .acknowledge_virtual_serial_output(serial, arguments[1])
-            .map_err(status_from_vm_service_error)
-    });
-    DeferredAction::Return(status_only(result))
-}
-
-#[inline(never)]
-pub(in crate::kernel::abi::native) fn sys_virtual_serial_write(
-    services: &impl VmServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_virtual_serial_io(arguments).and_then(|(serial, bytes)| {
-        services
-            .write_virtual_serial(serial, bytes)
-            .map_err(status_from_vm_service_error)
-    });
-    DeferredAction::Return(console_io_result(
-        HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE,
-        result,
-    ))
 }
 
 #[inline(never)]
@@ -388,28 +317,31 @@ pub(in crate::kernel::abi::native) fn sys_virtual_machine_register_mmio(
 }
 
 #[inline(never)]
-pub(in crate::kernel::abi::native) fn sys_virtual_cpu_get_mmio_request(
+pub(in crate::kernel::abi::native) fn sys_virtual_cpu_get_device_request(
     services: &impl VmServices,
     arguments: &Arguments,
 ) -> DeferredAction {
     use hyper::abi::native::{
-        HYPER_NATIVE_STATUS_WOULD_BLOCK, HYPER_NATIVE_VIRTUAL_CPU_MMIO_REQUEST_MIN_SIZE,
-        HyperNativeVirtualCpuMmioRequest,
+        HYPER_NATIVE_STATUS_WOULD_BLOCK, HYPER_NATIVE_VIRTUAL_CPU_DEVICE_REQUEST_MIN_SIZE,
+        HyperNativeVirtualCpuDeviceRequest,
     };
+    let device = arguments[3];
+    let mut info_arguments = *arguments;
+    info_arguments[3] = 0;
     let result = prepare_info_request(
-        arguments,
-        HYPER_NATIVE_VIRTUAL_CPU_MMIO_REQUEST_MIN_SIZE,
-        core::mem::size_of::<HyperNativeVirtualCpuMmioRequest>(),
+        &info_arguments,
+        HYPER_NATIVE_VIRTUAL_CPU_DEVICE_REQUEST_MIN_SIZE,
+        core::mem::size_of::<HyperNativeVirtualCpuDeviceRequest>(),
     )
     .and_then(|output| {
         let request = services
-            .pending_mmio(output.value)
+            .pending_mmio(output.value, device)
             .map_err(status_from_vm_service_error)?
             .ok_or(HYPER_NATIVE_STATUS_WOULD_BLOCK)?;
         copy_info_record(
             services,
             output,
-            &crate::kernel::abi::native::wire::encode_virtual_cpu_mmio_request(request),
+            &crate::kernel::abi::native::wire::encode_virtual_cpu_device_request(request),
         )
     });
     DeferredAction::Return(info_result(result))
@@ -464,6 +396,67 @@ pub(in crate::kernel::abi::native) fn sys_pending_virtual_machine_map_memory(
         let memory = parse_handle(arguments[1])?;
         services
             .map_guest_memory(pending, memory, arguments[2], arguments[3], arguments[4])
+            .map_err(status_from_vm_service_error)
+    })();
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+pub(in crate::kernel::abi::native) fn sys_virtual_machine_register_mmio_event(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        require_zero(&arguments[5..])?;
+        let machine = parse_handle(arguments[0])?;
+        let event = parse_handle(arguments[4])?;
+        if arguments[2] == 0
+            || arguments[3] == 0
+            || arguments[1].checked_add(arguments[2]).is_none()
+        {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        services
+            .register_mmio_event(machine, arguments[1], arguments[2], arguments[3], event)
+            .map_err(status_from_vm_service_error)
+    })();
+    DeferredAction::Return(status_only(result))
+}
+#[inline(never)]
+pub(in crate::kernel::abi::native) fn sys_virtual_machine_set_device_interrupt(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        require_zero(&arguments[3..])?;
+        let machine = parse_handle(arguments[0])?;
+        let interrupt =
+            u32::try_from(arguments[1]).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+        let asserted = match arguments[2] {
+            0 => false,
+            1 => true,
+            _ => return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT),
+        };
+        services
+            .set_device_interrupt(machine, interrupt, asserted)
+            .map_err(status_from_vm_service_error)
+    })();
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+pub(in crate::kernel::abi::native) fn sys_virtual_machine_bind_firmware_console(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        require_zero(&arguments[2..])?;
+        let machine = parse_handle(arguments[0])?;
+        if arguments[1] == 0 {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        services
+            .bind_firmware_console(machine, arguments[1])
             .map_err(status_from_vm_service_error)
     })();
     DeferredAction::Return(status_only(result))

@@ -63,7 +63,6 @@ pub const HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE: u32 = 21;
 pub const HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE: u32 = 22;
 pub const HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE: u32 = 23;
 pub const HYPER_NATIVE_OBJECT_VIRTUAL_CPU: u32 = 24;
-pub const HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL: u32 = 25;
 pub const HYPER_NATIVE_OBJECT_WAIT_SET: u32 = 26;
 pub const HYPER_NATIVE_OBJECT_GUEST_MEMORY: u32 = 27;
 pub const HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY: u32 = 28;
@@ -108,7 +107,6 @@ pub const fn hyper_native_object_transfer_class(object_kind: u32) -> u32 {
         HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
         HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
         HYPER_NATIVE_OBJECT_VIRTUAL_CPU => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
-        HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
         HYPER_NATIVE_OBJECT_WAIT_SET => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
         HYPER_NATIVE_OBJECT_GUEST_MEMORY => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
         HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
@@ -160,9 +158,6 @@ pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 0x3ffffffff;
 
 pub const HYPER_NATIVE_SIGNAL_PHYSICAL_DEVICE_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_NATIVE_BLOCK_PEER_CLOSED: u64 = 1_u64 << 0;
-pub const HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_READABLE: u64 = 1_u64 << 0;
-pub const HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_WRITABLE: u64 = 1_u64 << 1;
-pub const HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_PEER_CLOSED: u64 = 1_u64 << 2;
 pub const HYPER_NATIVE_SIGNAL_WAIT_SET_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_EVENT_SIGNALED: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_READABLE: u64 = 1_u64 << 0;
@@ -246,10 +241,6 @@ pub const HYPER_NATIVE_RISCV_ISA_ZIFENCEI: u64 = 128;
 pub const HYPER_NATIVE_RISCV_ISA_SSTC: u64 = 256;
 pub const HYPER_NATIVE_PAGE_SIZE: u64 = 4096;
 pub const HYPER_NATIVE_EXTENSIBLE_RECORD_MAX_BYTES: u64 = 4096;
-pub const HYPER_NATIVE_VIRTUAL_SERIAL_MAX_TRANSFER_BYTES: u64 = 4096;
-pub const HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_CAPACITY: u64 = 65536;
-pub const HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_HEADER_BYTES: u64 = 4096;
-pub const HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_BYTES: u64 = 69632;
 pub const HYPER_NATIVE_ELF_OSABI: u64 = 63;
 pub const HYPER_NATIVE_ELF_ABI_VERSION: u64 = 0;
 pub const HYPER_NATIVE_PROCESS_STARTUP_DATA_MAX_BYTES: u64 = 16384;
@@ -447,11 +438,7 @@ pub const HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_INFO: u64 = 68;
 pub const HYPER_NATIVE_SYS_RESOURCE_DOMAIN_CREATE: u64 = 69;
 pub const HYPER_NATIVE_SYS_TASK_GROUP_CREATE: u64 = 70;
 pub const HYPER_NATIVE_SYS_VIRTUAL_CPU_START: u64 = 71;
-pub const HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL: u64 = 72;
 pub const HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC: u64 = 73;
-pub const HYPER_NATIVE_SYS_VIRTUAL_SERIAL_CREATE: u64 = 74;
-pub const HYPER_NATIVE_SYS_VIRTUAL_SERIAL_REGISTER_OUTPUT: u64 = 75;
-pub const HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE: u64 = 76;
 pub const HYPER_NATIVE_SYS_THREAD_CREATE: u64 = 77;
 pub const HYPER_NATIVE_SYS_THREAD_START: u64 = 78;
 pub const HYPER_NATIVE_SYS_THREAD_REQUEST_STOP: u64 = 79;
@@ -469,7 +456,6 @@ pub const HYPER_NATIVE_SYS_WAIT_SET_REARM: u64 = 90;
 pub const HYPER_NATIVE_SYS_WAIT_SET_REMOVE: u64 = 91;
 pub const HYPER_NATIVE_SYS_WAIT_SET_WAIT: u64 = 92;
 pub const HYPER_NATIVE_SYS_PROCESS_GET_CURRENT_ID: u64 = 93;
-pub const HYPER_NATIVE_SYS_VIRTUAL_SERIAL_ACKNOWLEDGE_OUTPUT: u64 = 94;
 pub const HYPER_NATIVE_SYS_DIRECTORY_SCOPE_CREATE: u64 = 95;
 pub const HYPER_NATIVE_SYS_DIRECTORY_GET_METADATA: u64 = 96;
 pub const HYPER_NATIVE_SYS_FILE_GET_METADATA: u64 = 97;
@@ -496,7 +482,7 @@ pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_POWER_REQUEST: u64 = 117;
 pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_COMPLETE_POWER_REQUEST: u64 = 118;
 pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_OPEN_VCPU: u64 = 119;
 pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REGISTER_MMIO: u64 = 120;
-pub const HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_MMIO_REQUEST: u64 = 121;
+pub const HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_DEVICE_REQUEST: u64 = 121;
 pub const HYPER_NATIVE_SYS_VIRTUAL_CPU_COMPLETE_MMIO: u64 = 122;
 pub const HYPER_NATIVE_SYS_GUEST_MEMORY_CREATE: u64 = 123;
 pub const HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_MAP_MEMORY: u64 = 124;
@@ -526,6 +512,9 @@ pub const HYPER_NATIVE_SYS_DEVICE_IRQ_COMPLETE: u64 = 147;
 pub const HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY: u64 = 148;
 pub const HYPER_NATIVE_SYS_SYSTEM_CONFIG: u64 = 149;
 pub const HYPER_NATIVE_SYS_OBJECT_INSPECTOR_READ_DETAILS: u64 = 150;
+pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REGISTER_MMIO_EVENT: u64 = 480;
+pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_SET_DEVICE_INTERRUPT: u64 = 481;
+pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_BIND_FIRMWARE_CONSOLE: u64 = 482;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -672,10 +661,10 @@ const _: () = assert!(core::mem::align_of::<HyperNativeDmaExtent>() == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeDmaExtent, physical_base) == 0);
 const _: () = assert!(core::mem::offset_of!(HyperNativeDmaExtent, length) == 8);
 
-pub const HYPER_NATIVE_VIRTUAL_CPU_MMIO_REQUEST_MIN_SIZE: usize = 48;
+pub const HYPER_NATIVE_VIRTUAL_CPU_DEVICE_REQUEST_MIN_SIZE: usize = 48;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HyperNativeVirtualCpuMmioRequest {
+pub struct HyperNativeVirtualCpuDeviceRequest {
     pub id: u64,
     pub device: u64,
     pub address: u64,
@@ -684,15 +673,15 @@ pub struct HyperNativeVirtualCpuMmioRequest {
     pub width: u32,
     pub reserved: u64,
 }
-const _: () = assert!(core::mem::size_of::<HyperNativeVirtualCpuMmioRequest>() == 48);
-const _: () = assert!(core::mem::align_of::<HyperNativeVirtualCpuMmioRequest>() == 8);
-const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuMmioRequest, id) == 0);
-const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuMmioRequest, device) == 8);
-const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuMmioRequest, address) == 16);
-const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuMmioRequest, value) == 24);
-const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuMmioRequest, operation) == 32);
-const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuMmioRequest, width) == 36);
-const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuMmioRequest, reserved) == 40);
+const _: () = assert!(core::mem::size_of::<HyperNativeVirtualCpuDeviceRequest>() == 48);
+const _: () = assert!(core::mem::align_of::<HyperNativeVirtualCpuDeviceRequest>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuDeviceRequest, id) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuDeviceRequest, device) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuDeviceRequest, address) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuDeviceRequest, value) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuDeviceRequest, operation) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuDeviceRequest, width) == 36);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuDeviceRequest, reserved) == 40);
 
 pub const HYPER_NATIVE_PRIVATE_MAPPING_MIN_SIZE: usize = 48;
 #[repr(C)]

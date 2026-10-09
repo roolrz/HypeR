@@ -53,10 +53,15 @@ fn dispatch_guest_sync(exit: crate::hal::vm::GuestSyncExit) -> crate::hal::vm::G
     match crate::kernel::vm::active_vcpu::with(|execution| {
         #[cfg(CONFIG_ARCH_RISCV64)]
         if let Some(byte) = exit.legacy_console_byte() {
-            if !crate::kernel::vm::device::selected::write_console_byte(execution, byte) {
-                return crate::hal::vm::GuestSyncAction::Stop;
-            }
-            return crate::hal::vm::GuestSyncAction::complete_legacy_console();
+            return if execution.vm_binding().is_some_and(|binding| {
+                binding
+                    .lifecycle()
+                    .route_firmware_console(execution.vcpu_id, byte)
+            }) {
+                crate::hal::vm::GuestSyncAction::DeferredFirmwareConsole
+            } else {
+                crate::hal::vm::GuestSyncAction::Stop
+            };
         }
         #[cfg(CONFIG_ARCH_AARCH64)]
         if let Some(action) = dispatch_power_call(execution, exit) {

@@ -1043,41 +1043,6 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             Err(crate::kernel::vm::service::Error::NotSupported)
         }
 
-        fn set_pending_virtual_machine_virtual_serial(
-            &self,
-            _: HandleValue,
-            _: HandleValue,
-        ) -> Result<(), crate::kernel::vm::service::Error> {
-            self.calls.set(self.calls.get().saturating_add(1));
-            Err(crate::kernel::vm::service::Error::NotSupported)
-        }
-
-        fn create_virtual_serial(&self) -> Result<HandleValue, crate::kernel::vm::service::Error> {
-            Err(crate::kernel::vm::service::Error::NotSupported)
-        }
-
-        fn register_virtual_serial_output(
-            &self,
-            _: HandleValue,
-            _: HandleValue,
-        ) -> Result<(), crate::kernel::vm::service::Error> {
-            Err(crate::kernel::vm::service::Error::NotSupported)
-        }
-        fn acknowledge_virtual_serial_output(
-            &self,
-            _: HandleValue,
-            _: u64,
-        ) -> Result<(), crate::kernel::vm::service::Error> {
-            Err(crate::kernel::vm::service::Error::NotSupported)
-        }
-        fn write_virtual_serial(
-            &self,
-            _: HandleValue,
-            _: Option<UserSlice>,
-        ) -> Result<usize, crate::kernel::vm::service::Error> {
-            Err(crate::kernel::vm::service::Error::NotSupported)
-        }
-
         fn seal_pending_virtual_machine(
             &self,
             _: HandleValue,
@@ -1120,9 +1085,35 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(crate::kernel::vm::service::Error::NotSupported)
         }
+        fn register_mmio_event(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: HandleValue,
+        ) -> Result<(), crate::kernel::vm::service::Error> {
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn bind_firmware_console(
+            &self,
+            _: HandleValue,
+            _: u64,
+        ) -> Result<(), crate::kernel::vm::service::Error> {
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn set_device_interrupt(
+            &self,
+            _: HandleValue,
+            _: u32,
+            _: bool,
+        ) -> Result<(), crate::kernel::vm::service::Error> {
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
         fn pending_mmio(
             &self,
             _: HandleValue,
+            _: u64,
         ) -> Result<Option<hyper::vm::device::mmio::Request>, crate::kernel::vm::service::Error>
         {
             self.calls.set(self.calls.get().saturating_add(1));

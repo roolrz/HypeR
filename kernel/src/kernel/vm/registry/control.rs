@@ -248,7 +248,6 @@ fn begin_quiesce_control(id: VmId) -> Result<(), Error> {
         )),
     };
     drop(lease);
-    machine.disconnect_virtual_serial();
     machine.close_io_routes();
     if let Err(error) = machine.quiesce_devices() {
         crate::kernel::crash::fatal(format_args!(

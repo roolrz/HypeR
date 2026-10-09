@@ -82,32 +82,6 @@ pub unsafe fn pending_virtual_machine_set_memory(
     }
 }
 
-/// Commits a virtual-serial device capability into a pending VM.
-///
-/// # Safety
-///
-/// Both handles must remain live for the complete call. The caller must honor
-/// the consume-on-success contract for `serial`.
-#[inline]
-pub unsafe fn pending_virtual_machine_set_virtual_serial(
-    pending: abi::HyperNativeHandle,
-    serial: abi::HyperNativeHandle,
-) -> abi::HyperNativeStatus {
-    // SAFETY: the caller establishes both handle lifetimes and ownership.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL,
-            pending,
-            serial,
-            0,
-            0,
-            0,
-            0,
-        )
-        .status
-    }
-}
-
 /// Sets the boot-vCPU initial machine state.
 ///
 /// # Safety
@@ -442,18 +416,29 @@ pub unsafe fn virtual_machine_register_mmio(
 /// # Safety
 /// The vCPU handle must remain live and request must be writable for the call.
 #[inline]
-pub unsafe fn virtual_cpu_get_mmio_request(
+pub unsafe fn virtual_cpu_get_device_request(
     vcpu: abi::HyperNativeHandle,
-    request: *mut abi::HyperNativeVirtualCpuMmioRequest,
+    request: *mut abi::HyperNativeVirtualCpuDeviceRequest,
+) -> CallResult {
+    // SAFETY: Caller retains the handle and writable output.
+    unsafe { virtual_cpu_get_device_request_for_device(vcpu, request, 0) }
+}
+/// Snapshots a request selected by one immutable route cookie.
+/// # Safety
+/// The vCPU and writable output must remain live throughout the call.
+pub unsafe fn virtual_cpu_get_device_request_for_device(
+    vcpu: abi::HyperNativeHandle,
+    request: *mut abi::HyperNativeVirtualCpuDeviceRequest,
+    device: u64,
 ) -> CallResult {
     // SAFETY: The caller establishes handle and output validity.
     unsafe {
         ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_MMIO_REQUEST,
+            abi::HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_DEVICE_REQUEST,
             vcpu,
             request.addr() as u64,
-            core::mem::size_of::<abi::HyperNativeVirtualCpuMmioRequest>() as u64,
-            0,
+            core::mem::size_of::<abi::HyperNativeVirtualCpuDeviceRequest>() as u64,
+            device,
             0,
             0,
         )
@@ -556,5 +541,74 @@ pub unsafe fn pending_virtual_machine_assign_device(
             0,
             0,
         )
+    }
+}
+
+/// Registers a route and retained Event wake prompt.
+/// # Safety
+/// Both capabilities must remain live for the call.
+pub unsafe fn virtual_machine_register_mmio_event(
+    machine: u64,
+    base: u64,
+    length: u64,
+    device: u64,
+    event: u64,
+) -> abi::HyperNativeStatus {
+    // SAFETY: Caller supplies live handles; other arguments are values.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REGISTER_MMIO_EVENT,
+            machine,
+            base,
+            length,
+            device,
+            event,
+            0,
+        )
+        .status
+    }
+}
+/// Changes one guest shared-device interrupt level.
+/// # Safety
+/// The management capability must remain live for the call.
+pub unsafe fn virtual_machine_set_device_interrupt(
+    machine: u64,
+    interrupt: u32,
+    asserted: bool,
+) -> abi::HyperNativeStatus {
+    // SAFETY: Caller supplies a live handle; the boolean is canonical.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_SET_DEVICE_INTERRUPT,
+            machine,
+            u64::from(interrupt),
+            u64::from(asserted),
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Directs the RISC-V legacy SBI console call to an existing device route.
+/// # Safety
+/// The management capability must remain live for the call.
+pub unsafe fn virtual_machine_bind_firmware_console(
+    machine: u64,
+    device: u64,
+) -> abi::HyperNativeStatus {
+    // SAFETY: Caller supplies a live management handle and a scalar cookie.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_BIND_FIRMWARE_CONSOLE,
+            machine,
+            device,
+            0,
+            0,
+            0,
+            0,
+        )
+        .status
     }
 }

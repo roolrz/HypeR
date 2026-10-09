@@ -39,7 +39,6 @@ mod type_contracts;
 mod user_memory_access;
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod vcpu_migration;
-mod virtual_serial;
 mod vm_registry;
 mod vm_wfi_wait;
 mod wait_arbitration;
@@ -102,10 +101,6 @@ pub(crate) fn run() {
         capability_channel::run,
     );
     run_case("kernel ByteChannel core tests", channel::run);
-    run_case(
-        "registered virtual serial lifetime tests",
-        virtual_serial::run,
-    );
     run_case(
         "kernel init capability-object tests",
         capability_objects::run,

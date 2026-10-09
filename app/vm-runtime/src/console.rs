@@ -4,7 +4,7 @@
 //! Runtime-owned console retention, client transport, and batched input.
 
 use hyper_os::capability_channel::{CapabilityChannel, CapabilityReceiveSlot};
-use hyper_os::handle::{ByteChannelObject, OwnedHandle, Rights, VirtualSerialObject};
+use hyper_os::handle::{ByteChannelObject, OwnedHandle};
 use hyper_os::{Error, Result, Status};
 use hyper_service::vm;
 use std::collections::VecDeque;
@@ -25,8 +25,7 @@ const BATCH: usize = hyper_os::channel::MAX_MESSAGE_BYTES;
 
 pub struct Console {
     connection: CapabilityChannel,
-    serial: OwnedHandle<VirtualSerialObject>,
-    output: hyper_os::virtual_serial::Output,
+    output: hyper_vm_support::serial::Port,
     client: Option<OwnedHandle<ByteChannelObject>>,
     serial_wait: Subscription,
     client_wait: Subscription,
@@ -37,15 +36,15 @@ pub struct Console {
 }
 
 impl Console {
+    /// Retires the independent UART worker after the supervision loop ends.
+    pub fn finish(self) -> Result<()> {
+        self.output.join()
+    }
+
     #[must_use]
-    pub fn new(
-        connection: CapabilityChannel,
-        serial: OwnedHandle<VirtualSerialObject>,
-        output: hyper_os::virtual_serial::Output,
-    ) -> Self {
+    pub fn new(connection: CapabilityChannel, output: hyper_vm_support::serial::Port) -> Self {
         Self {
             connection,
-            serial,
             output,
             client: None,
             serial_wait: Subscription::new(),
@@ -55,11 +54,6 @@ impl Console {
             retained: VecDeque::with_capacity(RETAIN_BYTES),
             input: VecDeque::with_capacity(BATCH),
         }
-    }
-
-    pub fn binding(&self) -> Result<OwnedHandle<VirtualSerialObject>> {
-        self.serial
-            .duplicate(Rights::ASSIGN_DEVICE.union(Rights::TRANSFER))
     }
 
     pub fn attach(&mut self, waits: &WaitSet) -> Result<()> {
@@ -92,15 +86,15 @@ impl Console {
         if self.serial_closed {
             self.serial_wait.remove(waits)?;
         } else {
-            let mut signals = ObjectSignals::<VirtualSerialObject>::READABLE
-                .union(ObjectSignals::<VirtualSerialObject>::PEER_CLOSED);
+            let mut signals = ObjectSignals::<ByteChannelObject>::READABLE
+                .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED);
             let input_pending = !self.input.is_empty();
             if input_pending {
-                signals = signals.union(ObjectSignals::<VirtualSerialObject>::WRITABLE);
+                signals = signals.union(ObjectSignals::<ByteChannelObject>::WRITABLE);
             }
             self.serial_wait.update(
                 waits,
-                self.serial.as_handle_ref(),
+                self.output.as_handle_ref(),
                 signals,
                 u8::from(input_pending),
             )?;
@@ -131,7 +125,7 @@ impl Console {
 
     pub fn observe(&mut self, registration: RegistrationId, signals: u64) {
         if self.serial_wait.consume(registration)
-            && ObjectSignals::<VirtualSerialObject>::PEER_CLOSED.is_present_in(signals)
+            && ObjectSignals::<ByteChannelObject>::PEER_CLOSED.is_present_in(signals)
         {
             self.serial_closed = true;
             self.input.clear();
@@ -193,15 +187,12 @@ impl Console {
             }
         }
         if !self.input.is_empty() {
-            match hyper_os::virtual_serial::try_write(
-                self.serial.as_handle_ref(),
-                self.input.make_contiguous(),
-            ) {
+            match self.output.try_write(self.input.make_contiguous()) {
                 Ok(count) => {
                     self.input.drain(..count);
                 }
-                Err(Error::Status(Status::BUSY)) => {}
-                Err(Error::Status(Status::BAD_STATE)) => self.input.clear(),
+                Err(Error::Status(Status::WOULD_BLOCK)) => {}
+                Err(Error::Status(Status::PEER_CLOSED)) => self.input.clear(),
                 Err(error) => return Err(error),
             }
         }

@@ -383,27 +383,6 @@ pub(in crate::kernel) trait VmServices: UserMemoryServices {
         pending: HandleValue,
         bootstrap: crate::kernel::vm::objects::VirtualCpuBootstrap,
     ) -> Result<(), crate::kernel::vm::service::Error>;
-    fn set_pending_virtual_machine_virtual_serial(
-        &self,
-        pending: HandleValue,
-        console: HandleValue,
-    ) -> Result<(), crate::kernel::vm::service::Error>;
-    fn create_virtual_serial(&self) -> Result<HandleValue, crate::kernel::vm::service::Error>;
-    fn register_virtual_serial_output(
-        &self,
-        serial: HandleValue,
-        buffer: HandleValue,
-    ) -> Result<(), crate::kernel::vm::service::Error>;
-    fn acknowledge_virtual_serial_output(
-        &self,
-        serial: HandleValue,
-        consumed: u64,
-    ) -> Result<(), crate::kernel::vm::service::Error>;
-    fn write_virtual_serial(
-        &self,
-        serial: HandleValue,
-        bytes: Option<UserSlice>,
-    ) -> Result<usize, crate::kernel::vm::service::Error>;
     fn seal_pending_virtual_machine(
         &self,
         pending: HandleValue,
@@ -427,9 +406,29 @@ pub(in crate::kernel) trait VmServices: UserMemoryServices {
         length: u64,
         device: u64,
     ) -> Result<(), crate::kernel::vm::service::Error>;
+    fn register_mmio_event(
+        &self,
+        machine: HandleValue,
+        base: u64,
+        length: u64,
+        device: u64,
+        event: HandleValue,
+    ) -> Result<(), crate::kernel::vm::service::Error>;
+    fn bind_firmware_console(
+        &self,
+        machine: HandleValue,
+        device: u64,
+    ) -> Result<(), crate::kernel::vm::service::Error>;
+    fn set_device_interrupt(
+        &self,
+        machine: HandleValue,
+        interrupt: u32,
+        asserted: bool,
+    ) -> Result<(), crate::kernel::vm::service::Error>;
     fn pending_mmio(
         &self,
         vcpu: HandleValue,
+        device: u64,
     ) -> Result<Option<hyper::vm::device::mmio::Request>, crate::kernel::vm::service::Error>;
     fn complete_mmio(
         &self,

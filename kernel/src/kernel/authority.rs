@@ -47,7 +47,6 @@ impl Rights {
     pub(crate) const EXECUTE: Self = Self(native::HYPER_NATIVE_RIGHT_EXECUTE);
     pub(crate) const START: Self = Self(native::HYPER_NATIVE_RIGHT_START);
     pub(crate) const REQUEST_STOP: Self = Self(native::HYPER_NATIVE_RIGHT_REQUEST_STOP);
-    pub(crate) const ASSIGN_DEVICE: Self = Self(native::HYPER_NATIVE_RIGHT_ASSIGN_DEVICE);
     pub(crate) const REVOKE: Self = Self(native::HYPER_NATIVE_RIGHT_REVOKE);
     pub(crate) const SIGNAL: Self = Self(native::HYPER_NATIVE_RIGHT_SIGNAL);
     pub(crate) const CREATE_PROCESS: Self = Self(native::HYPER_NATIVE_RIGHT_CREATE_PROCESS);

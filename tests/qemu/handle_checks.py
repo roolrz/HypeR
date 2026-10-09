@@ -10,7 +10,7 @@ def verify_handles(run):
     run('handle --help', rb'--list-kinds')
     kinds = run('handle --list-kinds', rb'guest-mapping')
     for kind in (b'wait-set', b'physical-device', b'guest-memory', b'guest-mailbox',
-                 b'guest-notification', b'native-block', b'virtual-serial',
+                 b'guest-notification', b'native-block',
                  b'device-assignment-authority'):
         if kind not in kinds:
             raise AssertionError(f'missing object kind: {kind!r}')

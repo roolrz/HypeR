@@ -3,12 +3,12 @@
 
 //! Shared image preparation and installation for physical-I/O deployments.
 
-use hyper_os::handle::{Rights, VirtualCpuObject, VirtualMachineObject};
+use crate::serial::Port;
+use hyper_os::device;
+use hyper_os::handle::{VirtualCpuObject, VirtualMachineObject};
 use hyper_os::memory::WritableVmo;
 use hyper_os::startup::{self, Startup};
-use hyper_os::virtual_serial::Output;
 use hyper_os::vm;
-use hyper_os::{device, virtual_serial};
 use hyper_vm_image::guest_fdt::io::IoDevices;
 use hyper_vm_image::{Payload, ReadAt, guest_fdt, linux};
 use std::fs::File;
@@ -35,7 +35,7 @@ pub struct InstalledGuest {
     image: String,
     pub machine: Arc<hyper_os::OwnedHandle<VirtualMachineObject>>,
     pub cpus: Vec<Arc<hyper_os::OwnedHandle<VirtualCpuObject>>>,
-    pub output: Output,
+    pub output: Port,
 }
 
 impl InstalledGuest {
@@ -167,7 +167,6 @@ pub fn install(
     own: &hyper_os::OwnedHandle<hyper_os::handle::GuestMemoryObject>,
     shared: Option<&hyper_os::OwnedHandle<hyper_os::handle::GuestMemoryObject>>,
     physical: Option<&hyper_os::OwnedHandle<hyper_os::handle::PhysicalDeviceObject>>,
-    serial_address: u64,
 ) -> Result<InstalledGuest> {
     let ram_bytes = image.plan.memory_size();
     let mapping = shared.map(|memory| SharedGrant {
@@ -192,7 +191,6 @@ pub fn install(
             ram_bytes
         },
         physical.as_slice(),
-        serial_address,
     )
 }
 
@@ -220,7 +218,6 @@ pub fn install_mapped(
     shared: &[SharedGrant<'_>],
     address_space_bytes: u64,
     physical: &[PhysicalAssignment<'_>],
-    serial_address: u64,
 ) -> Result<InstalledGuest> {
     if address_space_bytes < image.plan.memory_size() {
         return Err("I/O VM address space cannot truncate its boot RAM".into());
@@ -270,19 +267,6 @@ pub fn install_mapped(
         )
         .map_err(show)?;
     }
-    let serial = virtual_serial::create().map_err(show)?;
-    let output = Output::register(
-        &serial,
-        startup.borrow(startup::ROOT_VMAR).map_err(show)?,
-        serial_address,
-        WritableVmo::create(virtual_serial::BUFFER_BYTES).map_err(show)?,
-    )
-    .map_err(show)?;
-    let binding = serial
-        .duplicate(Rights::ASSIGN_DEVICE.union(Rights::TRANSFER))
-        .map_err(show)?;
-    vm::set_virtual_serial(pending.as_handle_ref(), binding)
-        .map_err(|error| show(error.error()))?;
     vm::set_bootstrap(
         pending.as_handle_ref(),
         vm::VirtualCpuBootstrap {
@@ -307,6 +291,12 @@ pub fn install_mapped(
             .ok_or(hyper_os::Error::InvalidResponse)?;
         vm::set_vcpu_affinity(cpu.as_handle_ref(), words)
     })?;
+    let output = Port::start(
+        machine.clone(),
+        cpus.clone(),
+        vm::PlatformProfile::Aarch64Reference,
+    )
+    .map_err(show)?;
     Ok(InstalledGuest {
         name: image.name.clone(),
         image: image.path.clone(),

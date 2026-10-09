@@ -13,3 +13,5 @@ pub mod virtio_net;
 
 #[cfg(all(target_os = "hyper", target_arch = "aarch64"))]
 pub mod io_guest;
+
+pub mod serial;

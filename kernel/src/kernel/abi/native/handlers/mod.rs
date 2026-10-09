@@ -88,16 +88,15 @@ pub(super) use vm::{
     sys_guest_memory_create, sys_pending_virtual_machine_abort,
     sys_pending_virtual_machine_install, sys_pending_virtual_machine_map_memory,
     sys_pending_virtual_machine_seal, sys_pending_virtual_machine_set_bootstrap,
-    sys_pending_virtual_machine_set_memory, sys_pending_virtual_machine_set_virtual_serial,
-    sys_virtual_cpu_complete_mmio, sys_virtual_cpu_get_info, sys_virtual_cpu_get_mmio_request,
-    sys_virtual_cpu_set_affinity, sys_virtual_cpu_start,
+    sys_pending_virtual_machine_set_memory, sys_virtual_cpu_complete_mmio,
+    sys_virtual_cpu_get_device_request, sys_virtual_cpu_get_info, sys_virtual_cpu_set_affinity,
+    sys_virtual_cpu_start, sys_virtual_machine_bind_firmware_console,
     sys_virtual_machine_complete_power_request, sys_virtual_machine_create,
     sys_virtual_machine_creation_lease_create,
     sys_virtual_machine_creation_lease_get_platform_info, sys_virtual_machine_get_info,
     sys_virtual_machine_get_power_request, sys_virtual_machine_open_vcpu,
-    sys_virtual_machine_register_mmio, sys_virtual_machine_request_stop,
-    sys_virtual_serial_acknowledge_output, sys_virtual_serial_create,
-    sys_virtual_serial_register_output, sys_virtual_serial_write,
+    sys_virtual_machine_register_mmio, sys_virtual_machine_register_mmio_event,
+    sys_virtual_machine_request_stop, sys_virtual_machine_set_device_interrupt,
 };
 
 #[cfg(feature = "kernel-self-test")]

@@ -207,6 +207,13 @@ manifest and board configuration inputs.
 | `/svc/vm-manager` | [vm-manager](vm-manager/) | Own named VM definitions and lifecycle policy, handle `vmm` requests, launch and supervise per-VM runtimes, and expose the I/O VM's read-only observation entry. |
 | `/svc/vm-runtime` | [vm-runtime](vm-runtime/) | Construct and run one managed guest: load its image, configure vCPUs and virtual devices, connect I/O backends, serve its console and control requests, and retire resources on termination. Started by the VM manager for each VM start. |
 
+Guest UART emulation is shared userspace code in
+[`lib/vm-support/src/serial`](../lib/vm-support/src/serial.rs). Each runtime owns
+an independent UART worker and a bounded duplex ByteChannel. The kernel only
+publishes deferred device requests and updates guest interrupt levels. This lets
+the I/O appliance service UART accesses while its supervisor waits on storage;
+console attachment and boot-log formatting remain runtime policy.
+
 The resident Linux I/O VM runs physical device drivers. `io-runtime` is the
 Native service that manages that VM; `vm-runtime` manages an individual business
 guest. [vm-smoke](vm-smoke/README.md) is a separate privileged acceptance fixture,

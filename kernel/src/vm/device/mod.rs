@@ -3,4 +3,3 @@
 
 //! Register models shared by virtual machine platforms.
 pub mod mmio;
-pub mod uart16550;

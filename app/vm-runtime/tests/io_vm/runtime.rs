@@ -7,13 +7,13 @@ use hyper_os::handle::{
     GuestMailboxObject, GuestNotificationObject, VirtualCpuObject, VirtualMachineObject,
 };
 use hyper_os::startup::{self, Startup};
-use hyper_os::virtual_serial::{self, Output};
 use hyper_os::vm::{self, PowerOperation};
 use hyper_os::wait::{self, ObjectSignals, WaitItem};
 use hyper_vm_image::guest_fdt;
 use hyper_vm_image::guest_fdt::io::{DmaRange, IoDevices, MmioDevice, SharedMemory};
 use hyper_vm_support::io_backend::{Backend, Completion};
 use hyper_vm_support::io_guest::Image;
+use hyper_vm_support::serial::Port;
 use std::io::{self, Read, Write};
 use std::num::NonZeroU64;
 use std::process::ExitCode;
@@ -63,7 +63,7 @@ fn deadline(seconds: u64) -> Result<u64> {
 struct Guest {
     machine: Arc<hyper_os::OwnedHandle<VirtualMachineObject>>,
     cpus: Vec<Arc<hyper_os::OwnedHandle<VirtualCpuObject>>>,
-    output: Output,
+    output: Port,
     started: bool,
     retired: bool,
     tail: Vec<u8>,
@@ -71,7 +71,7 @@ struct Guest {
 }
 impl Guest {
     fn drain(&mut self) -> Result<()> {
-        let mut bytes = [0; 2048];
+        let mut bytes = [0; hyper_vm_support::serial::MESSAGE_BYTES];
         for _ in 0..16 {
             let length = self.output.try_read(&mut bytes).map_err(show)?;
             if length == 0 {
@@ -136,10 +136,8 @@ fn install(
     own: &hyper_os::OwnedHandle<hyper_os::handle::GuestMemoryObject>,
     shared: Option<&hyper_os::OwnedHandle<hyper_os::handle::GuestMemoryObject>>,
     physical: Option<&hyper_os::OwnedHandle<hyper_os::handle::PhysicalDeviceObject>>,
-    serial_address: u64,
 ) -> Result<Guest> {
-    let installed =
-        hyper_vm_support::io_guest::install(startup, image, own, shared, physical, serial_address)?;
+    let installed = hyper_vm_support::io_guest::install(startup, image, own, shared, physical)?;
     Ok(Guest {
         machine: installed.machine,
         cpus: installed.cpus,
@@ -356,16 +354,8 @@ fn suite(startup: &Startup<'_>) -> Result<()> {
             &io_grant,
             Some(&front_grant),
             Some(&physical),
-            0xd000_0000,
         )?);
-        guests.push(install(
-            startup,
-            &front,
-            &front_grant,
-            None,
-            None,
-            0xd000_0000 + virtual_serial::BUFFER_BYTES,
-        )?);
+        guests.push(install(startup, &front, &front_grant, None, None)?);
         println!("IO-VM-SMOKE: both guests installed");
         // Installed RAM layouts now own every hardware lease. Do not retain a
         // separate grant object across the final VM retirement assertion.

@@ -24,6 +24,40 @@ use hyper::vm::riscv64::instruction::{
 pub(crate) enum Dispatch {
     Resume,
     Stop(GuestRunExit),
+    Device(DeviceCompletion),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DeviceCompletion {
+    Mmio(hyper::vm::riscv64::instruction::MmioInstruction),
+    FirmwareConsole,
+}
+impl DeviceCompletion {
+    pub(super) fn apply(self, general: &mut [u64; 32], pc: &mut u64, action: MmioAction) -> bool {
+        let length = match (self, action) {
+            (Self::Mmio(decoded), MmioAction::CompleteRead(value)) => {
+                let MmioRegister::Load { rd, .. } = decoded.operation else {
+                    return false;
+                };
+                if rd != 0 {
+                    general[usize::from(rd)] = decoded.read_value(value);
+                }
+                decoded.instruction_bytes
+            }
+            (Self::Mmio(decoded), MmioAction::CompleteWrite)
+                if matches!(decoded.operation, MmioRegister::Store { .. }) =>
+            {
+                decoded.instruction_bytes
+            }
+            (Self::FirmwareConsole, MmioAction::CompleteWrite) => {
+                general[10] = SBI_SUCCESS;
+                4
+            }
+            _ => return false,
+        };
+        *pc = pc.wrapping_add(u64::from(length));
+        true
+    }
 }
 
 fn terminal(frame: &super::exception::TrapFrame, cause: GuestTerminalCause) -> Dispatch {
@@ -239,6 +273,7 @@ pub enum UnsupportedReason {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[must_use]
 pub enum GuestSyncAction {
+    DeferredFirmwareConsole,
     ResumeVirtualInstruction {
         value: Option<u64>,
     },
@@ -318,6 +353,14 @@ pub(crate) fn dispatch(frame: &mut super::exception::TrapFrame) -> Dispatch {
         }
         CapturedExit::Synchronous { exit, .. } => crate::arch::vm::dispatch_guest_sync(*exit),
     };
+    if action == GuestSyncAction::DeferredFirmwareConsole {
+        return if matches!(captured, CapturedExit::Synchronous { exit: GuestSyncExit::SupervisorCall(call), .. } if call.legacy_console_byte().is_some())
+        {
+            Dispatch::Device(DeviceCompletion::FirmwareConsole)
+        } else {
+            terminal(frame, GuestTerminalCause::Mmio)
+        };
+    }
     let wfi = matches!(
         captured,
         CapturedExit::Synchronous {
@@ -379,6 +422,9 @@ fn dispatch_mmio(frame: &mut super::exception::TrapFrame, fault: GuestMemoryFaul
     };
     let action =
         crate::arch::vm::dispatch_mmio(MmioAccess::new(fault.address(), decoded.width, operation));
+    if action == MmioAction::Deferred {
+        return Dispatch::Device(DeviceCompletion::Mmio(decoded));
+    }
     match (decoded.operation, action) {
         (MmioRegister::Load { rd, signed }, MmioAction::CompleteRead(value)) => {
             let shift = 64 - decoded.width.bytes() * 8;

@@ -385,7 +385,7 @@ fn object_wait_many_declares_borrowed_wait_authority() {
 }
 
 #[test]
-fn console_write_borrows_but_vm_binding_consumes_device_authority() {
+fn console_write_and_mmio_doorbell_borrow_explicit_authority() {
     let console_write = schema::SYSCALLS
         .iter()
         .find(|syscall| syscall.name == "console_write")
@@ -402,15 +402,15 @@ fn console_write_borrows_but_vm_binding_consumes_device_authority() {
 
     let vm_serial = schema::SYSCALLS
         .iter()
-        .find(|syscall| syscall.name == "pending_virtual_machine_set_virtual_serial")
-        .and_then(|syscall| syscall.arguments.get(1))
+        .find(|syscall| syscall.name == "virtual_machine_register_mmio_event")
+        .and_then(|syscall| syscall.arguments.get(4))
         .and_then(|argument| argument.handle);
     assert_eq!(
         vm_serial,
         Some(schema::HandleArgument {
-            object: schema::ObjectConstraint::Kind("virtual_serial"),
-            required_rights: schema::RIGHT_TRANSFER | schema::RIGHT_ASSIGN_DEVICE,
-            disposition: schema::HandleDisposition::ConsumeOnCommit,
+            object: schema::ObjectConstraint::Kind("event"),
+            required_rights: schema::RIGHT_SIGNAL,
+            disposition: schema::HandleDisposition::Borrow,
         })
     );
 }
@@ -782,7 +782,6 @@ fn object_transfer_classes_match_the_audited_contract() {
         ("pending_virtual_machine", TransferClass::RendezvousOnly),
         ("virtual_machine", TransferClass::RendezvousOnly),
         ("virtual_cpu", TransferClass::RendezvousOnly),
-        ("virtual_serial", TransferClass::Forbidden),
         ("wait_set", TransferClass::Forbidden),
         ("guest_memory", TransferClass::RendezvousOnly),
         ("device_assignment_authority", TransferClass::General),

@@ -19,9 +19,7 @@ use hyper::abi::native;
 /// VM and vCPU control objects remain excluded. Guest-memory grants may be
 /// delegated to an I/O runtime: they retain backing pages, not a VM lifecycle
 /// edge, and preserve the hardware-write lease until their last mapping retires.
-/// `VirtualSerial` is created by
-/// its owning runtime and is not a startup transport object. Nested
-/// `ProcessBuilder` authority is always forbidden.
+/// Nested `ProcessBuilder` authority is always forbidden.
 pub(crate) struct BuilderStorable;
 
 impl BuilderStorable {

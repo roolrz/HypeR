@@ -282,6 +282,7 @@ impl VmBinding {
             .map_err(|_| Error::StaleIdentity)
     }
 
+    #[cfg(CONFIG_ARCH_X86_64)]
     pub(in crate::kernel::vm) fn devices(&self) -> &VirtualDeviceSet {
         &self.machine.devices
     }
@@ -536,14 +537,6 @@ impl VirtualMachine {
         }
         self.run_admission.close();
         Ok(())
-    }
-
-    pub(super) fn bind_virtual_serial(&self, vcpu: u32) {
-        self.devices.bind_virtual_serial(self.id, vcpu);
-    }
-
-    pub(super) fn disconnect_virtual_serial(&self) {
-        self.devices.disconnect_virtual_serial(self.id);
     }
 
     pub(super) fn quiesce_devices(&self) -> Result<(), super::super::device::Error> {

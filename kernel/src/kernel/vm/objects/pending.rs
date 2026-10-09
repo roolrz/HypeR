@@ -10,9 +10,7 @@ use super::{Error, VirtualCpuBootstrap, reserve_object_charge};
 use crate::kernel::accounting::{CommittedCharge, ResourceDomain};
 use crate::kernel::authority::Rights;
 use crate::kernel::mm::user_space::{GuestMemoryBacking, VmoObject};
-use crate::kernel::object::{
-    KernelObject, KernelRef, ObjectKind, TransferClass, VmDeviceBinding, private,
-};
+use crate::kernel::object::{KernelObject, ObjectKind, TransferClass, private};
 use crate::kernel::vm::installed::{InstalledMachine, VirtualMachineConfiguration};
 use crate::kernel::vm::memory::GuestAddressSpace;
 use crate::kernel::vm::memory::backing::{Layout, Region};
@@ -31,8 +29,6 @@ enum PendingState {
         memory: alloc::boxed::Box<Layout>,
         bootstrap: Option<VirtualCpuBootstrap>,
         physical: crate::kernel::device::assigned::AssignmentSet,
-        virtual_serial:
-            Option<KernelRef<super::super::virtual_serial::VirtualSerial, VmDeviceBinding>>,
     },
     Transition,
     Sealed(Option<PreparedVm>),
@@ -69,7 +65,6 @@ impl PendingVirtualMachine {
                 memory: Layout::try_new(configuration.memory_size, domain)?,
                 bootstrap: None,
                 physical: crate::kernel::device::assigned::AssignmentSet::new(),
-                virtual_serial: None,
             }),
             domain: domain.clone(),
             _object_charge: reserve_object_charge::<Self>(domain)?,
@@ -132,35 +127,6 @@ impl PendingVirtualMachine {
         })
     }
 
-    /// Commits one explicitly delegated host-console output route.
-    ///
-    /// The retained typed reference is independent of the caller's handle and
-    /// moves into the installed device set at seal. No route exists unless a
-    /// userspace VMM performs this operation before sealing.
-    pub(crate) fn set_virtual_serial(
-        &self,
-        serial: KernelRef<super::super::virtual_serial::VirtualSerial, VmDeviceBinding>,
-    ) -> Result<(), Error> {
-        let mut serial = Some(serial);
-        let result = self.state.with(|state| match state {
-            PendingState::Configuring { virtual_serial, .. } if virtual_serial.is_none() => {
-                let candidate = serial.as_ref().ok_or(Error::BadState)?;
-                if !candidate.object().claim_assignment() {
-                    return Err(Error::BadState);
-                }
-                *virtual_serial = serial.take();
-                Ok(())
-            }
-            PendingState::Configuring { .. }
-            | PendingState::Transition
-            | PendingState::Sealed(_)
-            | PendingState::Failed => Err(Error::BadState),
-        });
-        // A last rejected reference may release retained pages/accounting.
-        drop(serial);
-        result
-    }
-
     /// Realizes every fallible VM resource without making it globally visible.
     pub(crate) fn seal(&self) -> Result<(), Error> {
         let state = self.state.with(|state| {
@@ -171,7 +137,6 @@ impl PendingVirtualMachine {
                     lifecycle_resources,
                     memory,
                     bootstrap: Some(bootstrap),
-                    virtual_serial,
                     physical,
                 } if memory.complete()
                     && bootstrap
@@ -190,7 +155,6 @@ impl PendingVirtualMachine {
                         lifecycle_resources,
                         memory,
                         bootstrap,
-                        virtual_serial,
                         physical,
                     ))
                 }
@@ -200,7 +164,7 @@ impl PendingVirtualMachine {
                 }
             }
         })?;
-        let result = self.prepare(state.0, state.1, state.2, state.3, state.4, state.5);
+        let result = self.prepare(state.0, state.1, state.2, state.3, state.4);
         self.state.with(|slot| match result {
             Ok(prepared) => {
                 *slot = PendingState::Sealed(Some(prepared));
@@ -220,9 +184,6 @@ impl PendingVirtualMachine {
         lifecycle_resources: VmLifecycleResources,
         memory: alloc::boxed::Box<Layout>,
         bootstrap: VirtualCpuBootstrap,
-        virtual_serial: Option<
-            KernelRef<super::super::virtual_serial::VirtualSerial, VmDeviceBinding>,
-        >,
         physical: crate::kernel::device::assigned::AssignmentSet,
     ) -> Result<PreparedVm, Error> {
         if !physical.is_empty() {
@@ -245,9 +206,7 @@ impl PendingVirtualMachine {
             crate::hal::vm::prepared_interrupt_controller_allocation_size(&interrupt_plan),
         )?;
         let interrupts = crate::hal::vm::create_prepared_interrupt_controller(interrupt_plan)?;
-        let virtual_serial = virtual_serial
-            .map(crate::kernel::vm::device::VirtualSerialBinding::from_virtual_serial);
-        let devices = crate::kernel::vm::device::prepare(virtual_serial)?;
+        let devices = crate::kernel::vm::device::prepare()?;
         let prepared = VmBuilder::new(
             reservation,
             lifecycle_resources,

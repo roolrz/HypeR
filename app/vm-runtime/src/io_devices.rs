@@ -192,7 +192,10 @@ fn initialize(backend: &mut IoBackend, deadline: u64) -> Result<(), Error> {
 }
 
 impl IoDevices {
-    pub(super) fn service(&mut self, cpus: &[OwnedHandle<VirtualCpuObject>]) -> Result<(), Error> {
+    pub(super) fn service(
+        &mut self,
+        cpus: &[Arc<OwnedHandle<VirtualCpuObject>>],
+    ) -> Result<(), Error> {
         if let Some(completion) = self
             .backends
             .progress()
@@ -251,7 +254,7 @@ impl IoDevices {
     pub(super) fn prepare_wait(
         &mut self,
         waits: &WaitSet,
-        cpus: &[OwnedHandle<VirtualCpuObject>],
+        cpus: &[Arc<OwnedHandle<VirtualCpuObject>>],
     ) -> Result<(), Error> {
         for id in self.registrations.drain(..) {
             waits.remove(id).map_err(Error::OperatingSystem)?;

@@ -6,32 +6,8 @@
 use super::DeferredProcessServices;
 use super::affinity::AffinityInputError;
 use crate::kernel::abi::native::VmServices;
-use crate::kernel::capability::{HandleValue, Rights};
+use crate::kernel::capability::HandleValue;
 use crate::kernel::mm::user_space::UserSlice;
-
-impl DeferredProcessServices<'_> {
-    // Keep the full batch buffer off the interactive input call path. Both
-    // variants copy once before publishing any input and kick the guest once.
-    // A full 4 KiB write still needs its complete scratch buffer: shortening
-    // that batch would change partial-write behavior and increase syscall cost.
-    #[inline(never)]
-    fn copy_virtual_serial_input<const CAPACITY: usize>(
-        &self,
-        serial: &crate::kernel::vm::virtual_serial::VirtualSerial,
-        source: UserSlice,
-        length: usize,
-    ) -> Result<usize, crate::kernel::vm::service::Error> {
-        let mut bytes = [0; CAPACITY];
-        let bytes = bytes
-            .get_mut(..length)
-            .ok_or(crate::kernel::vm::service::Error::InvalidArgument)?;
-        self.process.copy_from_user(source, bytes)?;
-        serial
-            .write_input(bytes)
-            .map_err(crate::kernel::vm::objects::Error::from)
-            .map_err(Into::into)
-    }
-}
 
 impl VmServices for DeferredProcessServices<'_> {
     fn virtual_machine_platform_info(
@@ -77,66 +53,6 @@ impl VmServices for DeferredProcessServices<'_> {
         crate::kernel::vm::service::set_bootstrap(self.process, pending, bootstrap)
     }
 
-    fn set_pending_virtual_machine_virtual_serial(
-        &self,
-        pending: HandleValue,
-        serial: HandleValue,
-    ) -> Result<(), crate::kernel::vm::service::Error> {
-        crate::kernel::vm::service::set_virtual_serial(self.process, pending, serial)
-    }
-
-    fn create_virtual_serial(&self) -> Result<HandleValue, crate::kernel::vm::service::Error> {
-        crate::kernel::vm::service::create_virtual_serial(self.process)
-    }
-
-    fn register_virtual_serial_output(
-        &self,
-        serial: HandleValue,
-        buffer: HandleValue,
-    ) -> Result<(), crate::kernel::vm::service::Error> {
-        crate::kernel::vm::service::register_virtual_serial_output(self.process, serial, buffer)
-    }
-    fn acknowledge_virtual_serial_output(
-        &self,
-        serial: HandleValue,
-        consumed: u64,
-    ) -> Result<(), crate::kernel::vm::service::Error> {
-        crate::kernel::vm::service::acknowledge_virtual_serial_output(
-            self.process,
-            serial,
-            consumed,
-        )
-    }
-    fn write_virtual_serial(
-        &self,
-        value: HandleValue,
-        source: Option<UserSlice>,
-    ) -> Result<usize, crate::kernel::vm::service::Error> {
-        let serial = self
-            .process
-            .resolve_handle::<crate::kernel::vm::virtual_serial::VirtualSerial>(
-                value,
-                Rights::WRITE,
-            )?;
-        let Some(source) = source else {
-            return Ok(0);
-        };
-        let length = usize::try_from(source.length())
-            .map_err(|_| crate::kernel::vm::service::Error::InvalidArgument)?
-            .min(crate::kernel::vm::virtual_serial::TRANSFER_BATCH_BYTES);
-        let length_bytes =
-            u64::try_from(length).map_err(|_| crate::kernel::vm::service::Error::Internal)?;
-        let source = UserSlice::new(source.base(), length_bytes)
-            .map_err(|_| crate::kernel::vm::service::Error::Fault)?;
-        if length <= 128 {
-            self.copy_virtual_serial_input::<128>(serial.object(), source, length)
-        } else {
-            self.copy_virtual_serial_input::<
-                { crate::kernel::vm::virtual_serial::TRANSFER_BATCH_BYTES },
-            >(serial.object(), source, length)
-        }
-    }
-
     fn seal_pending_virtual_machine(
         &self,
         pending: HandleValue,
@@ -174,11 +90,44 @@ impl VmServices for DeferredProcessServices<'_> {
     ) -> Result<(), crate::kernel::vm::service::Error> {
         crate::kernel::vm::service::register_mmio(self.process, machine, base, length, device)
     }
+    fn register_mmio_event(
+        &self,
+        machine: HandleValue,
+        base: u64,
+        length: u64,
+        device: u64,
+        event: HandleValue,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::register_mmio_event(
+            self.process,
+            machine,
+            base,
+            length,
+            device,
+            event,
+        )
+    }
+    fn bind_firmware_console(
+        &self,
+        machine: HandleValue,
+        device: u64,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::bind_firmware_console(self.process, machine, device)
+    }
+    fn set_device_interrupt(
+        &self,
+        machine: HandleValue,
+        interrupt: u32,
+        asserted: bool,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::set_device_interrupt(self.process, machine, interrupt, asserted)
+    }
     fn pending_mmio(
         &self,
         vcpu: HandleValue,
+        device: u64,
     ) -> Result<Option<hyper::vm::device::mmio::Request>, crate::kernel::vm::service::Error> {
-        crate::kernel::vm::service::pending_mmio(self.process, vcpu)
+        crate::kernel::vm::service::pending_mmio(self.process, vcpu, device)
     }
     fn complete_mmio(
         &self,

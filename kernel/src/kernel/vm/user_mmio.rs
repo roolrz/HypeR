@@ -7,11 +7,19 @@ use super::{Error, InstalledMachine, RuntimeState};
 use hyper::vm::device::mmio::Request;
 use hyper::vm::exit::{MmioAccess, MmioAction};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct Region {
     base: u64,
     end: u64,
     device: u64,
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    firmware_console: bool,
+    event: Option<
+        crate::kernel::object::KernelRef<
+            crate::kernel::object::Event,
+            crate::kernel::object::VmDeviceBinding,
+        >,
+    >,
 }
 
 impl InstalledMachine {
@@ -20,6 +28,12 @@ impl InstalledMachine {
         base: u64,
         length: u64,
         device: u64,
+        event: Option<
+            crate::kernel::object::KernelRef<
+                crate::kernel::object::Event,
+                crate::kernel::object::VmDeviceBinding,
+            >,
+        >,
     ) -> Result<(), Error> {
         if device == 0 || length == 0 {
             return Err(Error::BadState);
@@ -48,7 +62,12 @@ impl InstalledMachine {
             }
             self.mmio_regions.with(|regions| {
                 if regions.iter().flatten().any(|region| {
-                    region.device == device || (base < region.end && region.base < end)
+                    region.device == device
+                        || (base < region.end && region.base < end)
+                        || event
+                            .as_ref()
+                            .zip(region.event.as_ref())
+                            .is_some_and(|(a, b)| a.koid() == b.koid())
                 }) {
                     return Err(Error::BadState);
                 }
@@ -56,7 +75,14 @@ impl InstalledMachine {
                     .iter_mut()
                     .find(|slot| slot.is_none())
                     .ok_or(Error::BadState)?;
-                *slot = Some(Region { base, end, device });
+                *slot = Some(Region {
+                    base,
+                    end,
+                    device,
+                    event,
+                    #[cfg(CONFIG_ARCH_RISCV64)]
+                    firmware_console: false,
+                });
                 Ok(())
             })
         })
@@ -91,17 +117,62 @@ impl InstalledMachine {
     }
 
     pub(in crate::kernel::vm) fn publish_mmio(&self, vcpu: u32) -> Result<(), Error> {
-        self.endpoint(vcpu)?
-            .publish_mmio()
-            .map_err(|_| Error::BadState)
+        let endpoint = self.endpoint(vcpu)?;
+        let routed = endpoint.staged_mmio().ok_or(Error::BadState)?;
+        let event_route = self.mmio_regions.with(|regions| {
+            regions
+                .iter()
+                .flatten()
+                .any(|region| region.device == routed.device && region.event.is_some())
+        });
+        endpoint
+            .publish_mmio(!event_route)
+            .map_err(|_| Error::BadState)?;
+        // The pending slot is durable before the prompt. A consumer clears its
+        // private event before scanning every vCPU; completion never clears it.
+        if let Some(request) = endpoint.pending_mmio() {
+            self.mmio_regions.with(|regions| {
+                if let Some(event) = regions
+                    .iter()
+                    .flatten()
+                    .find(|region| region.device == request.device)
+                    .and_then(|region| region.event.as_ref())
+                    && event
+                        .object()
+                        .signal(0, hyper::abi::native::HYPER_NATIVE_SIGNAL_EVENT_SIGNALED)
+                        .is_err()
+                {
+                    hyper::debug::invariant_failure("MMIO route event publication");
+                }
+            });
+        }
+        Ok(())
     }
 
-    pub(in crate::kernel::vm) fn pending_mmio(&self, vcpu: u32) -> Result<Option<Request>, Error> {
+    pub(in crate::kernel::vm) fn pending_mmio(
+        &self,
+        vcpu: u32,
+        device: u64,
+    ) -> Result<Option<Request>, Error> {
         self.state.with(|state| {
+            if matches!(state, RuntimeState::Installed { .. }) {
+                return Ok(None);
+            }
             if !matches!(state, RuntimeState::Running { .. }) {
                 return Err(Error::BadState);
             }
-            Ok(self.endpoint(vcpu)?.pending_mmio())
+            Ok(self.endpoint(vcpu)?.pending_mmio().filter(|request| {
+                self.mmio_regions.with(|regions| {
+                    regions.iter().flatten().any(|region| {
+                        region.device == request.device
+                            && if device == 0 {
+                                region.event.is_none()
+                            } else {
+                                region.device == device
+                            }
+                    })
+                })
+            }))
         })
     }
 
@@ -151,6 +222,79 @@ impl InstalledMachine {
             } else {
                 Ok(())
             }
+        })
+    }
+}
+
+impl InstalledMachine {
+    /// Management authority updates only shared device lines, never SGIs/PPIs.
+    pub(in crate::kernel::vm) fn set_device_interrupt(
+        &self,
+        interrupt: u32,
+        asserted: bool,
+    ) -> Result<(), Error> {
+        self.state.with(|state| {
+            let id = match state { RuntimeState::Installed { id, .. } | RuntimeState::Running { id, .. } => *id, _ => return Err(Error::BadState) };
+            let binding = crate::kernel::vm::registry::acquire_binding(id).map_err(|_| Error::BadState)?;
+            #[cfg(CONFIG_ARCH_AARCH64)] {
+                if !(32..hyper::abi::native::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_INTERRUPT_COUNT as u32).contains(&interrupt) { return Err(Error::BadState); }
+                crate::hal::vm::update_saved_device_line(binding.interrupts(), interrupt, asserted).map_err(|_| Error::BadState)?;
+                binding.publish_changed_interrupts();
+            }
+            #[cfg(CONFIG_ARCH_RISCV64)] {
+                crate::hal::vm::update_saved_guest_device_interrupt(binding.interrupts(), 0, hyper::vm::interrupt::VirtualInterruptId::new(interrupt), asserted).map_err(|_| Error::BadState)?;
+                if let Some(thread) = binding.endpoint_owner(0).map_err(|_| Error::BadState)?.thread() {
+                    binding.publish_interrupt_reconcile(0, thread).map_err(|_| Error::BadState)?;
+                }
+            }
+            #[cfg(CONFIG_ARCH_X86_64)] { let _ = (binding, interrupt, asserted); Err(Error::BadState) }
+            #[cfg(not(CONFIG_ARCH_X86_64))] Ok(())
+        })
+    }
+}
+
+impl InstalledMachine {
+    pub(in crate::kernel::vm) fn bind_firmware_console(&self, device: u64) -> Result<(), Error> {
+        #[cfg(not(CONFIG_ARCH_RISCV64))]
+        {
+            let _ = device;
+            Err(Error::BadState)
+        }
+        #[cfg(CONFIG_ARCH_RISCV64)]
+        self.state.with(|state| {
+            if !matches!(state, RuntimeState::Installed { .. }) {
+                return Err(Error::BadState);
+            }
+            self.mmio_regions.with(|regions| {
+                if regions
+                    .iter()
+                    .flatten()
+                    .any(|region| region.firmware_console)
+                {
+                    return Err(Error::BadState);
+                }
+                let region = regions
+                    .iter_mut()
+                    .flatten()
+                    .find(|region| region.device == device && region.event.is_some())
+                    .ok_or(Error::BadState)?;
+                region.firmware_console = true;
+                Ok(())
+            })
+        })
+    }
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    pub(in crate::kernel) fn route_firmware_console(&self, vcpu: u32, byte: u8) -> bool {
+        let device = self.mmio_regions.with(|regions| {
+            regions
+                .iter()
+                .flatten()
+                .find(|region| region.firmware_console)
+                .map(|region| region.device)
+        });
+        device.is_some_and(|device| {
+            self.endpoint(vcpu)
+                .is_ok_and(|endpoint| endpoint.stage_firmware_console(device, byte).is_ok())
         })
     }
 }

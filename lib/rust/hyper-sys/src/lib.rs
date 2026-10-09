@@ -26,10 +26,7 @@ mod task;
 mod vm;
 mod wait;
 
-pub use console::{
-    console_read, console_write, virtual_serial_acknowledge_output, virtual_serial_create,
-    virtual_serial_register_output, virtual_serial_write,
-};
+pub use console::{console_read, console_write};
 pub use device::{
     device_claim, device_claim_bundle, device_claim_matching, device_firmware_read,
     device_irq_complete, device_irq_pending, device_mmio, device_profile_info,
@@ -81,17 +78,18 @@ pub use vm::{
     guest_memory_create, pending_virtual_machine_abort, pending_virtual_machine_assign_device,
     pending_virtual_machine_install, pending_virtual_machine_map_memory,
     pending_virtual_machine_seal, pending_virtual_machine_set_bootstrap,
-    pending_virtual_machine_set_memory, pending_virtual_machine_set_virtual_serial,
-    virtual_cpu_complete_mmio, virtual_cpu_get_info, virtual_cpu_get_mmio_request,
-    virtual_cpu_set_affinity, virtual_cpu_start, virtual_machine_complete_power_request,
-    virtual_machine_create, virtual_machine_creation_lease_create,
-    virtual_machine_creation_lease_get_platform_info, virtual_machine_get_info,
-    virtual_machine_get_power_request, virtual_machine_open_vcpu, virtual_machine_register_mmio,
-    virtual_machine_request_stop,
+    pending_virtual_machine_set_memory, virtual_cpu_complete_mmio, virtual_cpu_get_device_request,
+    virtual_cpu_get_device_request_for_device, virtual_cpu_get_info, virtual_cpu_set_affinity,
+    virtual_cpu_start, virtual_machine_bind_firmware_console,
+    virtual_machine_complete_power_request, virtual_machine_create,
+    virtual_machine_creation_lease_create, virtual_machine_creation_lease_get_platform_info,
+    virtual_machine_get_info, virtual_machine_get_power_request, virtual_machine_open_vcpu,
+    virtual_machine_register_mmio, virtual_machine_register_mmio_event,
+    virtual_machine_request_stop, virtual_machine_set_device_interrupt,
 };
 pub use wait::{
-    atomic_wait, atomic_wake, object_wait_many, object_wait_one, wait_set_add, wait_set_create,
-    wait_set_rearm, wait_set_remove, wait_set_wait,
+    atomic_wait, atomic_wake, event_create, event_signal, object_wait_many, object_wait_one,
+    wait_set_add, wait_set_create, wait_set_rearm, wait_set_remove, wait_set_wait,
 };
 
 /// Register result returned by one `HypeR` Native syscall.

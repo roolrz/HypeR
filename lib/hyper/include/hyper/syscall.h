@@ -100,18 +100,6 @@ hyper_virtual_machine_create(hyper_native_handle_t lease,
 			     const hyper_native_virtual_machine_configuration_t *configuration);
 hyper_native_status_t hyper_pending_virtual_machine_set_memory(hyper_native_handle_t pending,
 							       hyper_native_handle_t vmo);
-/* Consumes virtual_serial only when the binding succeeds. */
-hyper_native_status_t
-hyper_pending_virtual_machine_set_virtual_serial(hyper_native_handle_t pending,
-						 hyper_native_handle_t virtual_serial);
-hyper_call_result_t hyper_virtual_serial_create(void);
-hyper_native_status_t hyper_virtual_serial_register_output(hyper_native_handle_t serial,
-							   hyper_native_handle_t buffer);
-hyper_call_result_t hyper_virtual_serial_write(hyper_native_handle_t virtual_serial,
-					       const void *bytes, size_t byte_count);
-hyper_native_status_t
-hyper_pending_virtual_machine_set_bootstrap(hyper_native_handle_t pending,
-					    const hyper_native_virtual_cpu_bootstrap_t *bootstrap);
 hyper_native_status_t hyper_pending_virtual_machine_seal(hyper_native_handle_t pending);
 hyper_call_result_t hyper_pending_virtual_machine_install(hyper_native_handle_t pending);
 hyper_native_status_t hyper_virtual_cpu_start(hyper_native_handle_t virtual_cpu);

@@ -24,7 +24,10 @@ fn mmio_is_not_visible_until_hardware_detach_publication() {
     crate::require_ok(state.publish());
     let request = crate::require_some(state.pending());
     assert_eq!(request.device, 7);
-    assert_eq!(request.access, read());
+    assert_eq!(
+        request.access,
+        hyper::vm::device::mmio::Access::Mmio(read())
+    );
     assert_eq!(state.pending(), Some(request));
     assert_eq!(state.stage(8, read()), Err(Error::Busy));
     assert_eq!(
@@ -83,4 +86,21 @@ fn vcpu_requests_are_independent_and_failure_is_explicit() {
     crate::require_ok(first.complete(1, MmioAction::Stop));
     assert!(second.pending().is_some());
     assert_eq!(first.take_completed(), Ok(Some(MmioAction::Stop)));
+}
+
+#[test]
+fn firmware_console_is_typed_and_requires_a_write_completion() {
+    use hyper::vm::device::mmio::Access;
+    let mut slot = PendingMmio::new();
+    crate::require_ok(slot.stage_firmware_console(7, b'S'));
+    assert!(slot.pending().is_none());
+    crate::require_ok(slot.publish());
+    let request = crate::require_some(slot.pending());
+    assert_eq!(request.access, Access::FirmwareConsoleWrite(b'S'));
+    assert_eq!(
+        slot.complete(request.id, MmioAction::CompleteRead(0)),
+        Err(Error::WrongCompletion)
+    );
+    crate::require_ok(slot.complete(request.id, MmioAction::CompleteWrite));
+    assert_eq!(slot.take_completed(), Ok(Some(MmioAction::CompleteWrite)));
 }

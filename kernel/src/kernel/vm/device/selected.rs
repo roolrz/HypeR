@@ -23,10 +23,8 @@ mod platform;
 pub use platform::Error;
 pub(crate) use platform::VirtualDeviceSet;
 
-pub(super) fn prepare(
-    virtual_serial: Option<super::VirtualSerialBinding>,
-) -> Result<VirtualDeviceSet, Error> {
-    platform::prepare(virtual_serial)
+pub(super) fn prepare() -> Result<VirtualDeviceSet, Error> {
+    platform::prepare()
 }
 
 pub(super) fn supports_configuration(profile: u32, memory_base: u64, memory_size: u64) -> bool {
@@ -34,11 +32,11 @@ pub(super) fn supports_configuration(profile: u32, memory_base: u64, memory_size
 }
 
 pub(super) fn supports_userspace_mmio(profile: u32, base: u64, length: u64) -> bool {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         platform::supports_userspace_mmio(profile, base, length)
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(CONFIG_ARCH_X86_64)]
     {
         let _ = (profile, base, length);
         false
@@ -47,10 +45,6 @@ pub(super) fn supports_userspace_mmio(profile: u32, base: u64, length: u64) -> b
 
 pub(super) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualInterruptId {
     platform::default_timer_interrupt()
-}
-
-pub(super) fn kick_virtual_serial(route: super::super::virtual_serial::Route) {
-    platform::kick_virtual_serial(route);
 }
 
 #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
@@ -78,49 +72,13 @@ pub(in crate::kernel) fn pending_interrupt(
     platform::pending_interrupt(timer_pending)
 }
 
-#[cfg(CONFIG_ARCH_RISCV64)]
-pub(in crate::kernel) fn write_console_byte(
-    execution: &crate::kernel::vm::vcpu::VcpuExecution,
-    byte: u8,
-) -> bool {
-    let Some(binding) = execution.vm_binding() else {
-        return false;
-    };
-    binding.devices().write_console_byte(byte);
-    true
+/// No device-model heap storage is owned by the kernel.
+pub(super) const fn dynamic_allocation_bytes() -> usize {
+    0
 }
-
-/// Heap storage retained by one selected virtual-device set.
-pub(super) fn dynamic_allocation_bytes() -> usize {
-    #[cfg(CONFIG_ARCH_RISCV64)]
-    {
-        platform::dynamic_allocation_bytes()
-    }
-    #[cfg(not(CONFIG_ARCH_RISCV64))]
-    {
-        0
-    }
-}
-
 pub(super) const fn timer_count() -> u64 {
-    #[cfg(CONFIG_ARCH_RISCV64)]
-    {
-        platform::timer_count()
-    }
-    #[cfg(not(CONFIG_ARCH_RISCV64))]
-    {
-        0
-    }
+    0
 }
-
-pub(super) fn quiesce(devices: &VirtualDeviceSet) -> Result<(), Error> {
-    #[cfg(CONFIG_ARCH_RISCV64)]
-    {
-        devices.quiesce()
-    }
-    #[cfg(not(CONFIG_ARCH_RISCV64))]
-    {
-        let _ = devices;
-        Ok(())
-    }
+pub(super) fn quiesce(_devices: &VirtualDeviceSet) -> Result<(), Error> {
+    Ok(())
 }

@@ -60,15 +60,6 @@ const fn classify_object_error(error: ObjectError) -> Error {
         ObjectError::Registry(error) => classify_registry_error(error),
         ObjectError::MemoryLayout(error) => classify_guest_memory_error(error),
         ObjectError::VirtualDevice(_) | ObjectError::VirtualInterrupt(_) => Error::Internal,
-        ObjectError::VirtualSerial(error) => match error {
-            super::virtual_serial::Error::Memory(error) => classify_memory_object_error(error),
-            super::virtual_serial::Error::Allocation => Error::NoMemory,
-            super::virtual_serial::Error::AllocationSize => Error::Internal,
-            super::virtual_serial::Error::Disconnected => Error::BadState,
-            super::virtual_serial::Error::Resource(error) => classify_resource_error(error),
-            super::virtual_serial::Error::WouldBlock => Error::Busy,
-            super::virtual_serial::Error::InvalidCursor => Error::InvalidArgument,
-        },
     }
 }
 
@@ -489,75 +480,6 @@ pub(crate) fn set_bootstrap(
     Ok(())
 }
 
-pub(crate) fn set_virtual_serial(
-    process: &Process,
-    pending: HandleValue,
-    serial: HandleValue,
-) -> Result<(), Error> {
-    let pending = process.resolve_handle::<PendingVirtualMachine>(pending, Rights::WRITE)?;
-    let required = Rights::ASSIGN_DEVICE.union(Rights::TRANSFER);
-    let serial_object =
-        process.resolve_handle::<super::virtual_serial::VirtualSerial>(serial, required)?;
-    let consumption = process.prepare_handle_consumption(
-        serial,
-        required,
-        super::virtual_serial::VirtualSerial::KIND,
-        serial_object.koid(),
-    )?;
-    let binding = serial_object.into_operation_pin().into_vm_device_binding();
-    match pending.object().set_virtual_serial(binding) {
-        Ok(()) => {
-            consumption.commit_and_release();
-            Ok(())
-        }
-        Err(error) => {
-            consumption.rollback();
-            Err(error.into())
-        }
-    }
-}
-
-pub(crate) fn create_virtual_serial(process: &Process) -> Result<HandleValue, Error> {
-    let serial = super::virtual_serial::VirtualSerial::try_new(&process.resource_domain())
-        .map_err(ObjectError::from)?;
-    Ok(process.create_object(
-        serial,
-        <super::virtual_serial::VirtualSerial as KernelObject>::SUPPORTED_RIGHTS,
-    )?)
-}
-
-pub(crate) fn register_virtual_serial_output(
-    process: &Process,
-    value: HandleValue,
-    buffer: HandleValue,
-) -> Result<(), Error> {
-    let serial =
-        process.resolve_handle::<super::virtual_serial::VirtualSerial>(value, Rights::WRITE)?;
-    let buffer = process.resolve_handle::<VmoObject>(
-        buffer,
-        Rights::READ.union(Rights::WRITE).union(Rights::MAP),
-    )?;
-    serial
-        .object()
-        .register_output(buffer.object(), &process.resource_domain())
-        .map_err(ObjectError::from)
-        .map_err(Into::into)
-}
-
-pub(crate) fn acknowledge_virtual_serial_output(
-    process: &Process,
-    value: HandleValue,
-    consumed: u64,
-) -> Result<(), Error> {
-    let serial =
-        process.resolve_handle::<super::virtual_serial::VirtualSerial>(value, Rights::READ)?;
-    serial
-        .object()
-        .acknowledge_output(consumed)
-        .map_err(ObjectError::from)
-        .map_err(Into::into)
-}
-
 pub(crate) fn seal(process: &Process, pending: HandleValue) -> Result<(), Error> {
     let pending = process.resolve_handle::<PendingVirtualMachine>(pending, Rights::WRITE)?;
     pending.object().seal()?;
@@ -763,16 +685,17 @@ pub(crate) fn register_mmio(
     machine
         .object()
         .owner()
-        .register_mmio(base, length, device)
+        .register_mmio(base, length, device, None)
         .map_err(|_| Error::BadState)
 }
 
 pub(crate) fn pending_mmio(
     process: &Process,
     vcpu: HandleValue,
+    device: u64,
 ) -> Result<Option<hyper::vm::device::mmio::Request>, Error> {
     let vcpu = process.resolve_handle::<VirtualCpuObject>(vcpu, Rights::WRITE)?;
-    vcpu.object().pending_mmio().map_err(Into::into)
+    vcpu.object().pending_mmio(device).map_err(Into::into)
 }
 
 pub(crate) fn complete_mmio(
@@ -820,4 +743,53 @@ pub(crate) fn map_guest_memory(
     )
     .map_err(ObjectError::from)?;
     pending.object().map_memory(region).map_err(Into::into)
+}
+
+/// Binds a retained wake prompt to a route; callers clear it before inspecting slots.
+pub(crate) fn register_mmio_event(
+    process: &Process,
+    machine: HandleValue,
+    base: u64,
+    length: u64,
+    device: u64,
+    event: HandleValue,
+) -> Result<(), Error> {
+    let machine = process.resolve_handle::<VirtualMachineObject>(machine, Rights::WRITE)?;
+    let event = process.resolve_handle::<crate::kernel::object::Event>(event, Rights::SIGNAL)?;
+    machine
+        .object()
+        .owner()
+        .register_mmio(
+            base,
+            length,
+            device,
+            Some(event.into_operation_pin().into_vm_device_binding()),
+        )
+        .map_err(|_| Error::BadState)
+}
+pub(crate) fn set_device_interrupt(
+    process: &Process,
+    machine: HandleValue,
+    interrupt: u32,
+    asserted: bool,
+) -> Result<(), Error> {
+    let machine = process.resolve_handle::<VirtualMachineObject>(machine, Rights::WRITE)?;
+    machine
+        .object()
+        .owner()
+        .set_device_interrupt(interrupt, asserted)
+        .map_err(|_| Error::BadState)
+}
+
+pub(crate) fn bind_firmware_console(
+    process: &Process,
+    machine: HandleValue,
+    device: u64,
+) -> Result<(), Error> {
+    let machine = process.resolve_handle::<VirtualMachineObject>(machine, Rights::WRITE)?;
+    machine
+        .object()
+        .owner()
+        .bind_firmware_console(device)
+        .map_err(|_| Error::BadState)
 }

@@ -1,16 +1,15 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-use hyper_os::handle::{
-    OwnedHandle, Rights, VirtualCpuObject, VirtualMachineObject, VirtualSerialObject,
-};
+use hyper_os::handle::{ByteChannelObject, OwnedHandle, VirtualCpuObject, VirtualMachineObject};
 use hyper_os::memory::WritableVmo;
 use hyper_os::startup::{self, Startup};
-use hyper_os::virtual_serial::{self, Output};
 use hyper_os::vm::{self, VirtualCpuTermination};
 use hyper_vm_smoke::{BOOT_SENTINELS, RAM_BASE, RAM_BYTES};
+use hyper_vm_support::serial::Port;
 use std::collections::VecDeque;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 mod owner;
@@ -51,31 +50,18 @@ fn payload() -> Result<&'static [u8]> {
 }
 
 struct Guest {
-    machine: OwnedHandle<VirtualMachineObject>,
-    vcpu: OwnedHandle<VirtualCpuObject>,
-    serial: OwnedHandle<VirtualSerialObject>,
-    output: Output,
+    machine: Arc<OwnedHandle<VirtualMachineObject>>,
+    vcpu: Arc<OwnedHandle<VirtualCpuObject>>,
+    output: Port,
     buffered: VecDeque<u8>,
 }
 
 impl Guest {
     fn create(
-        startup: &Startup<'_>,
+        _startup: &Startup<'_>,
         lease: OwnedHandle<hyper_os::handle::VirtualMachineCreationLeaseObject>,
         mode: u64,
     ) -> Result<Self> {
-        let serial =
-            virtual_serial::create().map_err(|error| format!("create serial: {error:?}"))?;
-        let output = Output::register(
-            &serial,
-            startup
-                .borrow(startup::ROOT_VMAR)
-                .map_err(|error| format!("create root VMAR: {error:?}"))?,
-            0xd000_0000,
-            WritableVmo::create(virtual_serial::BUFFER_BYTES)
-                .map_err(|error| format!("create serial VMO: {error:?}"))?,
-        )
-        .map_err(|error| format!("register serial output: {error:?}"))?;
         let memory =
             WritableVmo::create(RAM_BYTES).map_err(|error| format!("create RAM VMO: {error:?}"))?;
         memory
@@ -103,11 +89,6 @@ impl Guest {
             },
         )
         .map_err(|error| format!("set guest bootstrap: {error:?}"))?;
-        let binding = serial
-            .duplicate(Rights::TRANSFER.union(Rights::ASSIGN_DEVICE))
-            .map_err(|error| format!("duplicate serial binding: {error:?}"))?;
-        vm::set_virtual_serial(pending.as_handle_ref(), binding)
-            .map_err(|error| format!("set guest serial: {:?}", error.error()))?;
         vm::seal(pending.as_handle_ref()).map_err(|error| format!("seal VM: {error:?}"))?;
         let (machine, vcpu) =
             vm::install(pending).map_err(|error| format!("install VM: {:?}", error.error()))?;
@@ -118,11 +99,25 @@ impl Guest {
         {
             return Err("VM profile round trip".into());
         }
+        // IRQ state can be established before the first scheduler thread exists.
+        // Use an unenabled source so its PLIC pending latch cannot mimic UART input.
+        vm::set_device_interrupt(machine.as_handle_ref(), 11, true).map_err(show)?;
+        vm::set_device_interrupt(machine.as_handle_ref(), 11, false).map_err(show)?;
+        let machine = Arc::new(machine);
+        let vcpu = Arc::new(vcpu);
+        let output = Port::start(
+            machine.clone(),
+            vec![vcpu.clone()],
+            vm::PlatformProfile::Riscv64Reference,
+        )
+        .map_err(show)?;
+        // Let the route worker inspect the installed but dormant VM first.
+        // Its startup scan must wait, not mistake this state for retirement.
+        std::thread::sleep(std::time::Duration::from_millis(10));
         vm::start_vcpu(vcpu.as_handle_ref()).map_err(|error| format!("start vCPU: {error:?}"))?;
         Ok(Self {
             machine,
             vcpu,
-            serial,
             output,
             buffered: VecDeque::new(),
         })
@@ -140,7 +135,7 @@ impl Guest {
                     "guest marker: expected {expected:#x}, got {actual:#x}"
                 ));
             }
-            let mut buffer = [0; 32];
+            let mut buffer = [0; hyper_vm_support::serial::MESSAGE_BYTES];
             let count = self
                 .output
                 .try_read(&mut buffer)
@@ -158,7 +153,7 @@ impl Guest {
                         vm::machine_info(self.machine.as_handle_ref())
                     )
                 })?;
-            if hyper_os::wait::ObjectSignals::<VirtualSerialObject>::PEER_CLOSED
+            if hyper_os::wait::ObjectSignals::<ByteChannelObject>::PEER_CLOSED
                 .is_present_in(observation.observed)
             {
                 // Closure can race the last publication. Drain its final bytes
@@ -264,7 +259,7 @@ fn suite(startup: &mut Startup<'_>) -> Result<()> {
         let mut guest = Guest::create(startup, lease(startup)?, 2)?;
         guest.marker(b'R')?;
         std::thread::sleep(Duration::from_millis(30));
-        if virtual_serial::try_write(guest.serial.as_handle_ref(), b"Z").map_err(show)? != 1 {
+        if guest.output.try_write(b"Z").map_err(show)? != 1 {
             return Err("input rejected".into());
         }
         guest.marker(b'Z')?;

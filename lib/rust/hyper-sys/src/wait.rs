@@ -180,3 +180,29 @@ pub unsafe fn wait_set_wait(
         )
     }
 }
+
+/// Creates a manually signalled Event.
+/// # Safety
+/// The caller adopts the returned handle exactly once on success.
+pub unsafe fn event_create() -> crate::CallResult {
+    // SAFETY: No pointers or input handles are supplied.
+    unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_EVENT_CREATE, 0, 0, 0, 0, 0, 0) }
+}
+/// Updates the manually signalled Event bit.
+/// # Safety
+/// The Event handle must remain live for the call.
+pub unsafe fn event_signal(event: u64, clear: u64, set: u64) -> abi::HyperNativeStatus {
+    // SAFETY: Caller retains the Event; masks are values.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_EVENT_SIGNAL,
+            event,
+            clear,
+            set,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}

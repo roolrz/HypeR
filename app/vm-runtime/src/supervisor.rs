@@ -10,7 +10,7 @@ use hyper_service::vm as vm_contract;
 
 pub(super) fn supervise_guest(
     machine: &hyper_os::OwnedHandle<hyper_os::handle::VirtualMachineObject>,
-    vcpus: &[hyper_os::OwnedHandle<VirtualCpuObject>],
+    vcpus: &[std::sync::Arc<hyper_os::OwnedHandle<VirtualCpuObject>>],
     control: &hyper_os::channel::ByteChannel<'_>,
     console: &mut hyper_vm_runtime::console::Console,
     mut devices: Option<&mut io_devices::IoDevices>,
@@ -96,7 +96,7 @@ enum ServiceAction {
 
 fn handle_control(
     machine: &hyper_os::OwnedHandle<VirtualMachineObject>,
-    vcpus: &[hyper_os::OwnedHandle<VirtualCpuObject>],
+    vcpus: &[std::sync::Arc<hyper_os::OwnedHandle<VirtualCpuObject>>],
     control: &hyper_os::channel::ByteChannel<'_>,
     console: &mut hyper_vm_runtime::console::Console,
     waits: &WaitSet,
@@ -168,7 +168,7 @@ fn handle_control(
 
 fn service_power_requests(
     machine: &hyper_os::OwnedHandle<VirtualMachineObject>,
-    vcpus: &[hyper_os::OwnedHandle<VirtualCpuObject>],
+    vcpus: &[std::sync::Arc<hyper_os::OwnedHandle<VirtualCpuObject>>],
     control: &hyper_os::channel::ByteChannel<'_>,
 ) -> Result<ServiceAction, Error> {
     // A guest may submit another request immediately after completion.
@@ -216,7 +216,7 @@ fn service_power_requests(
 
 fn stop_and_retire(
     machine: &hyper_os::OwnedHandle<VirtualMachineObject>,
-    vcpus: &[hyper_os::OwnedHandle<VirtualCpuObject>],
+    vcpus: &[std::sync::Arc<hyper_os::OwnedHandle<VirtualCpuObject>>],
 ) -> Result<hyper_os::vm::VirtualCpuTermination, Error> {
     hyper_os::vm::request_stop(machine.as_handle_ref()).map_err(Error::OperatingSystem)?;
     hyper_os::vm::wait_terminated(machine.as_handle_ref(), hyper_os::DEADLINE_INFINITE)

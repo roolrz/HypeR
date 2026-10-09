@@ -73,10 +73,12 @@ backend can add virtual IMSIC state behind that RISC-V implementation.
 The immutable `Riscv64Reference` ABI profile uses RAM at `0x80000000`, an
 NS16550A UART at `0x10000000` (4 KiB window, IRQ 10, 3.6864 MHz clock), and a
 PLIC at `0x0c000000` (4 MiB window, sources 1–31, supervisor context 1).
-The ABI schema owns these constants for kernel devices and userspace boot data.
-The UART implements receive FIFOs and a reserved one-shot timeout; it has no
-periodic polling worker. Teardown cuts registry visibility, closes device
-producers and joins the exact timer callback before reclaiming its storage.
+The ABI profile supplies the boot-data geometry. The shared userspace UART
+worker owns the NS16550 receive FIFOs and uses an absolute monotonic wait deadline
+for receive timeout; no UART model or timer callback remains in the kernel.
+MMIO traps detach the vCPU before publishing a bounded device request. The
+legacy SBI console call uses a distinct firmware-console request on the same
+userspace route. Stop cancels pending work before vCPU storage is retired.
 
 Guest traps capture VS state and current VS/VU privilege before entering Rust.
 Returning exits carry a linear stopped proof which must detach the matching

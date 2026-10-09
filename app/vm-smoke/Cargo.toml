@@ -17,6 +17,7 @@ bench = false
 
 [dependencies]
 hyper-os.workspace = true
+hyper-vm-support.workspace = true
 hyper-rt.workspace = true
 
 [lints]

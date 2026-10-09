@@ -190,12 +190,6 @@ object_types!(
         "virtual-CPU supervision"
     ),
     (
-        VirtualSerialObject,
-        HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL,
-        "virtual-serial",
-        "virtual serial endpoint"
-    ),
-    (
         WaitSetObject,
         HYPER_NATIVE_OBJECT_WAIT_SET,
         "wait-set",

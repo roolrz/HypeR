@@ -182,7 +182,7 @@ fn prepare_test_vm_with(
         .map_err(Error::Registry)?;
     let interrupts = crate::hal::vm::create_prepared_interrupt_controller(interrupt_plan)
         .map_err(Error::Interrupts)?;
-    let devices = crate::kernel::vm::device::prepare(None).map_err(Error::Device)?;
+    let devices = crate::kernel::vm::device::prepare().map_err(Error::Device)?;
     let builder = crate::kernel::vm::registry::VmBuilder::new(
         reservation,
         lifecycle,

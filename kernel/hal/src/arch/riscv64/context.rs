@@ -61,6 +61,7 @@ pub struct VcpuContext {
     run_state: u64,
     pub(crate) supervisor: u64,
     stopped_exit: Option<GuestRunExit>,
+    deferred_device: Option<super::guest::DeviceCompletion>,
 }
 
 const GUEST_RUN_READY: u64 = 0;
@@ -91,6 +92,7 @@ pub enum GuestTerminalCause {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GuestWaitReason {
     Interrupt,
+    Device,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,6 +239,7 @@ impl VcpuContext {
             run_state: GUEST_RUN_READY,
             supervisor: 1,
             stopped_exit: None,
+            deferred_device: None,
         }
     }
 
@@ -404,6 +407,34 @@ impl VcpuContext {
         self.program_counter = pc;
         self.stopped_exit = Some(exit);
         self.run_state = GUEST_RUN_STOPPED;
+        Ok(())
+    }
+
+    pub(super) fn capture_device(
+        &mut self,
+        general: &[u64; 32],
+        pc: u64,
+        completion: super::guest::DeviceCompletion,
+    ) -> Result<(), GuestRunError> {
+        if self.deferred_device.is_some() {
+            return Err(GuestRunError::State);
+        }
+        self.stop(general, pc, GuestRunExit::Wait(GuestWaitReason::Device))?;
+        self.deferred_device = Some(completion);
+        Ok(())
+    }
+    pub(crate) fn complete_device(
+        &mut self,
+        action: hyper::vm::exit::MmioAction,
+    ) -> Result<(), GuestRunError> {
+        if self.run_state != GUEST_RUN_READY {
+            return Err(GuestRunError::State);
+        }
+        let completion = self.deferred_device.ok_or(GuestRunError::State)?;
+        if !completion.apply(&mut self.general, &mut self.program_counter, action) {
+            return Err(GuestRunError::State);
+        }
+        self.deferred_device = None;
         Ok(())
     }
 

@@ -14,7 +14,13 @@ use crate::vm::exit::{MmioAccess, MmioAction, MmioOperation};
 pub struct Request {
     pub id: u64,
     pub device: u64,
-    pub access: MmioAccess,
+    pub access: Access,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Access {
+    Mmio(MmioAccess),
+    FirmwareConsoleWrite(u8),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,6 +61,12 @@ impl PendingMmio {
     }
 
     pub fn stage(&mut self, device: u64, access: MmioAccess) -> Result<(), Error> {
+        self.stage_access(device, Access::Mmio(access))
+    }
+    pub fn stage_firmware_console(&mut self, device: u64, byte: u8) -> Result<(), Error> {
+        self.stage_access(device, Access::FirmwareConsoleWrite(byte))
+    }
+    fn stage_access(&mut self, device: u64, access: Access) -> Result<(), Error> {
         match self.phase {
             Phase::Idle => {}
             Phase::Closed => return Err(Error::Closed),
@@ -82,6 +94,13 @@ impl PendingMmio {
         }
     }
 
+    pub const fn staged(&self) -> Option<Request> {
+        match self.phase {
+            Phase::Staged(request) => Some(request),
+            _ => None,
+        }
+    }
+
     /// Non-consuming snapshot: service failure must not lose the continuation.
     pub const fn pending(&self) -> Option<Request> {
         match self.phase {
@@ -96,7 +115,11 @@ impl PendingMmio {
             Phase::Closed => return Err(Error::Closed),
             _ => return Err(Error::Stale),
         };
-        match (request.access.operation(), action) {
+        let operation = match request.access {
+            Access::Mmio(access) => access.operation(),
+            Access::FirmwareConsoleWrite(byte) => MmioOperation::Write(u64::from(byte)),
+        };
+        match (operation, action) {
             (MmioOperation::Read, MmioAction::CompleteRead(_))
             | (MmioOperation::Write(_), MmioAction::CompleteWrite)
             | (_, MmioAction::Stop) => {}

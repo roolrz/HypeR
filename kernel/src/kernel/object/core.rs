@@ -59,7 +59,6 @@ const PENDING_VIRTUAL_MACHINE_OBJECT_KIND: u32 =
     hyper::abi::native::HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE;
 const VIRTUAL_MACHINE_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE;
 const VIRTUAL_CPU_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_VIRTUAL_CPU;
-const VIRTUAL_SERIAL_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL;
 
 const _: () = assert!(EVENT_OBJECT_KIND != 0);
 const _: () = assert!(BYTE_CHANNEL_OBJECT_KIND != 0);
@@ -83,7 +82,6 @@ const _: () = assert!(VIRTUAL_MACHINE_CREATION_LEASE_OBJECT_KIND != 0);
 const _: () = assert!(PENDING_VIRTUAL_MACHINE_OBJECT_KIND != 0);
 const _: () = assert!(VIRTUAL_MACHINE_OBJECT_KIND != 0);
 const _: () = assert!(VIRTUAL_CPU_OBJECT_KIND != 0);
-const _: () = assert!(VIRTUAL_SERIAL_OBJECT_KIND != 0);
 
 #[cfg(not(test))]
 type FinalReapQueueLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
@@ -167,8 +165,6 @@ impl ObjectKind {
     pub(crate) const VIRTUAL_MACHINE: Self = Self(VIRTUAL_MACHINE_OBJECT_KIND);
     /// Installed virtual-CPU observation and execution authority.
     pub(crate) const VIRTUAL_CPU: Self = Self(VIRTUAL_CPU_OBJECT_KIND);
-    /// Runtime-owned guest input and shared output registration.
-    pub(crate) const VIRTUAL_SERIAL: Self = Self(VIRTUAL_SERIAL_OBJECT_KIND);
 
     /// Validates one userspace-supplied object-kind discriminator.
     ///
@@ -200,7 +196,6 @@ impl ObjectKind {
             | PENDING_VIRTUAL_MACHINE_OBJECT_KIND
             | VIRTUAL_MACHINE_OBJECT_KIND
             | VIRTUAL_CPU_OBJECT_KIND
-            | VIRTUAL_SERIAL_OBJECT_KIND
             | DEVICE_ASSIGNMENT_AUTHORITY_OBJECT_KIND
             | PHYSICAL_DEVICE_OBJECT_KIND
             | GUEST_MAILBOX_OBJECT_KIND

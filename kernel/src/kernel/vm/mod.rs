@@ -29,7 +29,6 @@ mod run_admission;
 pub(crate) mod service;
 mod timer;
 pub(crate) mod vcpu;
-pub(crate) mod virtual_serial;
 
 use hyper::sync::PublishedOnce;
 
@@ -137,10 +136,6 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
 pub(in crate::kernel) fn entry_ready() -> Option<crate::hal::vm::VmEntryReady> {
     ENTRY_READY.get().copied()
 }
-
-mod serial_output;
-
-mod serial_ring;
 
 pub(crate) use memory::live_service::{
     create as create_guest_mapping, release as release_guest_mapping,

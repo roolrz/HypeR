@@ -468,6 +468,23 @@ extern "C" fn dispatch_trap(frame: &mut TrapFrame) -> TrapAction {
         match super::guest::dispatch(frame) {
             super::guest::Dispatch::Resume => TrapAction::RESUME,
             super::guest::Dispatch::Stop(exit) => stop_guest(frame, exit),
+            super::guest::Dispatch::Device(completion) => {
+                let context = frame.guest_context as *mut super::VcpuContext;
+                if context.is_null() || !context.is_aligned() {
+                    fatal_trap(frame);
+                }
+                // SAFETY: Assembly retained this exact active owner, captured
+                // guest CSR/FP state and masked IRQs; no borrow crosses policy.
+                if unsafe { (&mut *context).capture_device(&frame.general, frame.sepc, completion) }
+                    .is_err()
+                {
+                    fatal_trap(frame);
+                }
+                TrapAction {
+                    kind: super::registers::TRAP_ACTION_ANCHOR_STOPPED,
+                    target: 0,
+                }
+            }
         }
     } else {
         fatal_trap(frame)

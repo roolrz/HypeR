@@ -3,8 +3,6 @@
 
 //! Register models for the initial x86 legacy PC virtual board.
 
-use crate::vm::device::uart16550::Ns16550;
-const COM1_BASE: u16 = 0x3f8;
 const MASTER_PIC_COMMAND: u16 = 0x20;
 const MASTER_PIC_DATA: u16 = 0x21;
 const SLAVE_PIC_COMMAND: u16 = 0xa0;
@@ -20,13 +18,11 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PortAccess {
     pub value: Option<u32>,
-    pub transmitted: Option<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InterruptSource {
     Timer,
-    Com1,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,17 +33,11 @@ pub struct PendingInterrupt {
 
 impl PortAccess {
     const fn read(value: u32) -> Self {
-        Self {
-            value: Some(value),
-            transmitted: None,
-        }
+        Self { value: Some(value) }
     }
 
-    const fn write(transmitted: Option<u8>) -> Self {
-        Self {
-            value: None,
-            transmitted,
-        }
+    const fn write() -> Self {
+        Self { value: None }
     }
 }
 
@@ -56,7 +46,6 @@ pub struct LegacyPcDevices {
     master_pic: I8259,
     slave_pic: I8259,
     pit: Pit,
-    com1: Ns16550,
 }
 
 impl LegacyPcDevices {
@@ -65,7 +54,6 @@ impl LegacyPcDevices {
             master_pic: I8259::new(0x08),
             slave_pic: I8259::new(0x70),
             pit: Pit::new(),
-            com1: Ns16550::new(),
         }
     }
 
@@ -78,13 +66,6 @@ impl LegacyPcDevices {
     ) -> Result<PortAccess, Error> {
         if !matches!(size, 1 | 2 | 4) {
             return Err(Error::InvalidAccessSize);
-        }
-        if (COM1_BASE..COM1_BASE + 8).contains(&port) && size == 1 {
-            return Ok(if write {
-                PortAccess::write(self.com1.write((port - COM1_BASE) as usize, value as u8))
-            } else {
-                PortAccess::read(u32::from(self.com1.read((port - COM1_BASE) as usize)))
-            });
         }
         if size == 1 {
             match (port, write) {
@@ -109,7 +90,7 @@ impl LegacyPcDevices {
                 (PIT_CHANNEL0 | PIT_COMMAND, false) => return Ok(PortAccess::read(0)),
                 _ => return Ok(default_access(size, write)),
             }
-            return Ok(PortAccess::write(None));
+            return Ok(PortAccess::write());
         }
         Ok(default_access(size, write))
     }
@@ -125,12 +106,6 @@ impl LegacyPcDevices {
                 source: InterruptSource::Timer,
             });
         }
-        if self.master_pic.mask() & (1 << 4) == 0 && self.com1.interrupt_asserted() {
-            return Some(PendingInterrupt {
-                vector: self.master_pic.vector_offset() + 4,
-                source: InterruptSource::Com1,
-            });
-        }
         None
     }
 }
@@ -143,7 +118,7 @@ impl Default for LegacyPcDevices {
 
 const fn default_access(size: usize, write: bool) -> PortAccess {
     if write {
-        PortAccess::write(None)
+        PortAccess::write()
     } else {
         PortAccess::read(match size {
             1 => 0xff,

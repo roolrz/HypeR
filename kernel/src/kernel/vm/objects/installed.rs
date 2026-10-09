@@ -100,8 +100,11 @@ impl VirtualCpuObject {
         self.owner.snapshot_vcpu(self.id)
     }
 
-    pub(crate) fn pending_mmio(&self) -> Result<Option<hyper::vm::device::mmio::Request>, Error> {
-        Ok(self.owner.pending_mmio(self.id)?)
+    pub(crate) fn pending_mmio(
+        &self,
+        device: u64,
+    ) -> Result<Option<hyper::vm::device::mmio::Request>, Error> {
+        Ok(self.owner.pending_mmio(self.id, device)?)
     }
 
     pub(crate) fn complete_mmio(

@@ -111,7 +111,7 @@ impl InstalledMachine {
             power: InterruptSpinLock::new(
                 hyper::vm::arm::psci::PowerState::new(count).ok_or(Error::BadState)?,
             ),
-            mmio_regions: InterruptSpinLock::new([None; 8]),
+            mmio_regions: InterruptSpinLock::new([const { None }; 8]),
             endpoints,
             resources,
         })

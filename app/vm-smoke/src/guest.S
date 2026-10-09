@@ -34,7 +34,16 @@ hyper_vm_smoke_guest_start:
 .endm
 
 .Lbusy:
-    emit 66 # B
+    # Firmware output shares the byte transport, not the UART register model.
+    # Keep DLAB set to catch implementations that fake a register-zero write.
+    li t0, 0x10000000
+    li t1, 0x80
+    sb t1, 3(t0)
+    li a0, 66 # B
+    li a7, 1 # SBI legacy console_putchar
+    ecall
+    bnez a0, .Lfailure
+    sb zero, 3(t0)
 .Lspin:
     j .Lspin
 

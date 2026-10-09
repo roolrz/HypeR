@@ -608,11 +608,6 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
         transfer: TransferClass::RendezvousOnly,
     },
     ObjectKind {
-        value: 25,
-        name: "virtual_serial",
-        transfer: TransferClass::Forbidden,
-    },
-    ObjectKind {
         value: 26,
         name: "wait_set",
         transfer: TransferClass::Forbidden,
@@ -862,13 +857,6 @@ pub const VIRTUAL_MACHINE_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_REQUEST_STOP;
 pub const VIRTUAL_CPU_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_WRITE | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_START;
-pub const VIRTUAL_SERIAL_RIGHTS: u64 = RIGHT_DUPLICATE
-    | RIGHT_TRANSFER
-    | RIGHT_INSPECT
-    | RIGHT_READ
-    | RIGHT_WRITE
-    | RIGHT_WAIT
-    | RIGHT_ASSIGN_DEVICE;
 
 pub const CAPABILITY_OPERATIONS: &[HandleOperation] = &[
     HandleOperation {
@@ -894,21 +882,6 @@ pub const SIGNALS: &[Signal] = &[
     Signal {
         object: "native_block",
         bit: 0,
-        name: "peer_closed",
-    },
-    Signal {
-        object: "virtual_serial",
-        bit: 0,
-        name: "readable",
-    },
-    Signal {
-        object: "virtual_serial",
-        bit: 1,
-        name: "writable",
-    },
-    Signal {
-        object: "virtual_serial",
-        bit: 2,
         name: "peer_closed",
     },
     Signal {
@@ -1014,7 +987,6 @@ pub const SIGNALS: &[Signal] = &[
 ];
 
 const CONSOLE_MAX_TRANSFER_BYTES: u32 = 4 * 1024;
-const VIRTUAL_SERIAL_MAX_TRANSFER_BYTES: u32 = 4 * 1024;
 const EXTENSIBLE_RECORD_MAX_BYTES: u32 = 4 * 1024;
 const DIRECTORY_ENTRY_PAGE_CAPACITY: u32 = 4;
 const DIRECTORY_ENTRY_NAME_CAPACITY: u32 = 256;
@@ -1268,22 +1240,6 @@ pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
         name: "extensible_record_max_bytes",
         value: EXTENSIBLE_RECORD_MAX_BYTES as u64,
-    },
-    AbiConstant {
-        name: "virtual_serial_max_transfer_bytes",
-        value: VIRTUAL_SERIAL_MAX_TRANSFER_BYTES as u64,
-    },
-    AbiConstant {
-        name: "virtual_serial_output_capacity",
-        value: 65536,
-    },
-    AbiConstant {
-        name: "virtual_serial_output_header_bytes",
-        value: 4096,
-    },
-    AbiConstant {
-        name: "virtual_serial_output_bytes",
-        value: 4096 + 65536,
     },
     AbiConstant {
         name: "elf_osabi",
@@ -2454,7 +2410,7 @@ const VIRTUAL_CPU_BOOTSTRAP_FIELDS: &[Field] = &[
     },
 ];
 
-const VIRTUAL_CPU_MMIO_REQUEST_FIELDS: &[Field] = &[
+const VIRTUAL_CPU_DEVICE_REQUEST_FIELDS: &[Field] = &[
     Field {
         name: "id",
         kind: FieldKind::U64,
@@ -2919,8 +2875,8 @@ pub const RECORDS: &[Record] = &[
         alignment: 8,
     },
     Record {
-        name: "virtual_cpu_mmio_request",
-        fields: VIRTUAL_CPU_MMIO_REQUEST_FIELDS,
+        name: "virtual_cpu_device_request",
+        fields: VIRTUAL_CPU_DEVICE_REQUEST_FIELDS,
         minimum_size: 48,
         size: 48,
         alignment: 8,
@@ -5478,101 +5434,6 @@ const PENDING_VIRTUAL_MACHINE_SET_MEMORY_ARGUMENTS: &[Argument] = &[
     },
 ];
 
-const PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL_ARGUMENTS: &[Argument] = &[
-    Argument {
-        name: "pending_virtual_machine",
-        kind: ValueKind::Handle,
-        handle: Some(HandleArgument {
-            object: ObjectConstraint::Kind("pending_virtual_machine"),
-            required_rights: RIGHT_WRITE,
-            disposition: HandleDisposition::Borrow,
-        }),
-        memory: None,
-    },
-    Argument {
-        name: "virtual_serial",
-        kind: ValueKind::Handle,
-        handle: Some(HandleArgument {
-            object: ObjectConstraint::Kind("virtual_serial"),
-            required_rights: RIGHT_TRANSFER | RIGHT_ASSIGN_DEVICE,
-            disposition: HandleDisposition::ConsumeOnCommit,
-        }),
-        memory: None,
-    },
-];
-
-const VIRTUAL_SERIAL_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
-    name: "virtual_serial",
-    kind: ValueKind::Handle,
-    handle: Some(ProducedHandle {
-        object: ProducedObject::Kind("virtual_serial"),
-        rights: ProducedRights::Fixed(VIRTUAL_SERIAL_RIGHTS),
-    }),
-}];
-
-const VIRTUAL_SERIAL_REGISTER_OUTPUT_ARGUMENTS: &[Argument] = &[
-    Argument {
-        name: "virtual_serial",
-        kind: ValueKind::Handle,
-        handle: Some(HandleArgument {
-            object: ObjectConstraint::Kind("virtual_serial"),
-            required_rights: RIGHT_WRITE,
-            disposition: HandleDisposition::Borrow,
-        }),
-        memory: None,
-    },
-    Argument {
-        name: "buffer",
-        kind: ValueKind::Handle,
-        handle: Some(HandleArgument {
-            object: ObjectConstraint::Kind("vmo"),
-            required_rights: RIGHT_READ | RIGHT_WRITE | RIGHT_MAP,
-            disposition: HandleDisposition::Borrow,
-        }),
-        memory: None,
-    },
-];
-
-const VIRTUAL_SERIAL_WRITE_ARGUMENTS: &[Argument] = &[
-    Argument {
-        name: "virtual_serial",
-        kind: ValueKind::Handle,
-        handle: Some(HandleArgument {
-            object: ObjectConstraint::Kind("virtual_serial"),
-            required_rights: RIGHT_WRITE,
-            disposition: HandleDisposition::Borrow,
-        }),
-        memory: None,
-    },
-    Argument {
-        name: "bytes",
-        kind: ValueKind::UserAddress,
-        handle: None,
-        memory: Some(UserMemory {
-            direction: MemoryDirection::Read,
-            length: MemoryLength::Bytes {
-                argument: "byte_count",
-                maximum_bytes: VIRTUAL_SERIAL_MAX_TRANSFER_BYTES,
-            },
-            record: None,
-            handles: None,
-            validation_order: 0,
-        }),
-    },
-    Argument {
-        name: "byte_count",
-        kind: ValueKind::ByteCount,
-        handle: None,
-        memory: None,
-    },
-];
-
-const VIRTUAL_SERIAL_IO_RESULTS: &[ResultValue] = &[ResultValue {
-    name: "actual_bytes",
-    kind: ValueKind::ByteCount,
-    handle: None,
-}];
-
 const PENDING_VIRTUAL_MACHINE_SET_BOOTSTRAP_ARGUMENTS: &[Argument] = &[
     Argument {
         name: "pending_virtual_machine",
@@ -6770,20 +6631,6 @@ pub const SYSCALLS: &[Syscall] = &[
         failure_results: &[],
     },
     Syscall {
-        number: 72,
-        name: "pending_virtual_machine_set_virtual_serial",
-        feature: FeatureGate::Core,
-        arguments: PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL_ARGUMENTS,
-        results: &[],
-        blocking: BlockingClass::Never,
-        cancellation: CancellationClass::None,
-        restart: RestartClass::Never,
-        completion: CompletionClass::Returns,
-        audit: AuditClass::Capability,
-        flags: FlagPolicy::None,
-        failure_results: &[],
-    },
-    Syscall {
         number: 73,
         name: "clock_get_monotonic",
         feature: FeatureGate::Core,
@@ -6794,48 +6641,6 @@ pub const SYSCALLS: &[Syscall] = &[
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
         audit: AuditClass::Abi,
-        flags: FlagPolicy::None,
-        failure_results: &[],
-    },
-    Syscall {
-        number: 74,
-        name: "virtual_serial_create",
-        feature: FeatureGate::Core,
-        arguments: NO_ARGUMENTS,
-        results: VIRTUAL_SERIAL_CREATE_RESULTS,
-        blocking: BlockingClass::Never,
-        cancellation: CancellationClass::None,
-        restart: RestartClass::Never,
-        completion: CompletionClass::Returns,
-        audit: AuditClass::Capability,
-        flags: FlagPolicy::None,
-        failure_results: &[],
-    },
-    Syscall {
-        number: 75,
-        name: "virtual_serial_register_output",
-        feature: FeatureGate::Core,
-        arguments: VIRTUAL_SERIAL_REGISTER_OUTPUT_ARGUMENTS,
-        results: &[],
-        blocking: BlockingClass::Never,
-        cancellation: CancellationClass::None,
-        restart: RestartClass::Never,
-        completion: CompletionClass::Returns,
-        audit: AuditClass::Capability,
-        flags: FlagPolicy::None,
-        failure_results: &[],
-    },
-    Syscall {
-        number: 76,
-        name: "virtual_serial_write",
-        feature: FeatureGate::Core,
-        arguments: VIRTUAL_SERIAL_WRITE_ARGUMENTS,
-        results: VIRTUAL_SERIAL_IO_RESULTS,
-        blocking: BlockingClass::Never,
-        cancellation: CancellationClass::None,
-        restart: RestartClass::Never,
-        completion: CompletionClass::Returns,
-        audit: AuditClass::Capability,
         flags: FlagPolicy::None,
         failure_results: &[],
     },
@@ -7165,32 +6970,6 @@ pub const SYSCALLS: &[Syscall] = &[
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
         audit: AuditClass::Task,
-        flags: FlagPolicy::Strict,
-        failure_results: &[],
-    },
-    Syscall {
-        number: 94,
-        name: "virtual_serial_acknowledge_output",
-        feature: FeatureGate::Core,
-        arguments: &[
-            Argument {
-                name: "virtual_serial",
-                kind: ValueKind::Handle,
-                handle: Some(HandleArgument {
-                    object: ObjectConstraint::Kind("virtual_serial"),
-                    required_rights: RIGHT_READ,
-                    disposition: HandleDisposition::Borrow,
-                }),
-                memory: None,
-            },
-            scalar_argument("consumed", ValueKind::U64),
-        ],
-        results: &[],
-        blocking: BlockingClass::Never,
-        cancellation: CancellationClass::None,
-        restart: RestartClass::Never,
-        completion: CompletionClass::Returns,
-        audit: AuditClass::Capability,
         flags: FlagPolicy::Strict,
         failure_results: &[],
     },
@@ -8263,7 +8042,7 @@ pub const SYSCALLS: &[Syscall] = &[
     },
     Syscall {
         number: 121,
-        name: "virtual_cpu_get_mmio_request",
+        name: "virtual_cpu_get_device_request",
         feature: FeatureGate::Core,
         arguments: &[
             Argument {
@@ -8286,12 +8065,13 @@ pub const SYSCALLS: &[Syscall] = &[
                         argument: "request_size",
                         maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
                     },
-                    record: Some("virtual_cpu_mmio_request"),
+                    record: Some("virtual_cpu_device_request"),
                     handles: None,
                     validation_order: 0,
                 }),
             },
             scalar_argument("request_size", ValueKind::ByteCount),
+            scalar_argument("device", ValueKind::U64),
         ],
         results: INFO_RECORD_RESULTS,
         blocking: BlockingClass::Never,
@@ -9355,6 +9135,97 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::None,
         failure_results: &[],
     },
+    Syscall {
+        number: 480,
+        name: "virtual_machine_register_mmio_event",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "virtual_machine",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("base", ValueKind::U64),
+            scalar_argument("length", ValueKind::U64),
+            scalar_argument("device", ValueKind::U64),
+            Argument {
+                name: "event",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("event"),
+                    required_rights: RIGHT_SIGNAL,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+        ],
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 481,
+        name: "virtual_machine_set_device_interrupt",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "virtual_machine",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("interrupt", ValueKind::U32),
+            scalar_argument("asserted", ValueKind::U32),
+        ],
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 482,
+        name: "virtual_machine_bind_firmware_console",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "virtual_machine",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("device", ValueKind::U64),
+        ],
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -9371,6 +9242,8 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "Userspace device routes are immutable after first VM start. register_mmio_event borrows VirtualMachine WRITE and Event SIGNAL, retains the Event, and rejects overlapping ranges, duplicate nonzero device cookies and Event reuse within one VM. Publish occurs only after the vCPU hardware context detaches. Clear the private Event before scanning every vCPU; completion never clears it. virtual_cpu_get_device_request device zero returns only routes without an Event; a nonzero cookie filters to that route. Installed-but-not-started VMs return WOULD_BLOCK. Each vCPU holds at most one outstanding request. Device-request operations are read (0, value zero, width 1/2/4/8), write (1, width 1/2/4/8), and firmware console write (2, byte value, address and width zero). All reserved fields are zero. The existing completion read/write/abort values apply; firmware console accepts write or abort. Stale IDs and wrong completion kinds fail without advancing the saved instruction. Stop cancels all requests.",
+    "virtual_machine_set_device_interrupt borrows VirtualMachine WRITE and sets a shared interrupt level: AArch64 SPI IDs 32..255, RISC-V PLIC sources 1..31. Private and out-of-range interrupts are rejected. Only Installed or Running VMs admit updates. The runtime owns model state and coordinates sources; this operation grants no host device access. virtual_machine_bind_firmware_console binds RISC-V legacy SBI console writes to one existing Event route before first start. Other architectures reject it. It does not emulate UART registers or grant arbitrary firmware interception.",
     "object_inspector_read_details requires INSPECT and INSPECT_DETAILS on an ObjectInspector. With process_koid zero, target is a KOID and only system scope is allowed. Otherwise target is a generation-qualified handle in the named, scope-visible process. Inspection takes a diagnostic reference under the lookup lock, releases that lock, and copies object-local metadata only; it does not grant operation authority. Cursor zero starts a query; next_cursor zero finishes it. Empty records may advance a bounded scan without yielding a mapping. Concurrent mutation makes pages weakly consistent. Unsupported object kinds return NOT_SUPPORTED; inaccessible or expired identities return NOT_FOUND. Inspector derivation continues to produce only the original basic rights, never implicitly acquiring INSPECT_DETAILS.",
     "Object-details payload consists of eight little-endian u64 words. All unused words are zero. Record 0 is empty. Thread (1): scheduler TID (zero is a valid bootstrap TID), role (task_thread role values), user lifecycle phase (0 unavailable, 1 prepared, 2 dormant, 3 runnable, 4 stop-requested, 5 detached), TID present (0/1; absent TID word is zero). VMAR (2): base, length, live (0/1). Mapping (3): base, length, current R/W/X bits, maximum R/W/X bits. Channel (4): peer KOID (zero until pair publication), local open (0/1), peer open (0/1), queued messages or receivers, queued bytes, byte-queue counters present (0/1). Device (5): profile, virtio device ID, PCI vendor/device word, host IRQ domain, first host interrupt, interrupt count, lifecycle (1 claimed, 2 attached, 3 active, 4 retired, 5 quarantined), resource count. Device resource (6): resource kind, host physical base, length, guest aperture offset, attributes. Addresses never contain kernel virtual pointers. Device details read metadata without MMIO/config-space probes; host interrupt identities are not guest IRQs.",
     "Device firmware inspection reads one immutable boot snapshot. Field PROPERTY_NAMES (5) returns every property name as a NUL-separated list, without granting ownership or exposing mapping capabilities; field PROPERTY (4) reads a named property's original bytes. Other fields report node identity, compatible strings, translated registers and interrupt metadata. Empty output queries the required byte length. The caller supplies a name only for PROPERTY; all other fields require an empty name. Inspection cannot substitute for an atomic device claim.",
@@ -9421,8 +9294,7 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "Process-builder add_handle requires a nonzero purpose unique within the builder, an expected nonzero exact object kind, and either exact granted rights or capability_disposition_same_rights. Move consumes the source only when the mutator returns ok; duplicate retains it and additionally requires duplicate. Failure preserves both builder and source.",
     "A VirtualMachineCreationAuthority may derive one resource-domain-bound VirtualMachineCreationLease. The lease is single-use and is consumed only when VirtualMachine creation publishes a PendingVirtualMachine handle successfully.",
     "Virtual-machine info appends resident_memory_bytes after the original 32-byte prefix. UINT64_MAX means unavailable during retirement. It counts currently allocated primary VMO backing, including RAM, explicitly admitted shared pools, and uploaded pages not yet mapped by stage-2; overlapping ranges of the same VMO count once. Dynamic backend alias windows, translation tables, and Native runtime memory are excluded. Shared pages are attributed independently in each guest and are not additive across guests. Inspection samples bounded page chunks and is not a globally atomic memory snapshot.",
-    "A PendingVirtualMachine is mutable until seal. It must own at least one explicitly backed, non-overlapping writable region inside the configured IPA envelope and one bootstrap record for boot vCPU 0. Bootstrap entry and stack must lie in admitted backing; sparse envelope gaps remain unbacked and never become anonymous RAM. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and virtual_machine_open_vcpu exposes their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is published to a read-only shared VMO consumed by the owning runtime, and VM retirement disconnects the input route without invalidating existing output mappings. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. AArch64 reference guests accept 1..8 vCPUs; RISC-V reference guests currently accept one.",
-    "VirtualSerial handles are process-local; device assignment consumes a same-process handle. register_output borrows a caller-allocated writable VMO of exactly 69632 bytes and registers it once before assignment. An exclusive write lease rejects existing writable mappings, direct accesses, snapshots, and further writers until port retirement; read-only mappings may coexist. Offset 0 is an atomic u64 produced count, offset 8 a saturating dropped-byte count, and offset 4096 begins 65536 atomic byte slots. Registration initializes counters; callers must not access contents during registration. The producer release-publishes bytes; the runtime acquire-loads production and reads a batch. acknowledge_output requires READ and submits the absolute consumed position after reading. Regressing or future positions return invalid_argument without mutation. Publication, acknowledgement, and closure serialize on the port: READABLE means unacknowledged output, WRITABLE means a connected input route has queue space, and PEER_CLOSED means no future output or input. WAIT authorizes object waits and WaitSet subscriptions. Acknowledgement clears READABLE only when caught up; new output reasserts it, without lost wakeups or periodic polling. Full output discards new bytes without blocking or overwriting unconsumed slots. Counters never wrap. Last active handle closure synchronizes with writers and closes publication; registered pages remain pinned through final VM/object retirement. The SDK maps output read-only and acknowledges batches by syscall without copying payload through the syscall. Write remains nonblocking input injection: busy means the queue is full, bad_state means disconnected. Runtime policy owns retention and client transport.",
+    "A PendingVirtualMachine is mutable until seal. It must own at least one explicitly backed, non-overlapping writable region inside the configured IPA envelope and one bootstrap record for boot vCPU 0. Bootstrap entry and stack must lie in admitted backing; sparse envelope gaps remain unbacked and never become anonymous RAM. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and virtual_machine_open_vcpu exposes their control handles. Guest device models run in userspace and register immutable MMIO routes before first start. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. AArch64 reference guests accept 1..8 vCPUs; RISC-V reference guests currently accept one.",
     "The creating process retains its guest VMO handle, but attaching it to a PendingVirtualMachine acquires exclusive hardware-write ownership and rejects any active Native writable mapping or direct VMO operation. Direct VMO access, snapshots, and writable Native mappings remain closed until VM retirement removes and invalidates every stage-2 mapping and releases the independent backing reference; read-only Native mappings may coexist.",
 ];
 

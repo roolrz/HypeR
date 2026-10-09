@@ -79,7 +79,6 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE UINT32_C(22)
 #define HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE UINT32_C(23)
 #define HYPER_NATIVE_OBJECT_VIRTUAL_CPU UINT32_C(24)
-#define HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL UINT32_C(25)
 #define HYPER_NATIVE_OBJECT_WAIT_SET UINT32_C(26)
 #define HYPER_NATIVE_OBJECT_GUEST_MEMORY UINT32_C(27)
 #define HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY UINT32_C(28)
@@ -120,7 +119,6 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
         case HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         case HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         case HYPER_NATIVE_OBJECT_VIRTUAL_CPU: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
-        case HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
         case HYPER_NATIVE_OBJECT_WAIT_SET: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
         case HYPER_NATIVE_OBJECT_GUEST_MEMORY: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         case HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
@@ -172,9 +170,6 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 
 #define HYPER_NATIVE_SIGNAL_PHYSICAL_DEVICE_READABLE (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_NATIVE_BLOCK_PEER_CLOSED (UINT64_C(1) << 0)
-#define HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_READABLE (UINT64_C(1) << 0)
-#define HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_WRITABLE (UINT64_C(1) << 1)
-#define HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_PEER_CLOSED (UINT64_C(1) << 2)
 #define HYPER_NATIVE_SIGNAL_WAIT_SET_READABLE (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_EVENT_SIGNALED (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_READABLE (UINT64_C(1) << 0)
@@ -258,10 +253,6 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_RISCV_ISA_SSTC UINT64_C(256)
 #define HYPER_NATIVE_PAGE_SIZE UINT64_C(4096)
 #define HYPER_NATIVE_EXTENSIBLE_RECORD_MAX_BYTES UINT64_C(4096)
-#define HYPER_NATIVE_VIRTUAL_SERIAL_MAX_TRANSFER_BYTES UINT64_C(4096)
-#define HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_CAPACITY UINT64_C(65536)
-#define HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_HEADER_BYTES UINT64_C(4096)
-#define HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_BYTES UINT64_C(69632)
 #define HYPER_NATIVE_ELF_OSABI UINT64_C(63)
 #define HYPER_NATIVE_ELF_ABI_VERSION UINT64_C(0)
 #define HYPER_NATIVE_PROCESS_STARTUP_DATA_MAX_BYTES UINT64_C(16384)
@@ -459,11 +450,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_RESOURCE_DOMAIN_CREATE UINT64_C(69)
 #define HYPER_NATIVE_SYS_TASK_GROUP_CREATE UINT64_C(70)
 #define HYPER_NATIVE_SYS_VIRTUAL_CPU_START UINT64_C(71)
-#define HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL UINT64_C(72)
 #define HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC UINT64_C(73)
-#define HYPER_NATIVE_SYS_VIRTUAL_SERIAL_CREATE UINT64_C(74)
-#define HYPER_NATIVE_SYS_VIRTUAL_SERIAL_REGISTER_OUTPUT UINT64_C(75)
-#define HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE UINT64_C(76)
 #define HYPER_NATIVE_SYS_THREAD_CREATE UINT64_C(77)
 #define HYPER_NATIVE_SYS_THREAD_START UINT64_C(78)
 #define HYPER_NATIVE_SYS_THREAD_REQUEST_STOP UINT64_C(79)
@@ -481,7 +468,6 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_WAIT_SET_REMOVE UINT64_C(91)
 #define HYPER_NATIVE_SYS_WAIT_SET_WAIT UINT64_C(92)
 #define HYPER_NATIVE_SYS_PROCESS_GET_CURRENT_ID UINT64_C(93)
-#define HYPER_NATIVE_SYS_VIRTUAL_SERIAL_ACKNOWLEDGE_OUTPUT UINT64_C(94)
 #define HYPER_NATIVE_SYS_DIRECTORY_SCOPE_CREATE UINT64_C(95)
 #define HYPER_NATIVE_SYS_DIRECTORY_GET_METADATA UINT64_C(96)
 #define HYPER_NATIVE_SYS_FILE_GET_METADATA UINT64_C(97)
@@ -508,7 +494,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_COMPLETE_POWER_REQUEST UINT64_C(118)
 #define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_OPEN_VCPU UINT64_C(119)
 #define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REGISTER_MMIO UINT64_C(120)
-#define HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_MMIO_REQUEST UINT64_C(121)
+#define HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_DEVICE_REQUEST UINT64_C(121)
 #define HYPER_NATIVE_SYS_VIRTUAL_CPU_COMPLETE_MMIO UINT64_C(122)
 #define HYPER_NATIVE_SYS_GUEST_MEMORY_CREATE UINT64_C(123)
 #define HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_MAP_MEMORY UINT64_C(124)
@@ -538,6 +524,9 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY UINT64_C(148)
 #define HYPER_NATIVE_SYS_SYSTEM_CONFIG UINT64_C(149)
 #define HYPER_NATIVE_SYS_OBJECT_INSPECTOR_READ_DETAILS UINT64_C(150)
+#define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REGISTER_MMIO_EVENT UINT64_C(480)
+#define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_SET_DEVICE_INTERRUPT UINT64_C(481)
+#define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_BIND_FIRMWARE_CONSOLE UINT64_C(482)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -677,8 +666,8 @@ HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_dma_extent_t) == 8, "dma_
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_dma_extent_t, physical_base) == 0, "dma_extent.physical_base offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_dma_extent_t, length) == 8, "dma_extent.length offset");
 
-#define HYPER_NATIVE_VIRTUAL_CPU_MMIO_REQUEST_MIN_SIZE UINT64_C(48)
-typedef struct hyper_native_virtual_cpu_mmio_request_t {
+#define HYPER_NATIVE_VIRTUAL_CPU_DEVICE_REQUEST_MIN_SIZE UINT64_C(48)
+typedef struct hyper_native_virtual_cpu_device_request_t {
     uint64_t id;
     uint64_t device;
     uint64_t address;
@@ -686,16 +675,16 @@ typedef struct hyper_native_virtual_cpu_mmio_request_t {
     uint32_t operation;
     uint32_t width;
     uint64_t reserved;
-} hyper_native_virtual_cpu_mmio_request_t;
-HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_cpu_mmio_request_t) == 48, "virtual_cpu_mmio_request size");
-HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_virtual_cpu_mmio_request_t) == 8, "virtual_cpu_mmio_request alignment");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, id) == 0, "virtual_cpu_mmio_request.id offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, device) == 8, "virtual_cpu_mmio_request.device offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, address) == 16, "virtual_cpu_mmio_request.address offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, value) == 24, "virtual_cpu_mmio_request.value offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, operation) == 32, "virtual_cpu_mmio_request.operation offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, width) == 36, "virtual_cpu_mmio_request.width offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, reserved) == 40, "virtual_cpu_mmio_request.reserved offset");
+} hyper_native_virtual_cpu_device_request_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_cpu_device_request_t) == 48, "virtual_cpu_device_request size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_virtual_cpu_device_request_t) == 8, "virtual_cpu_device_request alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_device_request_t, id) == 0, "virtual_cpu_device_request.id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_device_request_t, device) == 8, "virtual_cpu_device_request.device offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_device_request_t, address) == 16, "virtual_cpu_device_request.address offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_device_request_t, value) == 24, "virtual_cpu_device_request.value offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_device_request_t, operation) == 32, "virtual_cpu_device_request.operation offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_device_request_t, width) == 36, "virtual_cpu_device_request.width offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_device_request_t, reserved) == 40, "virtual_cpu_device_request.reserved offset");
 
 #define HYPER_NATIVE_PRIVATE_MAPPING_MIN_SIZE UINT64_C(48)
 typedef struct hyper_native_private_mapping_t {

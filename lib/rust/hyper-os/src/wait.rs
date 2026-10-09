@@ -51,13 +51,9 @@ impl<T: ObjectType> ObjectSignals<T> {
     }
 }
 
-impl ObjectSignals<crate::handle::VirtualSerialObject> {
-    pub const READABLE: Self =
-        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_READABLE);
-    pub const WRITABLE: Self =
-        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_WRITABLE);
-    pub const PEER_CLOSED: Self =
-        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_PEER_CLOSED);
+impl ObjectSignals<crate::handle::EventObject> {
+    pub const SIGNALED: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_EVENT_SIGNALED);
 }
 
 impl ObjectSignals<ByteChannelObject> {

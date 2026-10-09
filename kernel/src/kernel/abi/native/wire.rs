@@ -27,8 +27,8 @@ use hyper::abi::native::{
     HYPER_NATIVE_OBJECT_TASK_GROUP, HYPER_NATIVE_OBJECT_TASK_INSPECTOR, HYPER_NATIVE_OBJECT_THREAD,
     HYPER_NATIVE_OBJECT_VIRTUAL_CPU, HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE,
     HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY,
-    HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE, HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL,
-    HYPER_NATIVE_OBJECT_VMAR, HYPER_NATIVE_OBJECT_VMO, HYPER_NATIVE_OBJECT_WAIT_MANY_MAX_ITEMS,
+    HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE, HYPER_NATIVE_OBJECT_VMAR,
+    HYPER_NATIVE_OBJECT_VMO, HYPER_NATIVE_OBJECT_WAIT_MANY_MAX_ITEMS,
     HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS, HYPER_NATIVE_PROCESS_PHASE_CREATED,
     HYPER_NATIVE_PROCESS_PHASE_PREPARED, HYPER_NATIVE_PROCESS_PHASE_RETIRED,
     HYPER_NATIVE_PROCESS_PHASE_RETIRING, HYPER_NATIVE_PROCESS_PHASE_RUNNING,
@@ -42,8 +42,7 @@ use hyper::abi::native::{
     HYPER_NATIVE_THREAD_REGISTRY_RETIRING, HYPER_NATIVE_THREAD_ROLE_BOOTSTRAP,
     HYPER_NATIVE_THREAD_ROLE_IDLE, HYPER_NATIVE_THREAD_ROLE_KERNEL, HYPER_NATIVE_THREAD_ROLE_USER,
     HYPER_NATIVE_THREAD_ROLE_VCPU, HYPER_NATIVE_VIRTUAL_CPU_BOOTSTRAP_MIN_SIZE,
-    HYPER_NATIVE_VIRTUAL_MACHINE_CONFIGURATION_MIN_SIZE,
-    HYPER_NATIVE_VIRTUAL_SERIAL_MAX_TRANSFER_BYTES, HyperNativeCapabilityDisposition,
+    HYPER_NATIVE_VIRTUAL_MACHINE_CONFIGURATION_MIN_SIZE, HyperNativeCapabilityDisposition,
     HyperNativeCapabilityReceiveSlot, HyperNativeCpuObservation, HyperNativeDirectoryEntry,
     HyperNativeDirectoryInfo, HyperNativeFileInfo, HyperNativeHandleInfo,
     HyperNativeHandleInspection, HyperNativeMemoryObservation, HyperNativeObjectBasicInfo,
@@ -472,7 +471,6 @@ pub(super) fn parse_object_kind(
         }
         hyper::abi::native::HYPER_NATIVE_OBJECT_GUEST_MEMORY => Ok(ObjectKind::GUEST_MEMORY),
         HYPER_NATIVE_OBJECT_VIRTUAL_CPU => Ok(ObjectKind::VIRTUAL_CPU),
-        HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL => Ok(ObjectKind::VIRTUAL_SERIAL),
         _ => Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT),
     }
 }
@@ -486,19 +484,6 @@ pub(super) fn parse_console_io(
     let console = parse_handle(arguments[0])?;
     let bytes = optional_user_slice(arguments[2], arguments[3])?;
     Ok((console, bytes))
-}
-
-pub(super) fn parse_virtual_serial_io(
-    arguments: &Arguments,
-) -> Result<(HandleValue, Option<UserSlice>), HyperNativeStatus> {
-    if arguments[2] > HYPER_NATIVE_VIRTUAL_SERIAL_MAX_TRANSFER_BYTES
-        || arguments[3..].iter().any(|argument| *argument != 0)
-    {
-        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-    }
-    let serial = parse_handle(arguments[0])?;
-    let bytes = optional_user_slice(arguments[1], arguments[2])?;
-    Ok((serial, bytes))
 }
 
 pub(super) fn optional_user_slice(
@@ -1466,15 +1451,26 @@ pub(super) fn encode_virtual_machine_power_request(
     record
 }
 
-pub(super) fn encode_virtual_cpu_mmio_request(
+pub(super) fn encode_virtual_cpu_device_request(
     request: hyper::vm::device::mmio::Request,
-) -> [u8; core::mem::size_of::<hyper::abi::native::HyperNativeVirtualCpuMmioRequest>()] {
-    use hyper::abi::native::HyperNativeVirtualCpuMmioRequest as Record;
+) -> [u8; core::mem::size_of::<hyper::abi::native::HyperNativeVirtualCpuDeviceRequest>()] {
+    use hyper::abi::native::HyperNativeVirtualCpuDeviceRequest as Record;
     use hyper::vm::exit::MmioOperation;
     let mut record = [0_u8; core::mem::size_of::<Record>()];
-    let (operation, value) = match request.access.operation() {
-        MmioOperation::Read => (0, 0),
-        MmioOperation::Write(value) => (1, value),
+    let (operation, value, address, width) = match request.access {
+        hyper::vm::device::mmio::Access::Mmio(access) => {
+            let (operation, value) = match access.operation() {
+                MmioOperation::Read => (0, 0),
+                MmioOperation::Write(value) => (1, value),
+            };
+            (
+                operation,
+                value,
+                access.address().get(),
+                access.size() as u32,
+            )
+        }
+        hyper::vm::device::mmio::Access::FirmwareConsoleWrite(byte) => (2, u64::from(byte), 0, 0),
     };
     write_u64(&mut record, core::mem::offset_of!(Record, id), request.id);
     write_u64(
@@ -1482,21 +1478,13 @@ pub(super) fn encode_virtual_cpu_mmio_request(
         core::mem::offset_of!(Record, device),
         request.device,
     );
-    write_u64(
-        &mut record,
-        core::mem::offset_of!(Record, address),
-        request.access.address().get(),
-    );
+    write_u64(&mut record, core::mem::offset_of!(Record, address), address);
     write_u64(&mut record, core::mem::offset_of!(Record, value), value);
     write_u32(
         &mut record,
         core::mem::offset_of!(Record, operation),
         operation,
     );
-    write_u32(
-        &mut record,
-        core::mem::offset_of!(Record, width),
-        request.access.size() as u32,
-    );
+    write_u32(&mut record, core::mem::offset_of!(Record, width), width);
     record
 }

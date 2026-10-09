@@ -620,7 +620,6 @@ impl VcpuRunExit {
         #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             match self.backend {
-                #[cfg(CONFIG_ARCH_AARCH64)]
                 crate::arch::vm::GuestRunExit::Wait(crate::arch::vm::GuestWaitReason::Device) => {
                     VcpuRunDisposition::Wait(VcpuWaitReason::Device)
                 }
@@ -1378,14 +1377,14 @@ pub fn complete_device_call(
     state: &mut VcpuHardwareState,
     action: hyper::vm::exit::MmioAction,
 ) -> Result<(), DeviceContextError> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         state
             .context
             .complete_device(action)
             .map_err(|_| DeviceContextError::InvalidState)
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (state, action);
         Err(DeviceContextError::Unsupported)

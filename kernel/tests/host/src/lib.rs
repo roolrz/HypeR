@@ -266,8 +266,6 @@ mod vgic_quiesce;
 #[path = "cases/virtual_legacy_pc.rs"]
 mod virtual_legacy_pc;
 #[cfg(test)]
-#[path = "cases/virtual_pl011.rs"]
-mod virtual_pl011;
 #[cfg(test)]
 #[path = "cases/vm_interrupt_reconcile.rs"]
 mod vm_interrupt_reconcile;
@@ -283,10 +281,6 @@ mod x86_svm_contract;
 #[cfg(test)]
 #[path = "cases/x86_virtual_cpu_contract.rs"]
 mod x86_virtual_cpu_contract;
-
-#[cfg(test)]
-#[path = "cases/serial_ring.rs"]
-mod serial_ring;
 
 #[cfg(test)]
 #[path = "cases/file_data.rs"]

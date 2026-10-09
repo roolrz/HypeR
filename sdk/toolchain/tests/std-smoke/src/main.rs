@@ -7,7 +7,6 @@ mod files;
 mod processes;
 mod relay;
 mod stack_workload;
-mod virtual_serial;
 mod wait_sets;
 
 use clap::Parser;
@@ -97,7 +96,6 @@ fn main() {
         .map_err(|error| format!("{error:?}"))
         .and_then(cow::run);
     assert!(cow_result.is_ok(), "COW regression: {cow_result:?}");
-    virtual_serial::run(&startup.take(hyper_os::startup::ROOT_VMAR).unwrap());
     files::scoped_startup_root(&mut startup);
     drop(startup); // The remaining I/O and TLS destructor still need these handles.
     COUNTER.with(|value| {

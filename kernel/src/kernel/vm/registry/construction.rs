@@ -156,7 +156,6 @@ impl PreparedVm {
             }
             return Err(error);
         }
-        self.machine.bind_virtual_serial(0);
         let lifecycle = self.machine.lifecycle();
         let Self {
             dormant,

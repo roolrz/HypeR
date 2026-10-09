@@ -82,21 +82,6 @@ pub(super) fn run(
             .take(vm_contract::CONSOLE_CONNECTION)
             .map_err(Error::OperatingSystem)?,
     );
-    let root = startup
-        .take(hyper_os::startup::ROOT_VMAR)
-        .map_err(Error::OperatingSystem)?;
-    let virtual_serial = hyper_os::virtual_serial::create().map_err(Error::OperatingSystem)?;
-    let serial_memory = WritableVmo::create(hyper_os::virtual_serial::BUFFER_BYTES)
-        .map_err(Error::OperatingSystem)?;
-    let output = hyper_os::virtual_serial::Output::register(
-        &virtual_serial,
-        root.as_handle_ref(),
-        0xd000_0000,
-        serial_memory,
-    )
-    .map_err(Error::OperatingSystem)?;
-    let mut console = hyper_vm_runtime::console::Console::new(connection, virtual_serial, output);
-    let serial_binding = console.binding().map_err(Error::OperatingSystem)?;
     let memory = prepare_guest_memory(
         &source,
         image,
@@ -122,7 +107,6 @@ pub(super) fn run(
             architecture: platform_info.architecture,
             platform_profile: profile,
         },
-        serial_binding,
         io_session.is_some(),
     )?;
     hyper_vm_policy::affinity::apply(&config.affinity, plan.vcpu_count(), |index, words| {
@@ -163,6 +147,10 @@ pub(super) fn run(
     } else {
         (machine, None)
     };
+    let machine = std::sync::Arc::new(machine);
+    let output = hyper_vm_support::serial::Port::start(machine.clone(), vcpus.clone(), profile)
+        .map_err(Error::OperatingSystem)?;
+    let mut console = hyper_vm_runtime::console::Console::new(connection, output);
     #[cfg(feature = "test-power-crash")]
     crate::power_crash::at("dormant");
     hyper_os::vm::start_vcpu(vcpus[0].as_handle_ref()).map_err(Error::OperatingSystem)?;
@@ -175,7 +163,9 @@ pub(super) fn run(
         elapsed.subsec_micros() % 1_000,
     );
     publish_status(control, vm_contract::InstanceStatus::Running)?;
-    supervise_guest(&machine, &vcpus, control, &mut console, devices.as_mut())
+    let outcome = supervise_guest(&machine, &vcpus, control, &mut console, devices.as_mut());
+    let console_stopped = console.finish().map_err(Error::OperatingSystem);
+    outcome.and(console_stopped)
 }
 
 pub(super) fn publish_status(
@@ -190,7 +180,7 @@ pub(super) fn publish_status(
 struct InstalledGuest {
     shared_memory: Option<hyper_os::OwnedHandle<hyper_os::handle::GuestMemoryObject>>,
     machine: hyper_os::OwnedHandle<hyper_os::handle::VirtualMachineObject>,
-    vcpus: Vec<hyper_os::OwnedHandle<hyper_os::handle::VirtualCpuObject>>,
+    vcpus: Vec<std::sync::Arc<hyper_os::OwnedHandle<hyper_os::handle::VirtualCpuObject>>>,
 }
 
 /// Builds an installed, dormant guest and retains handles for every vCPU.
@@ -203,7 +193,6 @@ fn install_guest(
     memory: &WritableVmo,
     plan: &linux::BootPlan,
     configuration: hyper_os::vm::Configuration,
-    serial_binding: hyper_os::OwnedHandle<hyper_os::handle::VirtualSerialObject>,
     with_io: bool,
 ) -> Result<InstalledGuest, Error> {
     let pending = hyper_os::vm::create(lease, configuration)
@@ -234,20 +223,18 @@ fn install_guest(
         },
     )
     .map_err(Error::OperatingSystem)?;
-    hyper_os::vm::set_virtual_serial(pending.as_handle_ref(), serial_binding)
-        .map_err(|failure| Error::OperatingSystem(failure.error()))?;
     hyper_os::vm::seal(pending.as_handle_ref()).map_err(Error::OperatingSystem)?;
     let (machine, vcpu) = hyper_os::vm::install(pending)
         .map_err(|failure| Error::OperatingSystem(failure.error()))?;
     // Keep inspection capabilities through retirement, including secondary CPU
     // failures. No registry lookup or allocation is needed on the stop path.
     let mut vcpus = Vec::with_capacity(plan.vcpu_count() as usize);
-    vcpus.push(vcpu);
+    vcpus.push(std::sync::Arc::new(vcpu));
     for index in 1..plan.vcpu_count() {
-        vcpus.push(
+        vcpus.push(std::sync::Arc::new(
             hyper_os::vm::open_vcpu(machine.as_handle_ref(), index)
                 .map_err(Error::OperatingSystem)?,
-        );
+        ));
     }
     Ok(InstalledGuest {
         shared_memory,

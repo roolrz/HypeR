@@ -8,7 +8,7 @@ use core::num::NonZeroU64;
 use crate::handle::{
     AnyObject, HandleRef, OwnedHandle, PendingVirtualMachineObject, ResourceDomainObject, Rights,
     TypedObject, VirtualCpuObject, VirtualMachineCreationAuthorityObject,
-    VirtualMachineCreationLeaseObject, VirtualMachineObject, VirtualSerialObject, VmoObject,
+    VirtualMachineCreationLeaseObject, VirtualMachineObject, VmoObject,
 };
 use crate::{Error, Result, Status};
 
@@ -227,29 +227,6 @@ pub fn set_memory(
         hyper_sys::pending_virtual_machine_set_memory(pending.raw().get(), memory.raw().get())
     })
     .into_result()
-}
-
-/// Transfers device-binding authority into the pending VM's serial device.
-///
-/// On failure, the returned value contains the unchanged virtual-serial handle.
-pub fn set_virtual_serial(
-    pending: HandleRef<'_, PendingVirtualMachineObject>,
-    serial: OwnedHandle<VirtualSerialObject>,
-) -> core::result::Result<(), ConsumingFailure<VirtualSerialObject>> {
-    let raw = serial.as_handle_ref().raw();
-    // SAFETY: both handles remain live for the complete call. Ownership of
-    // `serial` is relinquished only after the kernel reports success.
-    let status = Status::from_raw(unsafe {
-        hyper_sys::pending_virtual_machine_set_virtual_serial(pending.raw().get(), raw.get())
-    });
-    if status != Status::OK {
-        return Err(ConsumingFailure {
-            error: Error::Status(status),
-            handle: serial,
-        });
-    }
-    let _ = serial.into_raw();
-    Ok(())
 }
 
 pub fn set_bootstrap(
@@ -845,9 +822,45 @@ pub enum MmioCompletion {
     Abort,
 }
 
-/// Non-consuming inspection; use `MMIO_REQUEST` with `WaitSet` to wait for work.
+/// One detached instruction, or a narrowly defined firmware console call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceRequest {
+    Mmio(MmioRequest),
+    FirmwareConsoleWrite {
+        id: NonZeroU64,
+        device: NonZeroU64,
+        byte: u8,
+    },
+}
+impl DeviceRequest {
+    pub fn id(self) -> NonZeroU64 {
+        match self {
+            Self::Mmio(request) => request.id,
+            Self::FirmwareConsoleWrite { id, .. } => id,
+        }
+    }
+    pub fn device(self) -> NonZeroU64 {
+        match self {
+            Self::Mmio(request) => request.device,
+            Self::FirmwareConsoleWrite { device, .. } => device,
+        }
+    }
+}
+
+/// Inspects routes using the vCPU's shared `MMIO_REQUEST` signal. Event-routed
+/// devices are excluded and must be consumed through their private dispatcher.
 pub fn pending_mmio(vcpu: HandleRef<'_, VirtualCpuObject>) -> Result<Option<MmioRequest>> {
-    let mut record = hyper_abi::HyperNativeVirtualCpuMmioRequest {
+    match pending_device(vcpu, 0)? {
+        Some(DeviceRequest::Mmio(request)) => Ok(Some(request)),
+        None => Ok(None),
+        _ => Err(Error::InvalidResponse),
+    }
+}
+fn pending_device(
+    vcpu: HandleRef<'_, VirtualCpuObject>,
+    device: u64,
+) -> Result<Option<DeviceRequest>> {
+    let mut record = hyper_abi::HyperNativeVirtualCpuDeviceRequest {
         id: 0,
         device: 0,
         address: 0,
@@ -857,15 +870,32 @@ pub fn pending_mmio(vcpu: HandleRef<'_, VirtualCpuObject>) -> Result<Option<Mmio
         reserved: 0,
     };
     // SAFETY: The typed handle and initialized output remain live for the call.
-    let result = unsafe { hyper_sys::virtual_cpu_get_mmio_request(vcpu.raw().get(), &mut record) };
+    let result = unsafe {
+        hyper_sys::virtual_cpu_get_device_request_for_device(vcpu.raw().get(), &mut record, device)
+    };
     if Status::from_raw(result.status) == Status::WOULD_BLOCK {
         return Ok(None);
     }
     crate::validate_info_result(
         result,
-        hyper_abi::HYPER_NATIVE_VIRTUAL_CPU_MMIO_REQUEST_MIN_SIZE,
+        hyper_abi::HYPER_NATIVE_VIRTUAL_CPU_DEVICE_REQUEST_MIN_SIZE,
     )?;
-    if record.reserved != 0 || !matches!(record.width, 1 | 2 | 4 | 8) {
+    if record.reserved != 0 {
+        return Err(Error::InvalidResponse);
+    }
+    let id = NonZeroU64::new(record.id).ok_or(Error::InvalidResponse)?;
+    let device = NonZeroU64::new(record.device).ok_or(Error::InvalidResponse)?;
+    if record.operation == 2 {
+        if record.width != 0 || record.address != 0 {
+            return Err(Error::InvalidResponse);
+        }
+        return Ok(Some(DeviceRequest::FirmwareConsoleWrite {
+            id,
+            device,
+            byte: u8::try_from(record.value).map_err(|_| Error::InvalidResponse)?,
+        }));
+    }
+    if !matches!(record.width, 1 | 2 | 4 | 8) {
         return Err(Error::InvalidResponse);
     }
     let operation = match (record.operation, record.value) {
@@ -873,13 +903,13 @@ pub fn pending_mmio(vcpu: HandleRef<'_, VirtualCpuObject>) -> Result<Option<Mmio
         (1, value) => MmioOperation::Write(value),
         _ => return Err(Error::InvalidResponse),
     };
-    Ok(Some(MmioRequest {
-        id: NonZeroU64::new(record.id).ok_or(Error::InvalidResponse)?,
-        device: NonZeroU64::new(record.device).ok_or(Error::InvalidResponse)?,
+    Ok(Some(DeviceRequest::Mmio(MmioRequest {
+        id,
+        device,
         address: record.address,
         width: record.width,
         operation,
-    }))
+    })))
 }
 
 /// Completes one instruction. A stale ID or a mismatched read/write kind fails.
@@ -1016,4 +1046,104 @@ pub fn map_shared_guest_memory(
             .map_err(|failure| failure.error())?,
         token: result.value1,
     })
+}
+
+/// Private coalesced wake prompt for one immutable userspace MMIO route.
+///
+/// Clear before inspecting every vCPU. The kernel publishes each durable request
+/// before signalling; neither completion nor another vCPU clears this prompt.
+/// Keep a single dispatcher for this route. The object grants no additional VM
+/// authority and cannot be shared with another route through this safe API.
+pub struct DeviceDoorbell {
+    event: OwnedHandle<crate::handle::EventObject>,
+    device: core::num::NonZeroU64,
+}
+impl DeviceDoorbell {
+    pub fn register(
+        machine: HandleRef<'_, VirtualMachineObject>,
+        base: u64,
+        length: u64,
+        device: core::num::NonZeroU64,
+    ) -> Result<Self> {
+        // SAFETY: Creation has no input pointers or handles.
+        let result = unsafe { hyper_sys::event_create() };
+        Status::from_raw(result.status).into_result()?;
+        // SAFETY: Success transfers one fresh Event owner.
+        let event = unsafe {
+            crate::handle::adopt_produced_handle_excluding::<crate::handle::EventObject>(
+                result.value0,
+                &[machine.raw()],
+            )?
+        };
+        // SAFETY: Both borrowed handles remain live throughout registration.
+        Status::from_raw(unsafe {
+            hyper_sys::virtual_machine_register_mmio_event(
+                machine.raw().get(),
+                base,
+                length,
+                device.get(),
+                event.as_handle_ref().raw().get(),
+            )
+        })
+        .into_result()?;
+        Ok(Self { event, device })
+    }
+    pub fn prepare_scan(&self) -> Result<()> {
+        // SAFETY: The private Event is retained; clearing precedes slot scans.
+        Status::from_raw(unsafe {
+            hyper_sys::event_signal(
+                self.event.as_handle_ref().raw().get(),
+                hyper_abi::HYPER_NATIVE_SIGNAL_EVENT_SIGNALED,
+                0,
+            )
+        })
+        .into_result()
+    }
+    pub fn wait_item(&self) -> crate::wait::WaitItem<'_> {
+        crate::wait::WaitItem::new(
+            self.event.as_handle_ref(),
+            crate::wait::ObjectSignals::<crate::handle::EventObject>::SIGNALED,
+        )
+    }
+    pub fn bind_firmware_console(
+        &self,
+        machine: HandleRef<'_, VirtualMachineObject>,
+    ) -> Result<()> {
+        // SAFETY: The management handle stays live and this cookie names our route.
+        Status::from_raw(unsafe {
+            hyper_sys::virtual_machine_bind_firmware_console(machine.raw().get(), self.device.get())
+        })
+        .into_result()
+    }
+    /// Completes only a request delivered by this route. A mismatched cookie
+    /// fails locally without consuming the kernel's pending instruction.
+    pub fn complete(
+        &self,
+        cpu: HandleRef<'_, VirtualCpuObject>,
+        request: DeviceRequest,
+        completion: MmioCompletion,
+    ) -> Result<()> {
+        if request.device() != self.device {
+            return Err(Error::InvalidResponse);
+        }
+        complete_mmio(cpu, request.id(), completion)
+    }
+    pub fn pending(&self, cpu: HandleRef<'_, VirtualCpuObject>) -> Result<Option<DeviceRequest>> {
+        Ok(pending_device(cpu, self.device.get())?
+            .filter(|request| request.device() == self.device))
+    }
+}
+
+/// Updates a shared device interrupt line in a managed VM. Private interrupts
+/// and out-of-range sources are rejected; a stopped VM cannot be reactivated.
+pub fn set_device_interrupt(
+    machine: HandleRef<'_, VirtualMachineObject>,
+    interrupt: u32,
+    asserted: bool,
+) -> Result<()> {
+    // SAFETY: The borrowed management handle remains live; no user pointers.
+    Status::from_raw(unsafe {
+        hyper_sys::virtual_machine_set_device_interrupt(machine.raw().get(), interrupt, asserted)
+    })
+    .into_result()
 }

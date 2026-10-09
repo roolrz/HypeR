@@ -235,7 +235,6 @@ fn run(
                 }
         },
         &assignments,
-        0xd000_0000,
     )?;
     drop(grant);
     // Every fallible operation after installation is inside this result scope;
@@ -303,11 +302,16 @@ fn run(
     let drained = drain(&mut guest, &mut guest_log);
     // Attempt every cleanup step without hiding the failure that started
     // retirement behind a later timeout or worker shutdown error.
-    outcome.and(stopped).and(worker_stopped).and(drained)
+    let console_stopped = guest.output.join().map_err(show);
+    outcome
+        .and(stopped)
+        .and(worker_stopped)
+        .and(drained)
+        .and(console_stopped)
 }
 
 fn drain(guest: &mut InstalledGuest, guest_log: &mut GuestLog) -> Result<()> {
-    let mut bytes = [0; 2048];
+    let mut bytes = [0; hyper_vm_support::serial::MESSAGE_BYTES];
     let mut output = io::stdout().lock();
     for _ in 0..16 {
         let length = guest.output.try_read(&mut bytes).map_err(show)?;

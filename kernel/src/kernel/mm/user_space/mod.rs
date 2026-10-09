@@ -27,11 +27,6 @@ mod objects;
 mod service;
 mod transaction;
 mod vmo;
-#[cfg(test)]
-pub(crate) use transaction::retry_stale;
-#[cfg(not(test))]
-pub(crate) use vmo::ExclusiveHardwareWriteLease;
-
 pub(crate) use address_space::{
     AddressSpaceError, MappingChange, MappingSnapshot, MappingToken, PreparedMappingChange,
     PreparedPageSnapshot, PreparedUserWrite, UserAddressSpace, Vmar,
@@ -79,6 +74,8 @@ pub(crate) use service::{
     allocate_vmar, create_contiguous_vmo, create_file_executable_vmo, create_vmo,
     destroy as destroy_vmar, map_vmo, protect, read_vmo, unmap, write_vmo,
 };
+#[cfg(test)]
+pub(crate) use transaction::retry_stale;
 
 #[cfg(not(test))]
 pub(crate) use machine::service_local_rpc;

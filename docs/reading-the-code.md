@@ -103,8 +103,9 @@ flowchart TB
    [runtime launch](../app/vm-manager/src/manager/launch.rs), owns the named definition, resource policy and per-instance
    runtime process. Start with the manager when investigating admission errors.
 2. [vm-runtime `run`](../app/vm-runtime/src/runtime.rs) validates the image, prepares
-   its memory and serial channel, creates a pending VM, attaches memory and
-   bootstrap information, seals it, installs it and starts the boot vCPU.
+   guest memory, creates a pending VM, attaches memory and bootstrap information,
+   then seals and installs it. It starts the shared userspace UART worker before
+   starting the boot vCPU.
    [vm-support](../lib/vm-support/src/lib.rs) contains shared loading/device
    mechanisms; [SDK VM bindings](../lib/rust/hyper-os/src/vm.rs) expose the Native
    operations used here.
@@ -646,8 +647,7 @@ Guest console — attachment has its own lifetime:
 flowchart LR
     vmm["vmm console"] <-->|Attach / detach| runtime["vm-runtime<br/>Serial channel"]
     runtime <--> model["Guest UART model"]
-    class vmm,runtime app
-    class model core
+    class vmm,runtime,model app
     classDef app fill:#eff6ff,stroke:#2563eb,color:#172554
     classDef core fill:#f0fdfa,stroke:#0f766e,color:#134e4a
 ```
@@ -668,14 +668,17 @@ is [console-output](../app/console-output/src/main.rs).
 For guest attachment, read [vmm console](../app/vmm/src/console.rs),
 [vm-runtime console](../app/vm-runtime/src/console.rs) and
 [console waits](../app/vm-runtime/src/console_wait.rs), then the
-[virtual PL011 model](../kernel/src/vm/aarch64/device/pl011.rs).
+[userspace UART dispatcher](../lib/vm-support/src/serial/worker.rs) and
+[virtual PL011 model](../lib/vm-support/src/serial/pl011.rs). The kernel supplies
+[deferred MMIO routes](../kernel/src/kernel/vm/user_mmio.rs) and GIC/PLIC interrupt
+mechanisms. The same dispatcher runs in `io-runtime` for the appliance console.
 A guest that stops consuming input must not make the control/detach path
 unreachable. Keep output, input backpressure and attachment lifetime separate
 when changing the relay.
 
 **Tests to start with:** [vmm console tests](../app/vmm/tests/console.rs),
 [runtime console tests](../app/vm-runtime/tests/console.rs),
-[virtual UART tests](../kernel/tests/host/src/cases/virtual_pl011.rs) and
+[virtual UART tests](../lib/vm-support/tests/pl011.rs) and
 [console integration](../tests/qemu/verify-console.py).
 
 ## 14. From configuration to a running service or disk image

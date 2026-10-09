@@ -81,3 +81,9 @@ from this staged set, just like the other services.
 
 See [Native component builds](../mk/README.md) for the shared Make templates,
 feature variants, library collection and SDK component cache.
+
+Guest PL011 and NS16550 models live in `vm-support/src/serial`, shared by the
+business and I/O VM runtimes. The UART worker consumes deferred device requests
+through the installed SDK and uses bounded ByteChannels for byte transport.
+Physical host UART drivers and guest interrupt-controller mechanisms remain in
+the kernel. See [VM lifecycle and console ownership](../kernel/docs/vm-bundle.md).

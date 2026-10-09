@@ -15,6 +15,7 @@ mod reschedule;
 mod run_admission;
 
 mod admission;
+mod device_prompt;
 mod publication;
 mod wakeup;
 

@@ -123,10 +123,24 @@ impl VcpuEndpoint {
         self.mmio.with(|state| state.stage(device, access))
     }
 
-    pub(super) fn publish_mmio(&self) -> Result<(), hyper::vm::device::mmio::Error> {
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    pub(super) fn stage_firmware_console(
+        &self,
+        device: u64,
+        byte: u8,
+    ) -> Result<(), hyper::vm::device::mmio::Error> {
+        self.mmio
+            .with(|state| state.stage_firmware_console(device, byte))
+    }
+
+    pub(super) fn staged_mmio(&self) -> Option<hyper::vm::device::mmio::Request> {
+        self.mmio.with(|state| state.staged())
+    }
+
+    pub(super) fn publish_mmio(&self, signal: bool) -> Result<(), hyper::vm::device::mmio::Error> {
         self.mmio.with(|state| {
             state.publish()?;
-            self.update_mmio_signal(true);
+            self.update_mmio_signal(signal);
             Ok(())
         })
     }

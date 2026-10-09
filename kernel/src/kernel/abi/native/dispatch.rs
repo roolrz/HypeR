@@ -255,24 +255,6 @@ pub(in crate::kernel) fn dispatch_deferred(
         abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_BOOTSTRAP => {
             handlers::sys_pending_virtual_machine_set_bootstrap(services, invocation.arguments())
         }
-        abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL => {
-            handlers::sys_pending_virtual_machine_set_virtual_serial(
-                services,
-                invocation.arguments(),
-            )
-        }
-        abi::HYPER_NATIVE_SYS_VIRTUAL_SERIAL_CREATE => {
-            handlers::sys_virtual_serial_create(services, invocation.arguments())
-        }
-        abi::HYPER_NATIVE_SYS_VIRTUAL_SERIAL_REGISTER_OUTPUT => {
-            handlers::sys_virtual_serial_register_output(services, invocation.arguments())
-        }
-        abi::HYPER_NATIVE_SYS_VIRTUAL_SERIAL_ACKNOWLEDGE_OUTPUT => {
-            handlers::sys_virtual_serial_acknowledge_output(services, invocation.arguments())
-        }
-        abi::HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE => {
-            handlers::sys_virtual_serial_write(services, invocation.arguments())
-        }
         abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SEAL => {
             handlers::sys_pending_virtual_machine_seal(services, invocation.arguments())
         }
@@ -303,11 +285,20 @@ pub(in crate::kernel) fn dispatch_deferred(
         abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_INFO => {
             handlers::sys_virtual_machine_get_info(services, invocation.arguments())
         }
+        abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_BIND_FIRMWARE_CONSOLE => {
+            handlers::sys_virtual_machine_bind_firmware_console(services, invocation.arguments())
+        }
+        abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REGISTER_MMIO_EVENT => {
+            handlers::sys_virtual_machine_register_mmio_event(services, invocation.arguments())
+        }
+        abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_SET_DEVICE_INTERRUPT => {
+            handlers::sys_virtual_machine_set_device_interrupt(services, invocation.arguments())
+        }
         abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REGISTER_MMIO => {
             handlers::sys_virtual_machine_register_mmio(services, invocation.arguments())
         }
-        abi::HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_MMIO_REQUEST => {
-            handlers::sys_virtual_cpu_get_mmio_request(services, invocation.arguments())
+        abi::HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_DEVICE_REQUEST => {
+            handlers::sys_virtual_cpu_get_device_request(services, invocation.arguments())
         }
         abi::HYPER_NATIVE_SYS_VIRTUAL_CPU_COMPLETE_MMIO => {
             handlers::sys_virtual_cpu_complete_mmio(services, invocation.arguments())
