@@ -22,11 +22,11 @@ pub(crate) use wait_set::{WaitSet, WaitSetError};
 #[cfg(test)]
 pub(crate) use core::reap_final_objects;
 pub(crate) use core::{
-    ActiveHandleError, ActiveHandleOwner, Diagnostic, ErasedKernelRef, ExportPolicy, KernelObject,
-    KernelRef, KernelService, Koid, ObjectCreationError, ObjectHandleState, ObjectKind,
-    ObjectPublication, ObjectReferenceSnapshot, ObjectRetirement, ObjectSnapshot, OperationPin,
-    PublishableRef, Scheduler, TransferClass, UserExportableObject, VmDeviceBinding,
-    final_reap_pending, object_allocation_size, private, reap_one_final_object,
+    ActiveHandleError, ActiveHandleOwner, Diagnostic, ErasedKernelRef, KernelObject, KernelRef,
+    KernelService, Koid, ObjectCreationError, ObjectHandleState, ObjectKind, ObjectPublication,
+    ObjectRetirement, ObjectSnapshot, OperationPin, PublishableRef, Scheduler, TransferClass,
+    UserExportableObject, VmDeviceBinding, final_reap_pending, object_allocation_size, private,
+    reap_one_final_object,
 };
 #[cfg(feature = "kernel-self-test")]
 pub(crate) use directory::retain_for_test;
