@@ -9,7 +9,7 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
-hyper-vm-image = { path = "../../sdk/rust/hyper-vm-image" }
+hyper-vm-image = { path = "../../lib/rust/hyper-vm-image" }
 
 [lints.clippy]
 unwrap_used = "deny"

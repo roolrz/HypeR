@@ -106,7 +106,7 @@ flowchart TB
    its memory and serial channel, creates a pending VM, attaches memory and
    bootstrap information, seals it, installs it and starts the boot vCPU.
    [vm-support](../lib/vm-support/src/lib.rs) contains shared loading/device
-   mechanisms; [SDK VM bindings](../sdk/rust/hyper-os/src/vm.rs) expose the Native
+   mechanisms; [SDK VM bindings](../lib/rust/hyper-os/src/vm.rs) expose the Native
    operations used here.
 3. [VM services](../kernel/src/kernel/vm/service.rs) resolve capabilities and
    implement `create_pending`, `seal`, `install` and `start_vcpu`.
@@ -239,8 +239,8 @@ Both eventually publish scheduler-owned Threads, but only Process creation
 loads a new image and address space.
 
 - **Process:** [std process adapter](../sdk/toolchain/rust-std/overlay/std/src/sys/process/hyper.rs)
-  and [libhyper process adapter](../sdk/lib/src/std-process.c), or an explicit
-  [SDK ProcessBuilder](../sdk/rust/hyper-os/src/task.rs), lead through Native
+  and [libhyper process adapter](../lib/hyper/src/std-process.c), or an explicit
+  [SDK ProcessBuilder](../lib/rust/hyper-os/src/task.rs), lead through Native
   dispatch to [the kernel builder](../kernel/src/kernel/process/builder.rs).
   Follow `start_process_builder`, [the loader](../kernel/src/kernel/process/loader.rs),
   [Process owner](../kernel/src/kernel/process/owner.rs) and
@@ -248,18 +248,18 @@ loads a new image and address space.
   Image loading, capability delegation and making the initial Thread runnable
   have distinct failure/rollback boundaries.
 - **Additional Thread:** [std thread adapter](../sdk/toolchain/rust-std/overlay/std/src/sys/thread/hyper.rs)
-  uses [thread_spawn.c](../sdk/lib/src/thread_spawn.c). Native `thread_create`
+  uses [thread_spawn.c](../lib/hyper/src/thread_spawn.c). Native `thread_create`
   reaches `create_thread` in [task services](../kernel/src/kernel/entry/services/task.rs),
   which validates start information and affinity and asks the Process owner to
   prepare the user Thread. Creation and `thread_start` are separate operations.
   [UserThread](../kernel/src/kernel/process/user_thread.rs) and
   [scheduler Thread](../kernel/src/kernel/task/thread.rs) serve different ownership roles.
-- **Stack:** [stack.c](../sdk/lib/src/stack.c) manages guarded reservations and
+- **Stack:** [stack.c](../lib/hyper/src/stack.c) manages guarded reservations and
   explicit growth for both the runtime-created main stack and SDK-created worker stacks.
-  [Runtime initialization](../sdk/lib/src/runtime.c) copies startup data;
-  [bootstrap handoff](../sdk/lib/src/bootstrap.c) builds the final entry vector,
+  [Runtime initialization](../lib/hyper/src/runtime.c) copies startup data;
+  [bootstrap handoff](../lib/hyper/src/bootstrap.c) builds the final entry vector,
   switches to the final stack and only then releases the kernel bootstrap reservation.
-  See [stack APIs](../sdk/lib/README.md#guarded-growable-stacks) before changing
+  See [stack APIs](../lib/hyper/README.md#guarded-growable-stacks) before changing
   stack size or cleanup. A userspace stack is separate from its kernel stack.
 
 **Where the new Thread's SP comes from:** `hyper_runtime_thread_spawn_with_stack`
@@ -275,7 +275,7 @@ userspace, `aarch64_run_native_user` in
 writes `SP_EL0`, and executes `eret` after restoring the remaining user state.
 `worker` therefore starts on its final stack; it does not perform another stack
 switch. Its `hyper_runtime_thread_attach_stack` call only associates the stack
-descriptor with the per-thread SDK state in [thread.c](../sdk/lib/src/thread.c).
+descriptor with the per-thread SDK state in [thread.c](../lib/hyper/src/thread.c).
 
 **Who reclaims it:** the SDK starts one process-lifetime reaper lazily on the
 first runtime thread spawn. It waits for kernel `THREAD_TERMINATED` events,
@@ -290,7 +290,7 @@ and bounded by the capacity reserved at creation, not automatic fault-driven gro
 ## 6. Native file access: ramfs versus `/data`
 
 Start with [std fs](../sdk/toolchain/rust-std/overlay/std/src/sys/fs/hyper.rs),
-[std-fs.c](../sdk/lib/src/std-fs.c), then Native filesystem dispatch.
+[std-fs.c](../lib/hyper/src/std-fs.c), then Native filesystem dispatch.
 [Kernel VFS services](../kernel/src/kernel/vfs/service.rs) and
 [entry adapters](../kernel/src/kernel/entry/services/vfs.rs) enforce capability
 rights, copy payloads and invoke the VFS objects.
@@ -420,7 +420,7 @@ Useful checks to read beside these paths:
 | VM ownership and trapped device operations | [vm-smoke](../app/vm-smoke/src/main.rs), [QEMU harness](../tests/qemu/verify-vm-smoke.py) |
 | Guest SMP and power | [guest SMP harness](../tests/qemu/verify-guest-smp.py) |
 | Native file and guest disk integration | [CI entry points](../tests/ci/run.sh): `board-storage` and `io-vm` |
-| SDK stacks and thread cleanup | [stack tests](../sdk/lib/tests/unit/stack.c), [spawn tests](../sdk/lib/tests/unit/thread-spawn.c) |
+| SDK stacks and thread cleanup | [stack tests](../lib/hyper/tests/unit/stack.c), [spawn tests](../lib/hyper/tests/unit/thread-spawn.c) |
 
 Use [development](development.md) for commands and test prerequisites. A model
 test can establish a transition invariant; QEMU checks integration. Neither
@@ -491,7 +491,7 @@ These facilities share scheduler machinery but answer different questions:
 | WaitSet | Which registered object subscription became ready? | [WaitSet](../kernel/src/kernel/object/wait_set.rs) |
 | Atomic wait | Does this userspace word still have the expected value before sleeping? | [atomic waits](../kernel/src/kernel/process/atomic_wait.rs) |
 
-[SDK wait bindings](../sdk/rust/hyper-os/src/wait.rs) show how applications
+[SDK wait bindings](../lib/rust/hyper-os/src/wait.rs) show how applications
 consume object readiness. WaitSet registrations are persistent, with one-shot
 delivery and explicit `rearm`; read `add`, `wait`, delivery completion and
 `remove` together. Readiness is an observation, not a reservation of all the

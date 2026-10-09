@@ -2,20 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "hyper-os"
+name = "hyper-rt"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Safe operating-system bindings for HypeR Native applications"
+description = "Language runtime entry for freestanding HypeR Native Rust applications"
+
+[dependencies]
+hyper-abi.workspace = true
+hyper-os = { path = "../hyper-os" }
+hyper-sys = { path = "../hyper-sys" }
 
 [features]
 std = []
-
-[dependencies]
-hyper-abi = { path = "../../abi" }
-hyper-sys = { path = "../hyper-sys" }
 
 [lints]
 workspace = true

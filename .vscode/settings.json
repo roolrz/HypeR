@@ -16,8 +16,8 @@
     "rust-analyzer.linkedProjects": [
         "kernel/Cargo.toml",
         "sdk/abi/Cargo.toml",
-        "sdk/rust/Cargo.toml",
-        // This workspace also owns the implementation and shared crates in lib/.
+        "lib/rust/Cargo.toml",
+        // This workspace also owns the application libraries in lib/.
         "app/Cargo.toml",
         "sdk/toolchain/tests/rust-smoke/Cargo.toml",
         "sdk/toolchain/tests/std-smoke/Cargo.toml",

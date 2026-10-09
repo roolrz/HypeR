@@ -42,7 +42,7 @@ owns its message payload semantics, and the SDK imposes no generic IPC wire
 envelope.
 
 The initial runtime reuses the C startup parser and selected architecture syscall veneer from
-`sdk/lib`. This preserves one machine entry contract while the Rust API is
+`lib/hyper`. This preserves one machine entry contract while the Rust API is
 established. Loader/CRT startup reserves a private heap VMAR before application entry, and
 `hyper-rt` installs the `libhyper` process heap as Rust's global allocator.
 Applications can use `alloc` without implementing an allocator:
@@ -64,7 +64,7 @@ mapped regions, and preserves the original buffer when reallocation fails.
 Use fallible collection APIs such as `try_reserve` where OOM is recoverable;
 infallible allocation failure follows Rust's allocation-error path and the
 runtime's aborting panic policy. Memory use remains charged to the process's
-resource domain. See [the C heap contract](../lib/README.md#process-heap).
+resource domain. See [the C heap contract](../hyper/README.md#process-heap).
 
 `hyper-cargo` in freestanding mode rebuilds `core` and `alloc` as PIC for Native PIE linking using
 the pinned compiler's `rust-src`. The driver locally enables Cargo's unstable
@@ -77,14 +77,15 @@ lockfile's dependencies before offline application builds.
 The source workspace supports formatting, linting, and host-side tests:
 
 ```sh
-cargo fmt --manifest-path sdk/rust/Cargo.toml --all -- --check
-cargo clippy --manifest-path sdk/rust/Cargo.toml \
+cargo fmt --manifest-path lib/rust/Cargo.toml --all -- --check
+cargo clippy --manifest-path lib/rust/Cargo.toml \
   --workspace --target aarch64-unknown-none --lib -- -D warnings
-cargo test --manifest-path sdk/rust/Cargo.toml -p hyper-os -p hyper-sys
+cargo test --manifest-path lib/rust/Cargo.toml -p hyper-os -p hyper-sys
 ```
 
 Applications do not use source-tree path dependencies. SDK assembly installs
-these crates below `share/hyper/rust`, and `bin/hyper-cargo` supplies the
+these crates below `share/hyper/rust`, relocates the workspace's ABI dependency
+to the installed `share/hyper/abi`, and `bin/hyper-cargo` supplies the
 installed paths, target, linker, and PIE model. Repository builds select
 Cargo's `--offline` mode; SDK consumers remain free to use separately reviewed
 dependencies.
@@ -101,7 +102,7 @@ ordinary `main()`, standard streams, startup arguments, and clap support.
 `hyper-cargo` selects this mode by default. Existing `hyper_rt::entry!`
 applications select `HYPER_RUST_STD=0`; std applications using this crate
 enable its `std` feature and use ordinary `main()`. See the
-[Native std guide](../toolchain/rust-std/README.md) for the support matrix,
+[Native std guide](../../sdk/toolchain/rust-std/README.md) for the support matrix,
 build contract, and Native thread and atomic-wait backend.
 
 Native std programs can call `hyper_rt::process::startup()` once to claim their

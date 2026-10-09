@@ -45,4 +45,4 @@ set_target_properties(hyper_loader PROPERTIES
     SUFFIX ""
 )
 
-install(TARGETS hyper_loader RUNTIME DESTINATION lib)
+install(TARGETS hyper_loader RUNTIME DESTINATION lib64)

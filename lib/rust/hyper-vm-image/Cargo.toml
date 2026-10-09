@@ -2,16 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "hyper-sys"
+name = "hyper-vm-image"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Raw syscall and runtime bindings for HypeR Native applications"
+# Test cases in tests/ are included by their owning implementation modules.
+autotests = false
+description = "Bounded FIT parsing and guest boot metadata for HypeR VMMs"
 
 [dependencies]
-hyper-abi = { path = "../../abi" }
+hyper-abi.workspace = true
 
 [lints]
 workspace = true

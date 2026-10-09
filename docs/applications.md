@@ -336,7 +336,7 @@ Ctrl-D as EOF without closing the shared endpoint. Native channel readers such
 as `vmm console` receive normalized line endings and the unchanged Ctrl-D byte. This interactive path is not a
 binary serial tunnel or a full POSIX tty. Ordinary pipes and files preserve all
 bytes. Default std child-process inheritance preserves terminal provenance.
-See [the runtime contract](../sdk/lib/README.md) for compatibility details.
+See [the runtime contract](../lib/hyper/README.md) for compatibility details.
 
 `make test-console ARCH=aarch64` checks typeahead bursts, terminal EOF and CRLF,
 std child inheritance and binary pipes, randomized individually echoed keystrokes,

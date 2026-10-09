@@ -128,7 +128,7 @@ hint after the loader's `[0x20000000, 0xe0000000)` library range. The returned
 base is authoritative. Backing is mapped only as allocations need it; overflow
 regions have independent VMARs, so this reservation is not a heap size limit.
 The kernel still owns the root address space and
-resource accounting; allocator policy lives in `sdk/lib`.
+resource accounting; allocator policy lives in `lib/hyper`.
 
 Executable bytes are copied into writable unpublished staging memory,
 relocated, then snapshotted into immutable instruction-coherent storage before

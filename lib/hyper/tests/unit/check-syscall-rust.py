@@ -14,24 +14,24 @@ def main():
     parser.add_argument("--rustc", required=True)
     args = parser.parse_args()
     unit = Path(__file__).resolve().parent
-    sdk = unit.parents[2]
+    root = unit.parents[3]
     with tempfile.TemporaryDirectory(prefix="hyper-transport-") as temporary:
         out = Path(temporary)
 
         def run(*command):
-            subprocess.run(command, check=True, cwd=sdk.parent)
+            subprocess.run(command, check=True, cwd=root)
 
         abi = out / "libhyper_abi.rlib"
         raw = out / "libhyper_sys.rlib"
         run(args.rustc, "--edition=2024", "--crate-type=rlib", "--crate-name=hyper_abi",
-            str(sdk / "abi/src/lib.rs"), "-o", str(abi))
+            str(root / "sdk/abi/src/lib.rs"), "-o", str(abi))
         run(args.rustc, "--edition=2024", "--crate-type=rlib", "--crate-name=hyper_sys",
-            str(sdk / "rust/hyper-sys/src/lib.rs"), "--extern", f"hyper_abi={abi}", "-o", str(raw))
+            str(root / "lib/rust/hyper-sys/src/lib.rs"), "--extern", f"hyper_abi={abi}", "-o", str(raw))
         objects = []
-        for source in [unit / "syscall-capture.c", sdk / "lib/src/syscall.c"]:
+        for source in [unit / "syscall-capture.c", root / "lib/hyper/src/syscall.c"]:
             obj = out / (source.stem + ".o")
             run(args.cc, "-std=c17", "-Wall", "-Wextra", "-Werror", "-UNDEBUG",
-                f"-I{sdk / 'abi/include'}", f"-I{sdk / 'lib/include'}",
+                f"-I{root / 'sdk/abi/include'}", f"-I{root / 'lib/hyper/include'}",
                 "-c", str(source), "-o", str(obj))
             objects.extend(["-C", f"link-arg={obj}"])
         binary = out / "syscall-rust"

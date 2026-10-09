@@ -9,7 +9,7 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
-// Includes the main image and interpreter, as in sdk/loader's object table.
+// Includes the main image and interpreter, as in lib/loader's object table.
 const MAX_IMAGES: usize = 16;
 
 #[derive(Debug)]

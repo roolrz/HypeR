@@ -12,6 +12,9 @@ license = "Apache-2.0"
 repository = "https://github.com/roolrz/HypeR"
 publish = false
 
+[workspace.dependencies]
+hyper-abi = { path = "../../sdk/abi" }
+
 [workspace.lints.clippy]
 doc_markdown = "deny"
 empty_docs = "deny"

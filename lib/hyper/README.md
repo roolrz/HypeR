@@ -144,7 +144,7 @@ directory is injected explicitly so the runtime does not carry a second ABI
 definition.
 
 ```sh
-cmake -S sdk/lib -B target/sdk-lib/aarch64 \
+cmake -S lib/hyper -B target/sdk-lib/aarch64 \
   -DCMAKE_C_COMPILER=clang \
   -DCMAKE_ASM_COMPILER=clang \
   -DCMAKE_AR=llvm-ar \
@@ -167,7 +167,7 @@ Library tests under `tests/unit` are host-executed unit tests for implementation
 semantics. They can be run independently of the target archive:
 
 ```sh
-cmake -S sdk/lib/tests/unit -B target/sdk-lib/unit \
+cmake -S lib/hyper/tests/unit -B target/sdk-lib/unit \
   -DCMAKE_C_COMPILER=clang \
   -DHYPER_ABI_INCLUDE_DIR="$PWD/sdk/abi/include"
 cmake --build target/sdk-lib/unit
@@ -198,7 +198,7 @@ Licensed under the Apache License, Version 2.0. See
 The SDK also installs `libhyper-std.a` and `crt-std.o` for ordinary Rust
 applications. Shared startup, stream buffering, and key-based thread-local
 storage live in `libhyper`; the std archive carries stateless adapters.
-See the [std runtime contract](../toolchain/rust-std/README.md) and the
+See the [std runtime contract](../../sdk/toolchain/rust-std/README.md) and the
 [`hyper/std.h`](include/hyper/std.h) / [`hyper/thread.h`](include/hyper/thread.h)
 interfaces. These are SDK interfaces, not additions to the kernel syscall ABI.
 

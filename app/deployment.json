@@ -303,8 +303,8 @@
       ]
     },
     {
-      "source": "{sdk}/lib/ld-hyper-{arch}.so",
-      "destination": "lib64/{arch}-hyper-hyper/ld-hyper-{arch}.so",
+      "source": "{sdk}/lib64/ld-hyper-{arch}.so",
+      "destination": "lib64/ld-hyper-{arch}.so",
       "mode": "0755",
       "profiles": [
         "system",

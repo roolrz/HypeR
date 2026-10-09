@@ -84,7 +84,9 @@ fn reports_incompatible_and_malformed_libraries() -> io::Result<()> {
 fn interpreter_is_reported_once_and_missing_interpreter_is_an_error() -> io::Result<()> {
     let files = Directory::new()?;
     let loader = files.add("ld-hyper-aarch64.so", &[])?;
-    files.add("libruntime.so", &[])?;
+    let libraries = files.0.join("aarch64-hyper-hyper");
+    fs::create_dir(&libraries)?;
+    files.add("aarch64-hyper-hyper/libruntime.so", &[])?;
     let root = files.0.join("program");
     fs::write(
         &root,
@@ -95,12 +97,12 @@ fn interpreter_is_reported_once_and_missing_interpreter_is_an_error() -> io::Res
             183,
         ),
     )?;
-    let graph = inspect(&root, Some(&files.0), false)?;
+    let graph = inspect(&root, Some(&libraries), false)?;
     assert_eq!(graph.objects.len(), 3);
     assert!(graph.objects[1].interpreter);
     assert!(!graph.failed());
     fs::remove_file(loader)?;
-    assert!(inspect(&root, Some(&files.0), false)?.failed());
+    assert!(inspect(&root, Some(&libraries), false)?.failed());
     Ok(())
 }
 
