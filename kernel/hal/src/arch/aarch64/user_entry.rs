@@ -32,9 +32,7 @@ struct MachineContext {
     program_counter: u64,
     processor_state: u64,
     stack_pointer: u64,
-    simd: [[u64; 2]; 32],
-    fpcr: u64,
-    fpsr: u64,
+    fp: super::fp::State,
     tpidr_el0: u64,
     tpidrro_el0: u64,
     thread: u64,
@@ -59,9 +57,7 @@ const _: () = {
     assert!(
         offset_of!(MachineContext, stack_pointer) == registers::USER_CONTEXT_SP_OFFSET as usize
     );
-    assert!(offset_of!(MachineContext, simd) == registers::USER_CONTEXT_SIMD_OFFSET as usize);
-    assert!(offset_of!(MachineContext, fpcr) == registers::USER_CONTEXT_FPCR_OFFSET as usize);
-    assert!(offset_of!(MachineContext, fpsr) == registers::USER_CONTEXT_FPSR_OFFSET as usize);
+    assert!(offset_of!(MachineContext, fp) == registers::USER_CONTEXT_FP_OFFSET as usize);
     assert!(
         offset_of!(MachineContext, tpidr_el0) == registers::USER_CONTEXT_TPIDR_EL0_OFFSET as usize
     );
@@ -131,9 +127,7 @@ impl UserContext {
                 // explicit context ownership and contained return paths.
                 processor_state: native_processor_state(),
                 stack_pointer: stack,
-                simd: [[0; 2]; 32],
-                fpcr: 0,
-                fpsr: 0,
+                fp: super::fp::State::zeroed(),
                 tpidr_el0: tls,
                 tpidrro_el0: 0,
                 thread: 0,
@@ -532,6 +526,20 @@ pub(super) fn handle_synchronous(
     Ok(SynchronousAction::Unwind)
 }
 
+/// Admits FP only for the exact active Native run, then retries the instruction.
+pub(super) fn restore_fp(frame: &mut ExceptionFrame, generation: u64) -> Result<(), Error> {
+    let active = active_run(generation)?;
+    // SAFETY: The acquired publication identifies this CPU's uniquely pinned
+    // context; IRQ masking excludes any concurrent run-state transition.
+    let context = unsafe { active.context.as_ref() };
+    if context.run_generation != generation
+        || context.state != registers::USER_CONTEXT_STATE_RUNNING
+    {
+        return Err(Error::InvalidMachineState);
+    }
+    super::fp::restore(&context.fp, frame).map_err(|()| Error::InvalidMachineState)
+}
+
 /// Copies an interrupted native context before a kernel-selected unwind.
 pub(super) fn capture_interrupt(frame: &ExceptionFrame, generation: u64) -> Result<(), Error> {
     let active = active_run(generation)?;
@@ -623,9 +631,7 @@ fn capture_frame(
     context.program_counter = frame.elr;
     context.processor_state = frame.spsr;
     context.stack_pointer = frame.sp_el0;
-    context.simd = frame.simd;
-    context.fpcr = frame.fpcr;
-    context.fpsr = frame.fpsr;
+    super::fp::save(&mut context.fp, frame);
     // SAFETY: These thread registers are readable at EL2. The native run is
     // stopped and this context exclusively owns their lower-EL values.
     unsafe {

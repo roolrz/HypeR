@@ -172,7 +172,7 @@ without an IRQ. Logs are `kernel/target/smmuv3-qemu.log` and
 ```sh
 cd kernel
 python3 tests/qemu/verify-smmuv3.py qemu-system-aarch64 \
-  target/aarch64-unknown-none/kernel/hyper.img --cpus 4 \
+  target/aarch64-unknown-none-softfloat/kernel/hyper.img --cpus 4 \
   --trace target/smmuv3-trace.log
 ```
 

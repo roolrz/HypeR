@@ -140,8 +140,8 @@ Useful targets:
 The default AArch64 image is written to:
 
 ```text
-kernel/target/aarch64-unknown-none/kernel/hyper
-kernel/target/aarch64-unknown-none/kernel/hyper.img
+kernel/target/aarch64-unknown-none-softfloat/kernel/hyper
+kernel/target/aarch64-unknown-none-softfloat/kernel/hyper.img
 ```
 
 `make release` strips debugger-only sections from the canonical ELF without

@@ -83,6 +83,9 @@ pub(super) fn run() -> Result<(), Error> {
     }
     exercise(&BUSY)?;
     exercise(&TIMER)?;
+    exercise_bytes(super::native_user_entry::fp_guest_program(false))?;
+    exercise_bytes(super::native_user_entry::fp_guest_program(true))?;
+    crate::pr_info!("HypeR test: lazy FP guest preemption, timer wait and migration passed");
     crate::pr_info!("HypeR test: running and timer-waiting vCPU migration and retirement passed");
     Ok(())
 }
@@ -92,9 +95,12 @@ fn exercise(program: &[u32]) -> Result<(), Error> {
     for (bytes, instruction) in code.chunks_exact_mut(4).zip(program) {
         bytes.copy_from_slice(&instruction.to_le_bytes());
     }
+    exercise_bytes(&code[..program.len() * 4])
+}
+
+fn exercise_bytes(code: &[u8]) -> Result<(), Error> {
     let (prepared, domain, counter) =
-        super::vm_registry::prepare_migration_guest(&code[..program.len() * 4])
-            .map_err(Error::Fixture)?;
+        super::vm_registry::prepare_migration_guest(code).map_err(Error::Fixture)?;
     let installed = prepared.install().map_err(Error::Registry)?;
     let running = installed.start_boot_for_test().map_err(Error::Installed)?;
     let thread = running.thread();
@@ -103,7 +109,7 @@ fn exercise(program: &[u32]) -> Result<(), Error> {
         // throughout the closure. Guest accesses are same-width STLR stores;
         // only atomic host loads occur until all observation has finished.
         let counter = unsafe { &*counter };
-        wait(|| Ok(counter.load(Ordering::Acquire) > 0))?;
+        wait(|| counter_progress(counter, 0))?;
         verify_affinity_contract(thread)?;
         let width = crate::hal::vm::guest_translation_identifier_bits()
             .map_err(|_| Error::AffinityContract)?;
@@ -124,7 +130,7 @@ fn exercise(program: &[u32]) -> Result<(), Error> {
             // Sample only after handoff completion. A scheduler-field change
             // alone cannot pass: guest instructions must run on the new CPU.
             let previous = counter.load(Ordering::Acquire);
-            wait(|| Ok(counter.load(Ordering::Acquire) > previous))?;
+            wait(|| counter_progress(counter, previous))?;
             verify_affinity_contract(thread)?;
         }
         // Also exercise stop against one final in-flight migration. Teardown
@@ -187,4 +193,12 @@ fn wait(mut ready: impl FnMut() -> Result<bool, Error>) -> Result<(), Error> {
     } else {
         Err(Error::Timeout)
     }
+}
+
+fn counter_progress(counter: &core::sync::atomic::AtomicU64, previous: u64) -> Result<bool, Error> {
+    let current = counter.load(Ordering::Acquire);
+    if current == u64::MAX {
+        return Err(Error::Installed("guest FP register corruption"));
+    }
+    Ok(current > previous)
 }

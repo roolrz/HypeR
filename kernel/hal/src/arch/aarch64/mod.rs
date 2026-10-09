@@ -9,6 +9,7 @@ mod cache;
 mod context;
 mod exception;
 mod exposed_copy;
+mod fp;
 mod gic_cpu_interface;
 mod guest_cpu_contract;
 mod guest_cpu_model;
@@ -434,3 +435,6 @@ pub(crate) fn guest_translation_identifier_bits() -> u8 {
 }
 
 pub(crate) use stage2::invalidate_namespace_local as invalidate_guest_translation_namespace_local;
+
+#[cfg(all(target_arch = "aarch64", feature = "kernel-self-test"))]
+pub(crate) use fp::fp_state_counts_for_test;

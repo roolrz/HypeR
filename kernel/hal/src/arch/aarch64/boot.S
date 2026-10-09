@@ -180,8 +180,8 @@ aarch64_boot_initialize_el2:
     b.eq    aarch64_unsupported_vhe
     tst     x2, #HCR_EL2_TGE
     b.eq    aarch64_unsupported_vhe
-    ldr     x2, =CPACR_EL1_FPEN_ALL
-    msr     cpacr_el1, x2
+    // Optional architectural state remains trapped in the soft-float host.
+    msr     cptr_el2, xzr
     msr     hstr_el2, xzr
     msr     mdcr_el2, xzr
     msr     vttbr_el2, xzr
@@ -190,7 +190,8 @@ aarch64_boot_initialize_el2:
     msr     cnthctl_el2, xzr
     msr     cnthp_ctl_el2, xzr
     isb
-    ret
+    // Clear firmware state before any untrusted lower world can run.
+    b       aarch64_fp_reset
 .size aarch64_boot_initialize_el2, . - aarch64_boot_initialize_el2
 
 /* Clears Rust static storage and installs the early fault vectors. */

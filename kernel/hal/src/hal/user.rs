@@ -807,3 +807,9 @@ pub unsafe fn copy_to_exposed(
         Err(ExposedCopyError)
     }
 }
+
+/// Returns first-use restores and boundary saves for the `AArch64` runtime probes.
+#[cfg(all(CONFIG_ARCH_AARCH64, feature = "kernel-self-test"))]
+pub fn fp_state_counts_for_test() -> (usize, usize) {
+    crate::arch::user::fp_state_counts_for_test()
+}

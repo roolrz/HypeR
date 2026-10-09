@@ -26,6 +26,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=hal/src/arch/aarch64/boot.S");
     println!("cargo:rerun-if-changed=hal/src/arch/aarch64/vectors.S");
     println!("cargo:rerun-if-changed=hal/src/arch/aarch64/context.S");
+    println!("cargo:rerun-if-changed=hal/src/arch/aarch64/fp.S");
     println!("cargo:rerun-if-changed=hal/src/arch/aarch64/registers.rs");
     println!("cargo:rerun-if-changed=hal/src/arch/aarch64/linker.ld");
     println!("cargo:rerun-if-changed=hal/src/arch/riscv64/boot.S");
@@ -55,13 +56,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let header_path = output_directory.join("asm_constants.h");
     let (clang_target, constants, sources): ArchitectureBuild<'_> = match target.as_str() {
-        "aarch64-unknown-none" => (
+        "aarch64-unknown-none-softfloat" => (
             "aarch64-none-elf",
             aarch64_registers::ASM_CONSTANTS,
             &[
                 ("hal/src/arch/aarch64/boot.S", "aarch64_boot.o"),
                 ("hal/src/arch/aarch64/vectors.S", "aarch64_vectors.o"),
                 ("hal/src/arch/aarch64/context.S", "aarch64_context.o"),
+                ("hal/src/arch/aarch64/fp.S", "aarch64_fp.o"),
             ],
         ),
         "riscv64imac-unknown-none-elf" => (
@@ -105,6 +107,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             &object_path,
         )?;
         println!("cargo:rustc-link-arg-bin=hyper={}", object_path.display());
+    }
+    if target == "aarch64-unknown-none-softfloat"
+        && env::var_os("CARGO_FEATURE_KERNEL_SELF_TEST").is_some()
+    {
+        let source = "tests/kernel/native_user_entry/fp.S";
+        println!("cargo:rerun-if-changed={source}");
+        let object = output_directory.join("aarch64_fp_probes.o");
+        compile_assembly(clang_target, None, source, &output_directory, &object)?;
+        println!("cargo:rustc-link-arg-bin=hyper={}", object.display());
     }
     Ok(())
 }
