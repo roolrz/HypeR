@@ -5,11 +5,13 @@
 /*
  * Bounded HypeR Native runtime linker.
  *
- * The kernel installs the main image and this interpreter. This file owns all
+ * The userspace loader maps the main image and this interpreter. This file owns all
  * dependency lookup and symbol policy. It intentionally supports only eager
  * Native RELA/RELR relocation and capability-relative library lookup.
  */
 
+#include <hyper/launch.h>
+#include <hyper/relocate.h>
 #include <hyper/dlfcn.h>
 #include <hyper/syscall.h>
 #include <stddef.h>
@@ -74,54 +76,6 @@
 #define AT_ENTRY 9
 
 typedef struct {
-	unsigned char ident[EI_NIDENT];
-	uint16_t type;
-	uint16_t machine;
-	uint32_t version;
-	uint64_t entry;
-	uint64_t phoff;
-	uint64_t shoff;
-	uint32_t flags;
-	uint16_t ehsize;
-	uint16_t phentsize;
-	uint16_t phnum;
-	uint16_t shentsize;
-	uint16_t shnum;
-	uint16_t shstrndx;
-} Elf64_Ehdr;
-
-typedef struct {
-	uint32_t type;
-	uint32_t flags;
-	uint64_t offset;
-	uint64_t vaddr;
-	uint64_t paddr;
-	uint64_t filesz;
-	uint64_t memsz;
-	uint64_t align;
-} Elf64_Phdr;
-
-typedef struct {
-	int64_t tag;
-	uint64_t value;
-} Elf64_Dyn;
-
-typedef struct {
-	uint32_t name;
-	unsigned char info;
-	unsigned char other;
-	uint16_t section;
-	uint64_t value;
-	uint64_t size;
-} Elf64_Sym;
-
-typedef struct {
-	uint64_t offset;
-	uint64_t info;
-	int64_t addend;
-} Elf64_Rela;
-
-typedef struct {
 	const char *strings;
 	uint64_t string_size;
 	const Elf64_Sym *symbols;
@@ -172,7 +126,7 @@ static size_t string_length(const char *value, size_t maximum);
 
 static void report_startup_failure(void)
 {
-	static const char prefix[] = "HypeR loader: ";
+	static const char prefix[] = "HypeR dynamic-loader: ";
 	static const char fallback[] = "startup failed";
 	char output[sizeof(prefix) + MAX_NAME_BYTES + 1];
 	if (diagnostic_console == 0) {
@@ -1242,7 +1196,7 @@ static int register_interpreter(uintptr_t base)
 	for (size_t index = 0; index < header->phnum; ++index) {
 		interpreter->owned_phdr[index] = source[index];
 	}
-	copy_name(interpreter->name, HYPER_LOADER_NAME);
+	copy_name(interpreter->name, HYPER_DYNAMIC_LOADER_NAME);
 	interpreter->base = base;
 	interpreter->vmar = root_vmar;
 	interpreter->phdr = interpreter->owned_phdr;
@@ -1298,10 +1252,10 @@ static int initialize_main(const uintptr_t *stack)
 		case AT_ENTRY:
 			entry = cursor[1];
 			break;
-		case HYPER_NATIVE_AUXV_STARTUP_HANDLES:
+		case HYPER_AUXV_STARTUP_HANDLES:
 			handles = cursor[1];
 			break;
-		case HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT:
+		case HYPER_AUXV_STARTUP_HANDLE_COUNT:
 			handle_count = cursor[1];
 			break;
 		default:
@@ -1401,8 +1355,12 @@ static _Noreturn void enter_application(const uintptr_t *stack)
 	hyper_process_exit(HYPER_NATIVE_STATUS_BAD_STATE);
 }
 
+extern const Elf64_Ehdr __ehdr_start __attribute__((visibility("hidden")));
+
 _Noreturn void __hyper_rtld_start(const uintptr_t *stack)
 {
+	if (!hyper_elf_self_relocate(&__ehdr_start))
+		hyper_process_exit(HYPER_NATIVE_STATUS_NOT_SUPPORTED);
 	if (!initialize_main(stack)) {
 		report_startup_failure();
 		hyper_process_exit(HYPER_NATIVE_STATUS_NOT_SUPPORTED);

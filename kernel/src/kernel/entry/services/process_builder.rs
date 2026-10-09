@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 
 struct ChargedBuilderInput {
     bytes: Vec<u8>,
-    _charge: CommittedCharge,
+    _charge: Option<CommittedCharge>,
 }
 
 impl ChargedBuilderInput {
@@ -34,6 +34,12 @@ impl DeferredProcessServices<'_> {
         let length = input.map_or(0, UserSlice::length);
         let length =
             usize::try_from(length).map_err(|_| ProcessBuilderServiceError::InvalidInput)?;
+        if length == 0 {
+            return Ok(ChargedBuilderInput {
+                bytes: Vec::new(),
+                _charge: None,
+            });
+        }
         let charge = self
             .process
             .resource_domain()
@@ -53,7 +59,7 @@ impl DeferredProcessServices<'_> {
         }
         Ok(ChargedBuilderInput {
             bytes,
-            _charge: charge,
+            _charge: Some(charge),
         })
     }
 }
@@ -91,33 +97,16 @@ impl ProcessBuilderServices for DeferredProcessServices<'_> {
         Ok(())
     }
 
-    fn add_process_builder_argument(
+    fn set_process_builder_data(
         &self,
         builder: HandleValue,
-        argument: Option<UserSlice>,
+        data: Option<UserSlice>,
     ) -> Result<(), ProcessBuilderServiceError> {
         let builder = self
             .process
             .resolve_handle::<ProcessBuilder>(builder, Rights::WRITE)?;
-        let bytes = self.copy_builder_input(argument)?;
-        let argument = core::str::from_utf8(bytes.as_bytes())
-            .map_err(|_| ProcessBuilderServiceError::InvalidInput)?;
-        builder.object().add_argument(argument)?;
-        Ok(())
-    }
-
-    fn add_process_builder_environment(
-        &self,
-        builder: HandleValue,
-        environment: Option<UserSlice>,
-    ) -> Result<(), ProcessBuilderServiceError> {
-        let builder = self
-            .process
-            .resolve_handle::<ProcessBuilder>(builder, Rights::WRITE)?;
-        let bytes = self.copy_builder_input(environment)?;
-        let environment = core::str::from_utf8(bytes.as_bytes())
-            .map_err(|_| ProcessBuilderServiceError::InvalidInput)?;
-        builder.object().add_environment(environment)?;
+        let bytes = self.copy_builder_input(data)?;
+        builder.object().set_data(bytes.as_bytes())?;
         Ok(())
     }
 
@@ -176,10 +165,10 @@ impl ProcessBuilderServices for DeferredProcessServices<'_> {
     fn start_process_builder(
         &self,
         builder: HandleValue,
-    ) -> Result<HandleValue, ProcessBuilderServiceError> {
+    ) -> Result<[HandleValue; 2], ProcessBuilderServiceError> {
         let started = crate::kernel::process::start_process_builder(self.process, builder)
             .map_err(ProcessBuilderServiceError::Start)?;
-        Ok(started.supervisor_handle())
+        Ok([started.supervisor_handle(), started.startup_channel()])
     }
 
     fn abort_process_builder(

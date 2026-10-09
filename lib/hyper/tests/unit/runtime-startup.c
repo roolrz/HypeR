@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2026 roolrz
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <hyper/launch.h>
 #include <hyper/heap.h>
 #include <hyper/stack.h>
 #include <hyper/system.h>
@@ -19,7 +20,7 @@ struct hyper_stack {
 
 static _Alignas(16) unsigned char final_stack[256 * 1024];
 static jmp_buf returned;
-static unsigned switched, unmapped, destroyed;
+static unsigned switched, unmapped, destroyed, acknowledged, closed;
 static const uintptr_t *final_vector;
 static int64_t expected_failure;
 static struct hyper_stack initial = {123};
@@ -101,8 +102,13 @@ _Noreturn void hyper_process_exit(int64_t status)
 
 hyper_native_status_t hyper_vmar_unmap(uint64_t handle, uintptr_t base, size_t size)
 {
-	assert(switched && !unmapped++ && !destroyed);
-	assert(handle == 22 && base == 0xf17c1000 && size == 0x40000);
+	assert(switched && !acknowledged);
+	if (unmapped++ == 0) {
+		assert(!destroyed && handle == 22 && base == 0xf17c1000 && size == 0x40000);
+	} else {
+		assert(destroyed && unmapped == 2 && handle == 11 && base == 0x100000 &&
+		       size == 0x5000);
+	}
 	return HYPER_NATIVE_STATUS_OK;
 }
 
@@ -110,6 +116,21 @@ hyper_native_status_t hyper_vmar_destroy(uint64_t handle)
 {
 	assert(handle == 22 && unmapped && !destroyed++);
 	return HYPER_NATIVE_STATUS_OK;
+}
+
+hyper_native_status_t hyper_byte_channel_write(hyper_native_handle_t channel, const void *data,
+					       size_t size)
+{
+	assert(channel == 44 && size == sizeof(hyper_launch_result_t));
+	assert(switched && unmapped == 2 && destroyed && !acknowledged++ && !closed);
+	assert(((const hyper_launch_result_t *)data)->status == 0);
+	return 0;
+}
+
+hyper_native_status_t hyper_handle_close(hyper_native_handle_t handle)
+{
+	assert(handle == 44 && acknowledged && !closed++);
+	return 0;
 }
 
 _Noreturn void __hyper_runtime_switch_stack(uintptr_t sp, void (*entry)(const uintptr_t *))
@@ -123,7 +144,7 @@ _Noreturn void __hyper_runtime_switch_stack(uintptr_t sp, void (*entry)(const ui
 
 static void entered(const uintptr_t *stack)
 {
-	assert(switched && unmapped && destroyed);
+	assert(switched && unmapped == 2 && destroyed && acknowledged && closed);
 	final_vector = stack;
 	longjmp(returned, 1);
 }
@@ -149,16 +170,22 @@ int main(void)
 		0,
 		(uintptr_t)environment,
 		0,
-		HYPER_NATIVE_AUXV_STARTUP_HANDLES,
+		HYPER_AUXV_STARTUP_HANDLES,
 		(uintptr_t)handles,
-		HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT,
+		HYPER_AUXV_STARTUP_HANDLE_COUNT,
 		3,
-		HYPER_NATIVE_AUXV_INITIAL_STACK_BASE,
+		HYPER_AUXV_INITIAL_STACK_BASE,
 		0xf1000000,
-		HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY,
+		HYPER_AUXV_INITIAL_STACK_CAPACITY,
 		0x800000,
-		HYPER_NATIVE_AUXV_INITIAL_STACK_SIZE,
+		HYPER_AUXV_INITIAL_STACK_SIZE,
 		0x40000,
+		HYPER_AUXV_LOADER_BASE,
+		0x100000,
+		HYPER_AUXV_LOADER_SIZE,
+		0x5000,
+		HYPER_AUXV_STARTUP_CHANNEL,
+		44,
 		6,
 		HYPER_NATIVE_PAGE_SIZE,
 		0,
@@ -175,7 +202,7 @@ int main(void)
 			else if (mode == 1)
 				words[13] = UINTPTR_MAX; /* Overflow/misalignment. */
 			else
-				words[14] = HYPER_NATIVE_AUXV_INITIAL_STACK_BASE;
+				words[14] = HYPER_AUXV_INITIAL_STACK_BASE;
 			hyper_runtime_start(words, entered);
 		}
 		int status;
@@ -193,21 +220,21 @@ int main(void)
 	       memcmp(view->arguments[1], option, sizeof(option)) == 0);
 	assert(view->environment_count == 1 && view->environment[0] != environment &&
 	       memcmp(view->environment[0], environment, sizeof(environment)) == 0);
-	assert(view->auxiliary_count == 6);
+	assert(view->auxiliary_count == 9);
 	assert(view->auxiliary[view->auxiliary_count].key == 0);
 	assert(view->auxiliary[view->auxiliary_count].value == 0);
 	const hyper_auxiliary_entry_t *original_aux = (const hyper_auxiliary_entry_t *)&words[6];
 	for (size_t i = 0; i < view->auxiliary_count; ++i) {
 		assert(view->auxiliary[i].key == original_aux[i].key);
-		if (view->auxiliary[i].key == HYPER_NATIVE_AUXV_STARTUP_HANDLES)
+		if (view->auxiliary[i].key == HYPER_AUXV_STARTUP_HANDLES)
 			assert(view->auxiliary[i].value == (uintptr_t)view->handles);
-		else if (view->auxiliary[i].key == HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT)
+		else if (view->auxiliary[i].key == HYPER_AUXV_STARTUP_HANDLE_COUNT)
 			assert(view->auxiliary[i].value == view->handle_count);
-		else if (view->auxiliary[i].key == HYPER_NATIVE_AUXV_INITIAL_STACK_BASE)
+		else if (view->auxiliary[i].key == HYPER_AUXV_INITIAL_STACK_BASE)
 			assert(view->auxiliary[i].value == (uintptr_t)final_stack +
 								   sizeof(final_stack) -
 								   256 * 1024 * 1024 - 4096);
-		else if (view->auxiliary[i].key == HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY)
+		else if (view->auxiliary[i].key == HYPER_AUXV_INITIAL_STACK_CAPACITY)
 			assert(view->auxiliary[i].value == 256 * 1024 * 1024);
 		else
 			assert(view->auxiliary[i].value == original_aux[i].value);

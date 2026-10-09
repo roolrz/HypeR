@@ -75,9 +75,8 @@ The current foundation includes:
   scheduler-backed sleep, with Rust std spawn/join, TLS cleanup and detached
   stack reclamation through the shared runtime;
 - a writable kernel ramfs with rooted traversal, links, rename, metadata and
-  advisory locks, optional RTC-backed UTC, a strict AArch64/RISC-V ELF64 process
-  loader, and
-  capability-relative userspace runtime linker for Native `/init` and its
+  advisory locks, optional RTC-backed UTC, a small kernel bootstrap contract,
+  an AArch64/RISC-V userspace ELF64 mapper, and a capability-relative runtime linker for Native `/init` and its
   services, with eager relocation, W^X/RELRO enforcement, guarded stacks, and
   scheduler-owned Process publication;
 - immutable file/VMO snapshots and private mappings with copy-on-write or

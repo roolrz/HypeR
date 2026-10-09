@@ -30,6 +30,7 @@ set(HYPER_RUNTIME_SOURCES
     src/system.c
     src/runtime.c
     src/bootstrap.c
+    src/launch.c
     src/arch/${HYPER_ARCH}/stack.S
     src/capabilities.c
     src/directory.c

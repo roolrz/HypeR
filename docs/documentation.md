@@ -40,8 +40,9 @@ references into one GitHub Pages artifact. The intended public address is
   signatures of undocumented items, but the pipeline does not invent prose
   for them or enforce a documentation-coverage quota.
 - Doxygen publishes standard C documentation comments from the ABI headers,
-  C runtime and loader. Ordinary C comments are not converted and undocumented
-  functions do not receive generated descriptions.
+  C runtime, userspace executable loader and dynamic loader. Ordinary C comments
+  are not converted and undocumented functions do not receive generated
+  descriptions.
 - Markdown source-code links resolve to files at the built Git revision;
   guide-to-guide links remain inside the website. Mermaid fences render using
   the pinned Mermaid browser script. Guides and API references have their own

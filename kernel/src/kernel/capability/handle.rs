@@ -173,10 +173,6 @@ pub(crate) struct HandleScanCursor {
 }
 
 impl HandleScanCursor {
-    pub(crate) const fn start() -> Self {
-        Self { next_slot: 0 }
-    }
-
     pub(crate) const fn from_token(token: usize) -> Self {
         Self { next_slot: token }
     }

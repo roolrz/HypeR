@@ -392,21 +392,9 @@ hyper_native_status_t hyper_process_builder_set_name(hyper_native_handle_t build
 		.status;
 }
 
-hyper_native_status_t hyper_process_builder_add_argument(hyper_native_handle_t builder,
-							 const void *argument, size_t argument_size)
+hyper_native_status_t hyper_process_builder_set_data(hyper_native_handle_t builder, const void *data, size_t size)
 {
-	return hyper_native_call6(HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT, builder,
-				  (uintptr_t)argument, argument_size, 0, 0, 0)
-		.status;
-}
-
-hyper_native_status_t hyper_process_builder_add_environment(hyper_native_handle_t builder,
-							    const void *environment,
-							    size_t environment_size)
-{
-	return hyper_native_call6(HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ENVIRONMENT, builder,
-				  (uintptr_t)environment, environment_size, 0, 0, 0)
-		.status;
+	return hyper_native_call6(HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_DATA, builder, (uintptr_t)data, size, 0, 0, 0).status;
 }
 
 hyper_native_status_t hyper_process_builder_set_affinity(hyper_native_handle_t builder,

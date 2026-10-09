@@ -64,7 +64,8 @@ require Rust 1.97.1. Upgrading Rust requires reviewing these anchors and
 rerunning the Native acceptance suite, not merely changing the version pin.
 
 The platform adapter contains Rust-private type conversions. Its C calls go
-through `libhyper-std.a`, which contains stateless std-specific translation.
+through `libhyper-std.a`, which contains std-specific translation and per-spawn
+argument/environment staging.
 The shared `libhyper` owns startup state, the current directory, input buffering,
 the heap, and TLS primitives. Thus separately linked shims do not create separate process
 registries. The bridge headers and Rust adapter are versioned with the SDK;
@@ -187,7 +188,10 @@ addition to the filesystem authority needed to open the executable. Missing
 authority is an error; std does not acquire ambient capabilities.
 
 `Command` supports PATH search, arguments, environment overrides, a delegated
-child cwd and Native lifecycle observation. Its cwd is resolved through
+child cwd and Native lifecycle observation. The PAL stages arguments/environment
+as opaque launch data. `spawn` waits for the child's loader/runtime result;
+failure after the kernel commits stops and joins the child and closes its stdio
+endpoints before returning an error. Readiness precedes constructors and `main`. Its cwd is resolved through
 Directory capabilities before relative executable lookup. Global environment
 mutation remains unsupported. `output` and `wait_with_output` drain stdout and
 stderr concurrently using a bounded WaitSet. Stdio inheritance uses explicitly

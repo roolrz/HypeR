@@ -78,7 +78,7 @@ int64_t __hyper_std_process_argument(uint64_t, const char *, size_t, uint32_t);
 int64_t __hyper_std_process_pipe(uint64_t, uint32_t, uint64_t *);
 int64_t __hyper_std_process_inherit(uint64_t, uint32_t, uint64_t, uint32_t);
 void __hyper_std_process_abort(uint64_t);
-int64_t __hyper_std_process_start(uint64_t, uint64_t *);
+int64_t __hyper_std_process_start(uint64_t *, uint64_t *);
 uint64_t __hyper_std_current_process_id(void);
 int64_t __hyper_std_process_id(uint64_t, uint64_t *);
 int64_t __hyper_std_process_kill(uint64_t);

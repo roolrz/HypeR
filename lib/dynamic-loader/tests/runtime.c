@@ -18,6 +18,7 @@
 #define __aarch64__ 1
 #endif
 #include "../src/rtld.c"
+const Elf64_Ehdr __ehdr_start = {0};
 
 typedef struct {
 	uint64_t padding;

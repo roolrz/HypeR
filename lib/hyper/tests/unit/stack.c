@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2026 roolrz
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <hyper/launch.h>
 #include <hyper/stack.h>
 #include <hyper/syscall.h>
 #include "../../src/stack-internal.h"
@@ -297,10 +298,10 @@ int main(void)
 		{HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_INITIAL_STACK_VMAR, 0, 3},
 	};
 	hyper_auxiliary_entry_t auxiliary[] = {
-		{HYPER_NATIVE_AUXV_INITIAL_STACK_BASE, main_base},
-		{HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY, main_capacity},
-		{HYPER_NATIVE_AUXV_INITIAL_STACK_SIZE, 2 * page},
-		{HYPER_NATIVE_AUXV_MAIN_STACK_SIZE, 3 * page + 1},
+		{HYPER_AUXV_INITIAL_STACK_BASE, main_base},
+		{HYPER_AUXV_INITIAL_STACK_CAPACITY, main_capacity},
+		{HYPER_AUXV_INITIAL_STACK_SIZE, 2 * page},
+		{HYPER_AUXV_MAIN_STACK_SIZE, 3 * page + 1},
 	};
 	hyper_startup_t startup = {.handle_count = 2,
 				   .handles = handles,

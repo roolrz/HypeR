@@ -264,12 +264,8 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_BYTES UINT64_C(69632)
 #define HYPER_NATIVE_ELF_OSABI UINT64_C(63)
 #define HYPER_NATIVE_ELF_ABI_VERSION UINT64_C(0)
-#define HYPER_NATIVE_AUXV_STARTUP_HANDLES UINT64_C(1213792257)
-#define HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT UINT64_C(1213792258)
-#define HYPER_NATIVE_AUXV_INITIAL_STACK_BASE UINT64_C(1213792259)
-#define HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY UINT64_C(1213792260)
-#define HYPER_NATIVE_AUXV_INITIAL_STACK_SIZE UINT64_C(1213792261)
-#define HYPER_NATIVE_AUXV_MAIN_STACK_SIZE UINT64_C(1213792262)
+#define HYPER_NATIVE_PROCESS_STARTUP_DATA_MAX_BYTES UINT64_C(16384)
+#define HYPER_NATIVE_LOADER_STARTUP_REPLY UINT64_C(1)
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_INITIAL_STACK_VMAR UINT64_C(15)
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_RESOURCE_DOMAIN UINT64_C(1)
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_GROUP UINT64_C(2)
@@ -361,10 +357,6 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_VMAR_PERMISSION_WRITE UINT64_C(2)
 #define HYPER_NATIVE_VMAR_PERMISSION_EXECUTE UINT64_C(4)
 #define HYPER_NATIVE_PROCESS_NAME_MAX_BYTES UINT64_C(64)
-#define HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES UINT64_C(4096)
-#define HYPER_NATIVE_PROCESS_ENVIRONMENT_MAX_BYTES UINT64_C(4096)
-#define HYPER_NATIVE_PROCESS_MAX_ARGUMENTS UINT64_C(64)
-#define HYPER_NATIVE_PROCESS_MAX_ENVIRONMENT UINT64_C(64)
 #define HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS UINT64_C(4)
 #define HYPER_NATIVE_PROCESS_AFFINITY_MAX_CPUS UINT64_C(256)
 #define HYPER_NATIVE_PROCESS_PHASE_PREPARED UINT64_C(0)
@@ -420,8 +412,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE UINT64_C(21)
 #define HYPER_NATIVE_SYS_PROCESS_BUILDER_CREATE UINT64_C(22)
 #define HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_NAME UINT64_C(23)
-#define HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT UINT64_C(24)
-#define HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ENVIRONMENT UINT64_C(25)
+#define HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_DATA UINT64_C(24)
 #define HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_AFFINITY UINT64_C(26)
 #define HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_HANDLE UINT64_C(27)
 #define HYPER_NATIVE_SYS_PROCESS_BUILDER_SEAL UINT64_C(28)
@@ -899,6 +890,38 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_capability_receive_slot_t, handle)
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_capability_receive_slot_t, rights) == 8, "capability_receive_slot.rights offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_capability_receive_slot_t, expected_kind) == 16, "capability_receive_slot.expected_kind offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_capability_receive_slot_t, flags) == 20, "capability_receive_slot.flags offset");
+
+#define HYPER_NATIVE_LOADER_STARTUP_MIN_SIZE UINT64_C(88)
+typedef struct hyper_native_loader_startup_t {
+    uint32_t size;
+    uint32_t handle_count;
+    uint32_t data_size;
+    uint32_t flags;
+    uint64_t executable;
+    uint64_t executable_size;
+    uint64_t root_vmar;
+    uint64_t stack_vmar;
+    uint64_t stack_base;
+    uint64_t stack_size;
+    uint64_t loader_base;
+    uint64_t loader_size;
+    uint64_t runtime_directory;
+} hyper_native_loader_startup_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_loader_startup_t) == 88, "loader_startup size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_loader_startup_t) == 8, "loader_startup alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, size) == 0, "loader_startup.size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, handle_count) == 4, "loader_startup.handle_count offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, data_size) == 8, "loader_startup.data_size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, flags) == 12, "loader_startup.flags offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, executable) == 16, "loader_startup.executable offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, executable_size) == 24, "loader_startup.executable_size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, root_vmar) == 32, "loader_startup.root_vmar offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, stack_vmar) == 40, "loader_startup.stack_vmar offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, stack_base) == 48, "loader_startup.stack_base offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, stack_size) == 56, "loader_startup.stack_size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, loader_base) == 64, "loader_startup.loader_base offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, loader_size) == 72, "loader_startup.loader_size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_loader_startup_t, runtime_directory) == 80, "loader_startup.runtime_directory offset");
 
 #define HYPER_NATIVE_STARTUP_HANDLE_MIN_SIZE UINT64_C(16)
 typedef struct hyper_native_startup_handle_t {

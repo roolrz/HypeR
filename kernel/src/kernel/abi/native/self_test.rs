@@ -690,18 +690,7 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             ))
         }
 
-        fn add_process_builder_argument(
-            &self,
-            _: HandleValue,
-            _: Option<UserSlice>,
-        ) -> Result<(), ProcessBuilderServiceError> {
-            self.calls.set(self.calls.get().saturating_add(1));
-            Err(ProcessBuilderServiceError::Process(
-                ProcessError::Allocation,
-            ))
-        }
-
-        fn add_process_builder_environment(
+        fn set_process_builder_data(
             &self,
             _: HandleValue,
             _: Option<UserSlice>,
@@ -749,7 +738,7 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         fn start_process_builder(
             &self,
             _: HandleValue,
-        ) -> Result<HandleValue, ProcessBuilderServiceError> {
+        ) -> Result<[HandleValue; 2], ProcessBuilderServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessBuilderServiceError::Process(
                 ProcessError::Allocation,

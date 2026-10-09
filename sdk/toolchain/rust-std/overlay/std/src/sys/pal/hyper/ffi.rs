@@ -213,7 +213,7 @@ unsafe extern "C" {
         parent_stream: u32,
     ) -> i64;
     pub fn __hyper_std_process_abort(builder: u64);
-    pub fn __hyper_std_process_start(builder: u64, process: *mut u64) -> i64;
+    pub fn __hyper_std_process_start(builder: *mut u64, process: *mut u64) -> i64;
     pub fn __hyper_std_current_process_id() -> u64;
     pub fn __hyper_std_process_id(process: u64, id: *mut u64) -> i64;
     pub fn __hyper_std_process_kill(process: u64) -> i64;

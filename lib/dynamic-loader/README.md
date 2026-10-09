@@ -10,7 +10,9 @@ This component provides the Native ELF interpreter installed as
 `/lib64/ld-hyper-riscv64.so`. The interpreter resides directly in `/lib64/`;
 libraries reside in `/lib64/<arch>-hyper-hyper/`. `/lib` is a relative symlink
 to `lib64`.
-The kernel maps only the main image and this interpreter.
+The [userspace loader](../userspace-loader/README.md) maps the main image and
+this interpreter. This interpreter self-relocates at entry before accessing
+initialized state; the kernel performs no Native executable relocation.
 Dependency policy, symbol lookup, relocation, constructors,
 RELRO, and runtime loading remain userspace responsibilities.
 
@@ -46,7 +48,8 @@ After relocating the initial dependency graph, the loader resolves
 `hyper_runtime_start` directly in `libhyper.so` and passes the original startup
 stack and a non-returning continuation. The shared runtime initializes the heap,
 creates the final main stack, copies startup data, switches SP and releases the
-kernel bootstrap stack. The continuation then runs constructors and enters the
+kernel bootstrap stack and the userspace-loader mappings, then acknowledges
+startup to the parent. The continuation then runs constructors and enters the
 application on the final stack. The interpreter never restores its abandoned
 bootstrap frames, and its statically linked runtime primitives do not own a
 second heap. Dynamic CRT uses the initialized runtime; static CRT performs the
@@ -62,7 +65,7 @@ policy; only entry assembly and machine relocation rules differ.
 
 ## Host verification
 
-Run `sh sdk/toolchain/scripts/check-loader-arch.sh` from the repository root.
+Run `sh sdk/toolchain/scripts/check-dynamic-loader.sh` from the repository root.
 The architecture probe checks machine flags and relocation formulas. A second
 probe compiles the production `rtld.c` directly, supplies bounded in-memory ELF
 views and records Native syscall effects. It covers malformed dynamic metadata,

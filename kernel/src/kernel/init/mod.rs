@@ -14,7 +14,6 @@ mod bootstrap;
 mod capabilities;
 
 const INIT_PATH: &str = "/init";
-const INIT_ARGUMENTS: &[&str] = &[INIT_PATH];
 pub(crate) enum Error {
     RootDirectory(crate::kernel::vfs::VfsError),
     #[cfg(not(feature = "kernel-self-test"))]
@@ -33,7 +32,7 @@ pub(crate) enum Error {
     Process(ProcessError),
     Resource(ResourceError),
     ResourceObject(crate::kernel::accounting::ResourceDomainObjectError),
-    Stack(hyper::exec::startup::Error),
+    Bootstrap(crate::kernel::process::bootstrap::Error),
     TaskGroup(TaskGroupError),
     TaskObject(crate::kernel::process::TaskObjectError),
     VirtualMachineObject(crate::kernel::vm::objects::Error),
@@ -73,7 +72,7 @@ impl core::fmt::Debug for Error {
                 .debug_tuple("ResourceObject")
                 .field(error)
                 .finish(),
-            Self::Stack(error) => formatter.debug_tuple("Stack").field(error).finish(),
+            Self::Bootstrap(error) => formatter.debug_tuple("Bootstrap").field(error).finish(),
             Self::TaskGroup(error) => formatter.debug_tuple("TaskGroup").field(error).finish(),
             Self::TaskObject(error) => formatter.debug_tuple("TaskObject").field(error).finish(),
             Self::VirtualMachineObject(error) => formatter
@@ -123,24 +122,22 @@ extern "C" fn start_worker(_: usize) {
 fn prepare_and_start() -> Result<Infallible, Error> {
     let domain = ResourceDomain::try_new_root(ResourceLimits::UNLIMITED)?;
     let group = TaskGroup::try_new(&domain)?;
-    let init = bootstrap::prepare(
-        INIT_PATH,
-        INIT_ARGUMENTS,
-        "init",
-        capabilities::HANDLE_COUNT,
-        &group,
-        &domain,
-    )?;
+    crate::kernel::process::initialize_loader(&domain).map_err(Error::Image)?;
+    let init = bootstrap::prepare(INIT_PATH, "init", &group, &domain)?;
 
-    capabilities::install(&init, INIT_ARGUMENTS, &group, &domain)?;
+    let channel = capabilities::install(&init, &group, &domain)?;
+    let thread = init.process.create_user_thread(
+        "init",
+        init.process.image().initial_thread().with_argument(channel),
+        scheduler::CpuMask::ALL,
+    )?;
 
     init.process.start()?;
     let process_koid = init.process.koid().get();
-    let thread_id = init
-        .thread
+    let thread_id = thread
         .scheduler_id()
         .ok_or(Error::IncompleteThreadPublication)?;
-    init.thread.ready()?;
+    thread.ready()?;
     crate::pr_info!(
         "HypeR: starting Native init process {} as thread {}",
         process_koid,
@@ -149,6 +146,7 @@ fn prepare_and_start() -> Result<Infallible, Error> {
 
     // Scheduler and Process membership now own the runnable bootstrap task.
     // Keep no observer on this non-returning stack.
+    drop(thread);
     drop(init);
     drop(group);
     drop(domain);

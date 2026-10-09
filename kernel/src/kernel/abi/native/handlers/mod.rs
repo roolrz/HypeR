@@ -60,9 +60,8 @@ pub(super) use object::{
     sys_wait_set_wait,
 };
 pub(super) use process_builder::{
-    sys_process_builder_abort, sys_process_builder_add_argument,
-    sys_process_builder_add_environment, sys_process_builder_add_handle,
-    sys_process_builder_create, sys_process_builder_seal, sys_process_builder_set_affinity,
+    sys_process_builder_abort, sys_process_builder_add_handle, sys_process_builder_create,
+    sys_process_builder_seal, sys_process_builder_set_affinity, sys_process_builder_set_data,
     sys_process_builder_set_name, sys_process_builder_start,
 };
 pub(super) use system::{

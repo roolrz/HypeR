@@ -438,17 +438,6 @@ impl<B: PageBackend, A: MemoryAccount> PrivateViewBuilder<B, A> {
             )?,
         })
     }
-    pub(crate) fn read(&self, offset: u64, bytes: &mut [u8]) -> VmoResult<B, A, ()> {
-        self.view.read(offset, bytes)
-    }
-    pub(crate) fn write(&mut self, offset: u64, bytes: &[u8]) -> VmoResult<B, A, ()> {
-        validate_range(self.view.size(), offset, bytes.len())?;
-        let (first, count) = covered_pages(offset, bytes.len())?;
-        if !(first..first + count).all(|index| self.view.is_writable(index)) {
-            self.view = self.view.materialize(first, count)?;
-        }
-        self.view.write(offset, bytes)
-    }
     pub(crate) fn finish(self) -> FallibleArc<PrivateView<B, A>> {
         self.view
     }

@@ -252,12 +252,8 @@ pub const HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_HEADER_BYTES: u64 = 4096;
 pub const HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_BYTES: u64 = 69632;
 pub const HYPER_NATIVE_ELF_OSABI: u64 = 63;
 pub const HYPER_NATIVE_ELF_ABI_VERSION: u64 = 0;
-pub const HYPER_NATIVE_AUXV_STARTUP_HANDLES: u64 = 1213792257;
-pub const HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT: u64 = 1213792258;
-pub const HYPER_NATIVE_AUXV_INITIAL_STACK_BASE: u64 = 1213792259;
-pub const HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY: u64 = 1213792260;
-pub const HYPER_NATIVE_AUXV_INITIAL_STACK_SIZE: u64 = 1213792261;
-pub const HYPER_NATIVE_AUXV_MAIN_STACK_SIZE: u64 = 1213792262;
+pub const HYPER_NATIVE_PROCESS_STARTUP_DATA_MAX_BYTES: u64 = 16384;
+pub const HYPER_NATIVE_LOADER_STARTUP_REPLY: u64 = 1;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_INITIAL_STACK_VMAR: u64 = 15;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_RESOURCE_DOMAIN: u64 = 1;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_GROUP: u64 = 2;
@@ -349,10 +345,6 @@ pub const HYPER_NATIVE_VMAR_PERMISSION_READ: u64 = 1;
 pub const HYPER_NATIVE_VMAR_PERMISSION_WRITE: u64 = 2;
 pub const HYPER_NATIVE_VMAR_PERMISSION_EXECUTE: u64 = 4;
 pub const HYPER_NATIVE_PROCESS_NAME_MAX_BYTES: u64 = 64;
-pub const HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES: u64 = 4096;
-pub const HYPER_NATIVE_PROCESS_ENVIRONMENT_MAX_BYTES: u64 = 4096;
-pub const HYPER_NATIVE_PROCESS_MAX_ARGUMENTS: u64 = 64;
-pub const HYPER_NATIVE_PROCESS_MAX_ENVIRONMENT: u64 = 64;
 pub const HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS: u64 = 4;
 pub const HYPER_NATIVE_PROCESS_AFFINITY_MAX_CPUS: u64 = 256;
 pub const HYPER_NATIVE_PROCESS_PHASE_PREPARED: u64 = 0;
@@ -408,8 +400,7 @@ pub const HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_TRY_SEND: u64 = 20;
 pub const HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE: u64 = 21;
 pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_CREATE: u64 = 22;
 pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_NAME: u64 = 23;
-pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT: u64 = 24;
-pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ENVIRONMENT: u64 = 25;
+pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_DATA: u64 = 24;
 pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_AFFINITY: u64 = 26;
 pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_HANDLE: u64 = 27;
 pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_SEAL: u64 = 28;
@@ -929,6 +920,40 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityReceiveSlot, ha
 const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityReceiveSlot, rights) == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityReceiveSlot, expected_kind) == 16);
 const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityReceiveSlot, flags) == 20);
+
+pub const HYPER_NATIVE_LOADER_STARTUP_MIN_SIZE: usize = 88;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeLoaderStartup {
+    pub size: u32,
+    pub handle_count: u32,
+    pub data_size: u32,
+    pub flags: u32,
+    pub executable: u64,
+    pub executable_size: u64,
+    pub root_vmar: u64,
+    pub stack_vmar: u64,
+    pub stack_base: u64,
+    pub stack_size: u64,
+    pub loader_base: u64,
+    pub loader_size: u64,
+    pub runtime_directory: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeLoaderStartup>() == 88);
+const _: () = assert!(core::mem::align_of::<HyperNativeLoaderStartup>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, size) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, handle_count) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, data_size) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, flags) == 12);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, executable) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, executable_size) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, root_vmar) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, stack_vmar) == 40);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, stack_base) == 48);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, stack_size) == 56);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, loader_base) == 64);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, loader_size) == 72);
+const _: () = assert!(core::mem::offset_of!(HyperNativeLoaderStartup, runtime_directory) == 80);
 
 pub const HYPER_NATIVE_STARTUP_HANDLE_MIN_SIZE: usize = 16;
 #[repr(C)]

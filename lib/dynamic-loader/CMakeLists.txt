@@ -3,30 +3,30 @@
 
 cmake_minimum_required(VERSION 3.25)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
-project(HypeRLoader VERSION 0.0.0 LANGUAGES C ASM)
+project(HypeRDynamicLoader VERSION 0.0.0 LANGUAGES C ASM)
 
 if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
-    message(FATAL_ERROR "HypeR loader requires Clang")
+    message(FATAL_ERROR "HypeR dynamic-loader requires Clang")
 endif()
 if(NOT HYPER_ARCH MATCHES "^(aarch64|riscv64)$")
-    message(FATAL_ERROR "HypeR dynamic linking is requires a supported Native architecture")
+    message(FATAL_ERROR "HypeR dynamic linking requires a supported Native architecture")
 endif()
 if(NOT EXISTS "${HYPER_SYSROOT}/include/hyper/native.h")
     message(FATAL_ERROR "HYPER_SYSROOT must name a complete HypeR sysroot")
 endif()
 
-add_executable(hyper_loader
+add_executable(hyper_dynamic_loader
     src/arch/${HYPER_ARCH}/start.S
     src/rtld.c
 )
-target_compile_features(hyper_loader PRIVATE c_std_17)
-target_compile_options(hyper_loader PRIVATE
+target_compile_features(hyper_dynamic_loader PRIVATE c_std_17)
+target_compile_options(hyper_dynamic_loader PRIVATE
     $<$<COMPILE_LANGUAGE:C>:-ffreestanding;-fno-builtin;-fPIE;-fno-stack-protector;-Wall;-Wextra;-Werror>
 )
-target_include_directories(hyper_loader PRIVATE
+target_include_directories(hyper_dynamic_loader PRIVATE
     ${HYPER_SYSROOT}/include
 )
-target_link_options(hyper_loader PRIVATE
+target_link_options(hyper_dynamic_loader PRIVATE
     --ld-path=${HYPER_LD}
     -nostdlib
     -Wl,-shared,--no-dynamic-linker,--no-undefined,--fatal-warnings
@@ -40,9 +40,9 @@ target_link_options(hyper_loader PRIVATE
     -Wl,-T,${HYPER_SYSROOT}/lib/hyper/${HYPER_ARCH}/hyper-native.ld
     ${HYPER_SYSROOT}/lib/libhyper.a
 )
-set_target_properties(hyper_loader PROPERTIES
+set_target_properties(hyper_dynamic_loader PROPERTIES
     OUTPUT_NAME ld-hyper-${HYPER_ARCH}.so
     SUFFIX ""
 )
 
-install(TARGETS hyper_loader RUNTIME DESTINATION lib64)
+install(TARGETS hyper_dynamic_loader RUNTIME DESTINATION lib64)

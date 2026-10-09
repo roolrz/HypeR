@@ -303,6 +303,12 @@
       ]
     },
     {
+      "source": "{sdk}/lib64/userspace-loader-hyper-{arch}",
+      "destination": "lib64/userspace-loader-hyper-{arch}",
+      "mode": "0755",
+      "profiles": ["system", "development"]
+    },
+    {
       "source": "{sdk}/lib64/ld-hyper-{arch}.so",
       "destination": "lib64/ld-hyper-{arch}.so",
       "mode": "0755",

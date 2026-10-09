@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <hyper/launch.h>
 #include <hyper/startup.h>
 
 #include <assert.h>
@@ -24,9 +25,9 @@ static void parses_complete_initial_stack(void)
 		0,
 		(uintptr_t)environment,
 		0,
-		HYPER_NATIVE_AUXV_STARTUP_HANDLES,
+		HYPER_AUXV_STARTUP_HANDLES,
 		(uintptr_t)handles,
-		HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT,
+		HYPER_AUXV_STARTUP_HANDLE_COUNT,
 		1,
 		0,
 		0,

@@ -2,6 +2,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <hyper/std.h>
+#include <hyper/launch.h>
+#include <stdlib.h>
 #include <hyper/startup.h>
 #include <hyper/syscall.h>
 #include <string.h>
@@ -10,6 +12,15 @@
 #define CHILD_LIB UINT32_C(0x80040002)
 #define STDIN UINT32_C(0x80030001)
 #define TERMINAL_INPUT UINT32_C(0x80030004)
+
+/* The PAL's opaque builder token owns its local argument encoding as well
+ * as the kernel transaction. Only seal uploads the complete payload. */
+typedef struct {
+	uint64_t handle;
+	uint32_t argc, envc, length;
+	uint32_t offsets[HYPER_LAUNCH_MAX_ARGUMENTS + HYPER_LAUNCH_MAX_ENVIRONMENT];
+	char strings[HYPER_NATIVE_PROCESS_STARTUP_DATA_MAX_BYTES];
+} LaunchBuilder;
 
 static int64_t delegate(uint64_t builder, uint64_t source, uint32_t purpose, uint64_t ceiling)
 {
@@ -124,7 +135,16 @@ int64_t __hyper_std_process_begin(const char *program, size_t size, const char *
 	}
 	(void)hyper_handle_close(working);
 	(void)hyper_handle_close(root);
-	*output = builder;
+	LaunchBuilder *launch = malloc(sizeof(*launch));
+	if (!launch) {
+		status = HYPER_NATIVE_STATUS_NO_MEMORY;
+		working = 0;
+		root = 0;
+		goto fail;
+	}
+	launch->handle = builder;
+	launch->argc = launch->envc = launch->length = 0;
+	*output = (uintptr_t)launch;
 	return 0;
 fail:
 	if (working)
@@ -135,15 +155,39 @@ fail:
 	return status;
 }
 
-int64_t __hyper_std_process_argument(uint64_t builder, const char *bytes, size_t size,
+int64_t __hyper_std_process_argument(uint64_t token, const char *bytes, size_t size,
 				     uint32_t environment)
 {
-	return environment ? hyper_process_builder_add_environment(builder, bytes, size)
-			   : hyper_process_builder_add_argument(builder, bytes, size);
+	LaunchBuilder *builder = (void *)(uintptr_t)token;
+	if (size > HYPER_LAUNCH_MAX_STRING_BYTES || memchr(bytes, 0, size) ||
+	    (environment ? builder->envc == HYPER_LAUNCH_MAX_ENVIRONMENT
+			 : builder->argc == HYPER_LAUNCH_MAX_ARGUMENTS))
+		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+	if (environment) {
+		const char *equal = memchr(bytes, '=', size);
+		if (!equal || equal == bytes)
+			return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+	}
+	uint32_t count = builder->argc + builder->envc;
+	if (sizeof(hyper_launch_data_t) + (count + 1) * 4 + builder->length + size + 1 >
+	    HYPER_NATIVE_PROCESS_STARTUP_DATA_MAX_BYTES)
+		return HYPER_NATIVE_STATUS_RESOURCE_LIMIT;
+	uint32_t index = environment ? count : builder->argc;
+	memmove(&builder->offsets[index + 1], &builder->offsets[index], (count - index) * 4);
+	builder->offsets[index] = builder->length;
+	memcpy(builder->strings + builder->length, bytes, size);
+	builder->strings[builder->length + size] = 0;
+	builder->length += size + 1;
+	if (environment)
+		++builder->envc;
+	else
+		++builder->argc;
+	return 0;
 }
 
 int64_t __hyper_std_process_pipe(uint64_t builder, uint32_t stream, uint64_t *parent)
 {
+	builder = ((LaunchBuilder *)(uintptr_t)builder)->handle;
 	*parent = 0;
 	if (stream > 2)
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
@@ -168,6 +212,7 @@ int64_t __hyper_std_process_pipe(uint64_t builder, uint32_t stream, uint64_t *pa
 int64_t __hyper_std_process_inherit(uint64_t builder, uint32_t stream, uint64_t source,
 				    uint32_t parent_stream)
 {
+	builder = ((LaunchBuilder *)(uintptr_t)builder)->handle;
 	if (stream > 2 || parent_stream > 2)
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 	hyper_native_handle_t alias = (!source && stream == 0 && parent_stream == 0)
@@ -198,21 +243,48 @@ int64_t __hyper_std_process_inherit(uint64_t builder, uint32_t stream, uint64_t 
 	return delegate(builder, source, STDIN + stream, rights);
 }
 
-void __hyper_std_process_abort(uint64_t builder)
+void __hyper_std_process_abort(uint64_t token)
 {
-	(void)hyper_process_builder_abort(builder);
+	LaunchBuilder *builder = (void *)(uintptr_t)token;
+	(void)hyper_process_builder_abort(builder->handle);
+	free(builder);
 }
 
-int64_t __hyper_std_process_start(uint64_t builder, uint64_t *process)
+int64_t __hyper_std_process_start(uint64_t *token, uint64_t *process)
 {
 	*process = 0;
-	int64_t status = hyper_process_builder_seal(builder);
-	if (status != 0)
+	LaunchBuilder *builder = (void *)(uintptr_t)*token;
+	if (!builder->argc)
+		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+	size_t prefix = sizeof(hyper_launch_data_t) + 4 * (builder->argc + builder->envc);
+	size_t size = prefix + builder->length;
+	hyper_launch_data_t *data = malloc(size);
+	if (!data)
+		return HYPER_NATIVE_STATUS_NO_MEMORY;
+	*data = (hyper_launch_data_t){builder->argc, builder->envc};
+	uint32_t *offsets = (void *)(data + 1);
+	for (size_t i = 0; i < builder->argc + builder->envc; ++i)
+		offsets[i] = prefix + builder->offsets[i];
+	memcpy((char *)data + prefix, builder->strings, builder->length);
+	int64_t status = hyper_process_builder_set_data(builder->handle, data, size);
+	free(data);
+	if (!status)
+		status = hyper_process_builder_seal(builder->handle);
+	if (status)
 		return status;
-	hyper_call_result_t result = hyper_process_builder_start(builder);
-	if (result.status == 0)
+	hyper_call_result_t result = hyper_process_builder_start(builder->handle);
+	if (result.status)
+		return result.status;
+	/* The kernel consumed the transaction even if the loader later fails. */
+	*token = 0;
+	free(builder);
+	status = hyper_launch_wait(result.value0, result.value1);
+	(void)hyper_handle_close(result.value1);
+	if (status)
+		(void)hyper_handle_close(result.value0);
+	else
 		*process = result.value0;
-	return result.status;
+	return status;
 }
 
 int64_t __hyper_std_process_id(uint64_t process, uint64_t *id)

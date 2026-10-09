@@ -48,7 +48,6 @@ pub(crate) enum Error {
     #[expect(dead_code, reason = "error payload is retained for Debug diagnostics")]
     Hal(crate::hal::user::AddressSpaceError),
     Identifier(crate::kernel::mm::translation_id::Error),
-    InvalidRange,
     Logical(LogicalAddressSpaceError),
     #[expect(dead_code, reason = "error payload is retained for Debug diagnostics")]
     Page(hyper::mm::BuddyError),
@@ -316,32 +315,6 @@ impl NativeImageSegment {
         })
     }
 
-    pub(crate) const fn range(&self) -> UserSlice {
-        self.range
-    }
-
-    pub(crate) fn read_word(&self, address: UserAddress) -> Result<u64, Error> {
-        let offset = self.relative_offset(address, size_of::<u64>())?;
-        let mut bytes = [0u8; size_of::<u64>()];
-        match &self.storage {
-            ImageStorage::Writable(storage) => storage.read(offset, &mut bytes),
-            ImageStorage::Private(storage) => storage.read(offset, &mut bytes),
-        }
-        .map_err(Error::Vmo)?;
-        Ok(u64::from_le_bytes(bytes))
-    }
-
-    pub(crate) fn write_word(&mut self, address: UserAddress, value: u64) -> Result<(), Error> {
-        let offset = self.relative_offset(address, size_of::<u64>())?;
-        match &mut self.storage {
-            ImageStorage::Writable(storage) => storage.write(offset, &value.to_le_bytes())?,
-            ImageStorage::Private(storage) => {
-                storage.write(offset, &value.to_le_bytes())?;
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn install(
         self,
         address_space: &NativeAddressSpace,
@@ -386,15 +359,6 @@ impl NativeImageSegment {
         };
         address_space.prepare_change(prepared)?.commit()?;
         Ok(())
-    }
-
-    fn relative_offset(&self, address: UserAddress, length: usize) -> Result<u64, Error> {
-        let length = u64::try_from(length).map_err(|_| Error::SizeOverflow)?;
-        let requested = UserSlice::new(address, length)?;
-        if !self.range.contains(requested) {
-            return Err(Error::InvalidRange);
-        }
-        Ok(address.get() - self.range.base().get())
     }
 }
 

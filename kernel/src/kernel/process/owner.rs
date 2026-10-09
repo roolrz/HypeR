@@ -11,7 +11,7 @@ mod handle_transactions;
 mod handles;
 
 use handle_accounting::HandleAccounting;
-use handles::{HandleAdmission, require_handle_admission, require_handle_phase};
+use handles::{HandleAdmission, require_handle_phase};
 mod start;
 
 pub(crate) use handle_transactions::{
@@ -19,9 +19,7 @@ pub(crate) use handle_transactions::{
 };
 pub(crate) use start::{ChildProcessStartError, ProcessStartCoordinator, StartedChildProcess};
 
-use super::builder::{
-    ProcessBuilderError, ProcessStartTransaction, SealedProcessBuild, StartPreparationFailure,
-};
+use super::builder::{ProcessStartTransaction, SealedProcessBuild, StartPreparationFailure};
 use super::directory::PreparedRegistration;
 use super::image::{AbiFamily, ExecutionRoute, MachineAbi, ProcessImage, UserThreadStart};
 use super::lifecycle::{
@@ -41,8 +39,8 @@ use crate::kernel::capability::{
     RetiredHandleBatchReservationStorage, Rights,
 };
 use crate::kernel::mm::user_space::{
-    MachineError, MemoryObjectError, NativeAddressSpace, UserAddress, UserSlice,
-    UserWriteReservation, VmarObject,
+    MachineError, MemoryObjectError, NativeAddressSpace, UserSlice, UserWriteReservation,
+    VmarObject,
 };
 use crate::kernel::object::{
     KernelService, Koid, ObjectCreationError, ObjectPublication, PublishableRef, SignalMask,
@@ -51,7 +49,6 @@ use crate::kernel::sync::Completion;
 use crate::kernel::task::scheduler::{self, CpuMask};
 use crate::kernel::task::thread::ThreadId;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use hyper::exec::startup::StartupHandle;
 use hyper::mm::{FallibleArc, UniqueFallibleArc, WeakFallibleArc};
 use hyper::sync::{InterruptSpinLock, PublishedOnce};
 
@@ -546,24 +543,6 @@ impl PreparedProcess {
         Ok(batches)
     }
 
-    fn reserve_initial_stack_write(
-        &self,
-        destination: UserSlice,
-    ) -> Result<UserWriteReservation, ProcessError> {
-        let address_space = self.process().inner.state.with(|state| {
-            require_handle_admission(state.lifecycle.phase(), HandleAdmission::PreparedChild)?;
-            state
-                .address_space
-                .as_ref()
-                .cloned()
-                .ok_or(ProcessError::AddressSpaceReferenced)
-        })?;
-        Ok(NativeAddressSpace::reserve_user_write(
-            address_space,
-            destination,
-        )?)
-    }
-
     fn address_space_owner(&self) -> FallibleArc<NativeAddressSpace> {
         self.process().inner.state.with(|state| {
             if state.lifecycle.phase() != ProcessPhase::Prepared {
@@ -580,9 +559,10 @@ impl PreparedProcess {
         &self,
         name: &str,
         affinity: CpuMask,
+        argument: u64,
     ) -> Result<PreparedInitialUserThread, ProcessError> {
         self.process()
-            .prepare_initial_user_thread_unpublished(name, affinity)
+            .prepare_initial_user_thread_unpublished(name, affinity, argument)
     }
 
     /// Publishes complete Process ownership and then makes it group-visible.
@@ -801,6 +781,7 @@ impl Process {
             reason = "Used by the AArch64 Native self-tests; other HAL self-tests exercise different entry paths"
         )
     )]
+    #[cfg(feature = "kernel-self-test")]
     pub(crate) fn create_initial_user_thread(
         &self,
         name: &str,
@@ -877,6 +858,7 @@ impl Process {
         &self,
         name: &str,
         affinity: CpuMask,
+        argument: u64,
     ) -> Result<PreparedInitialUserThread, ProcessError> {
         if !machine_matches_host(self.image().machine())
             || self.image().family() != AbiFamily::Native
@@ -896,7 +878,8 @@ impl Process {
                 return Err(error);
             }
         };
-        let execution = self.prepare_initial_user_execution(prepared.address_space.clone())?;
+        let execution =
+            self.prepare_initial_user_execution(prepared.address_space.clone(), argument)?;
         let dormant = scheduler::prepare_user_thread(
             name,
             prepared.thread.clone(),
@@ -918,6 +901,7 @@ impl Process {
     fn prepare_initial_user_execution(
         &self,
         address_space: FallibleArc<NativeAddressSpace>,
+        argument: u64,
     ) -> Result<alloc::boxed::Box<core::cell::UnsafeCell<UserExecution>>, ProcessError> {
         let start = self.image().initial_thread();
         // Match the architectural Result directly: mapping its error before
@@ -928,8 +912,11 @@ impl Process {
             start.stack().get(),
             start.tls().get(),
         ) {
-            Ok(context) => UserExecution::try_new(address_space, context)
-                .map_err(|()| ProcessError::Allocation),
+            Ok(mut context) => {
+                context.set_entry_argument(argument);
+                UserExecution::try_new(address_space, context)
+                    .map_err(|()| ProcessError::Allocation)
+            }
             Err(error) => Err(ProcessError::UserEntry(error)),
         }
     }

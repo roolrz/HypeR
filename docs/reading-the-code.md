@@ -242,11 +242,16 @@ loads a new image and address space.
   and [libhyper process adapter](../lib/hyper/src/std-process.c), or an explicit
   [SDK ProcessBuilder](../lib/rust/hyper-os/src/task.rs), lead through Native
   dispatch to [the kernel builder](../kernel/src/kernel/process/builder.rs).
-  Follow `start_process_builder`, [the loader](../kernel/src/kernel/process/loader.rs),
+  Follow `start_process_builder`, [bootstrap mapping](../kernel/src/kernel/process/loader.rs),
   [Process owner](../kernel/src/kernel/process/owner.rs) and
   [startup publication](../kernel/src/kernel/process/owner/start.rs).
-  Image loading, capability delegation and making the initial Thread runnable
-  have distinct failure/rollback boundaries.
+  The kernel commits capabilities and a runnable bootstrap Thread together.
+  [userspace-loader](../lib/userspace-loader/README.md) then maps the application
+  and interpreter and creates its startup vector;
+  [dynamic-loader](../lib/dynamic-loader/README.md) owns dynamic linking.
+  SDK start waits for runtime readiness, before constructors and `main`.
+  A loader failure after kernel commit
+  stops and joins the child rather than returning a retryable builder.
 - **Additional Thread:** [std thread adapter](../sdk/toolchain/rust-std/overlay/std/src/sys/thread/hyper.rs)
   uses [thread_spawn.c](../lib/hyper/src/thread_spawn.c). Native `thread_create`
   reaches `create_thread` in [task services](../kernel/src/kernel/entry/services/task.rs),
@@ -258,7 +263,10 @@ loads a new image and address space.
   explicit growth for both the runtime-created main stack and SDK-created worker stacks.
   [Runtime initialization](../lib/hyper/src/runtime.c) copies startup data;
   [bootstrap handoff](../lib/hyper/src/bootstrap.c) builds the final entry vector,
-  switches to the final stack and only then releases the kernel bootstrap reservation.
+  switches to the final stack and only then releases the kernel bootstrap
+  reservation and userspace-loader mapping. The
+  [address-layout table](../lib/userspace-loader/README.md#address-layout)
+  separates current placement policy from the kernel entry contract.
   See [stack APIs](../lib/hyper/README.md#guarded-growable-stacks) before changing
   stack size or cleanup. A userspace stack is separate from its kernel stack.
 

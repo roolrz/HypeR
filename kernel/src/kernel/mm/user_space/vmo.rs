@@ -259,7 +259,7 @@ impl ExecutableProvenance {
 }
 
 impl ExecutableProvenance {
-    pub(super) const fn for_native_image_loader() -> Self {
+    pub(crate) const fn for_native_image_loader() -> Self {
         Self { _private: () }
     }
 

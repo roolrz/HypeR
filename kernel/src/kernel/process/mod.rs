@@ -4,6 +4,7 @@
 //! Native Process, `TaskGroup`, and `UserThread` lifecycle ownership.
 
 pub(crate) mod atomic_wait;
+pub(crate) mod bootstrap;
 mod builder;
 mod builder_input;
 mod builder_policy;
@@ -11,7 +12,7 @@ mod directory;
 pub(crate) mod hierarchy;
 mod image;
 mod lifecycle;
-mod loader;
+pub(crate) mod loader;
 mod objects;
 mod owner;
 mod task_group;
@@ -26,7 +27,9 @@ pub(crate) use image::{
     AbiFamily, ExecutionRoute, ImageError, MachineAbi, ProcessImage, UserThreadStart,
 };
 pub(crate) use lifecycle::{ProcessPhase, TerminalReason, UserThreadPhase};
-pub(crate) use loader::{Error as LoaderError, initial_stack_top, load_native};
+#[cfg(not(feature = "kernel-self-test"))]
+pub(crate) use loader::initialize_loader;
+pub(crate) use loader::{Error as LoaderError, load_native};
 pub(crate) use objects::{ProcessObject, TaskFactory, TaskGroupObject, TaskObjectError};
 pub(crate) use owner::{
     ChildProcessStartError, PreparedDirectProcessHandleTransfer, PreparedProcess, Process,

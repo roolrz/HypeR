@@ -118,6 +118,12 @@ target_compile_options(hyper-runtime-startup-test PRIVATE -Wall -Wextra -Werror 
 target_include_directories(hyper-runtime-startup-test PRIVATE ../../include ${HYPER_ABI_INCLUDE_DIR})
 add_test(NAME runtime-startup-ownership COMMAND hyper-runtime-startup-test)
 
+add_executable(hyper-launch-test ../../src/launch.c launch.c)
+target_compile_features(hyper-launch-test PRIVATE c_std_17)
+target_compile_options(hyper-launch-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_include_directories(hyper-launch-test PRIVATE ../../include ${HYPER_ABI_INCLUDE_DIR})
+add_test(NAME launch-result-ownership COMMAND hyper-launch-test)
+
 add_executable(hyper-thread-spawn-test thread-spawn.c)
 target_compile_features(hyper-thread-spawn-test PRIVATE c_std_17)
 target_compile_options(hyper-thread-spawn-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)

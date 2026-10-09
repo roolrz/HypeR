@@ -811,15 +811,10 @@ pub(in crate::kernel) trait ProcessBuilderServices {
         builder: HandleValue,
         name: Option<UserSlice>,
     ) -> Result<(), ProcessBuilderServiceError>;
-    fn add_process_builder_argument(
+    fn set_process_builder_data(
         &self,
         builder: HandleValue,
-        argument: Option<UserSlice>,
-    ) -> Result<(), ProcessBuilderServiceError>;
-    fn add_process_builder_environment(
-        &self,
-        builder: HandleValue,
-        environment: Option<UserSlice>,
+        data: Option<UserSlice>,
     ) -> Result<(), ProcessBuilderServiceError>;
     fn set_process_builder_affinity(
         &self,
@@ -840,7 +835,7 @@ pub(in crate::kernel) trait ProcessBuilderServices {
     fn start_process_builder(
         &self,
         builder: HandleValue,
-    ) -> Result<HandleValue, ProcessBuilderServiceError>;
+    ) -> Result<[HandleValue; 2], ProcessBuilderServiceError>;
     fn abort_process_builder(&self, builder: HandleValue)
     -> Result<(), ProcessBuilderServiceError>;
 }

@@ -84,10 +84,13 @@ fn generated_rust_layouts_are_compiler_checked() {
     assert_eq!(generated::HYPER_NATIVE_SIGNAL_CONSOLE_WRITABLE, 2);
     assert_eq!(generated::HYPER_NATIVE_ELF_OSABI, 63);
     assert_eq!(generated::HYPER_NATIVE_ELF_ABI_VERSION, 0);
-    assert_eq!(generated::HYPER_NATIVE_AUXV_STARTUP_HANDLES, 0x4859_0001);
     assert_eq!(
-        generated::HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT,
-        0x4859_0002
+        core::mem::size_of::<generated::HyperNativeLoaderStartup>(),
+        88
+    );
+    assert_eq!(
+        generated::HYPER_NATIVE_PROCESS_STARTUP_DATA_MAX_BYTES,
+        16 * 1024
     );
     assert_eq!(
         generated::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_RESOURCE_DOMAIN,
@@ -139,11 +142,7 @@ fn generated_rust_layouts_are_compiler_checked() {
     assert_eq!(generated::HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, 21);
     assert_eq!(generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_CREATE, 22);
     assert_eq!(generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_NAME, 23);
-    assert_eq!(generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT, 24);
-    assert_eq!(
-        generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ENVIRONMENT,
-        25
-    );
+    assert_eq!(generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_DATA, 24);
     assert_eq!(generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_AFFINITY, 26);
     assert_eq!(generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_HANDLE, 27);
     assert_eq!(generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_SEAL, 28);

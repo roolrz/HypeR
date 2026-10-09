@@ -603,8 +603,7 @@ fn process_builder_is_linear_and_uses_staged_syscalls() {
         vec![
             (22, "process_builder_create"),
             (23, "process_builder_set_name"),
-            (24, "process_builder_add_argument"),
-            (25, "process_builder_add_environment"),
+            (24, "process_builder_set_data"),
             (26, "process_builder_set_affinity"),
             (27, "process_builder_add_handle"),
             (28, "process_builder_seal"),

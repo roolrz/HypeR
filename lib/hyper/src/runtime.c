@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <hyper/launch.h>
 #include <hyper/heap.h>
 #include <hyper/thread.h>
 #include <hyper/system.h>
@@ -78,9 +79,9 @@ hyper_native_status_t hyper_runtime_initialize(const uintptr_t *initial_stack)
 		return HYPER_NATIVE_STATUS_NO_MEMORY;
 	for (size_t i = 0; i < startup.auxiliary_count; ++i) {
 		auxiliary[i] = startup.auxiliary[i];
-		if (auxiliary[i].key == HYPER_NATIVE_AUXV_STARTUP_HANDLES)
+		if (auxiliary[i].key == HYPER_AUXV_STARTUP_HANDLES)
 			auxiliary[i].value = (uintptr_t)application_handles;
-		if (auxiliary[i].key == HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT)
+		if (auxiliary[i].key == HYPER_AUXV_STARTUP_HANDLE_COUNT)
 			auxiliary[i].value = count;
 	}
 	char **arguments = copy_strings(startup.arguments, startup.argument_count);
@@ -96,11 +97,11 @@ hyper_native_status_t hyper_runtime_initialize(const uintptr_t *initial_stack)
 	if (status != HYPER_NATIVE_STATUS_OK)
 		return status;
 	for (size_t i = 0; i < startup.auxiliary_count; ++i) {
-		if (auxiliary[i].key == HYPER_NATIVE_AUXV_INITIAL_STACK_BASE)
+		if (auxiliary[i].key == HYPER_AUXV_INITIAL_STACK_BASE)
 			auxiliary[i].value = info.top - info.capacity - page;
-		if (auxiliary[i].key == HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY)
+		if (auxiliary[i].key == HYPER_AUXV_INITIAL_STACK_CAPACITY)
 			auxiliary[i].value = info.capacity;
-		if (auxiliary[i].key == HYPER_NATIVE_AUXV_INITIAL_STACK_SIZE)
+		if (auxiliary[i].key == HYPER_AUXV_INITIAL_STACK_SIZE)
 			auxiliary[i].value = info.size;
 	}
 	process_startup = startup;
