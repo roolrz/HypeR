@@ -8,7 +8,9 @@ use std::io::{self, Write};
 
 fn run() -> io::Result<()> {
     let args = hyper_echo::cli::Echo::parse();
-    writeln!(io::stdout().lock(), "{}", args.words.join(" "))
+    let mut output = io::stdout().lock();
+    hyper_echo::write(&args, &mut output)?;
+    output.flush()
 }
 
 fn main() -> std::process::ExitCode {

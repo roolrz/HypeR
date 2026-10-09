@@ -20,11 +20,14 @@ references into one GitHub Pages artifact. The intended public address is
   especially when a continuation would start with a list marker such as `+`.
 - Rustdoc generates kernel, core, HAL and ABI references separately for AArch64,
   RISC-V and x86-64, using their normal QEMU configurations. It also generates
-  application, installed SDK and ABI references for both HypeR Native targets,
+  application, shared application library, installed SDK and ABI references for both HypeR Native targets,
   using the actual patched Rust standard-library target configuration. Only
   HypeR-owned crates are selected, with `--no-deps`; third-party crates and the
   Rust standard library are compiled as needed but receive no generated reference
-  pages. SDK workspace members and the ABI are explicitly selected because they
+  pages. The `lib/` implementation and Native delivery crates belong to the app
+  workspace; delivery re-exports link to implementation references, and the Rust
+  std owner links upstream without inlining standard-library documentation.
+  SDK workspace members and the ABI are explicitly selected because they
   are dependencies outside the application workspace. Explicit local reference
   roots keep cross-crate links independent of the documentation build order.
   Executables are also selected explicitly into a separate reference tree:

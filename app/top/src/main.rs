@@ -4,24 +4,16 @@
 //! Interactive capability-scoped CPU, memory, and Process monitor.
 
 use clap::Parser;
-use std::collections::BTreeMap;
 use std::io::Write;
 
 use hyper_os::handle::{ByteChannelObject, OwnedHandle};
-use hyper_os::inspect::{CpuInspector, Koid, MemoryInspector, ScanCursor, TaskInspector};
+use hyper_os::inspect::{CpuInspector, MemoryInspector, ScanCursor, TaskInspector};
 use hyper_os::startup::{self, Startup};
 use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_os::{Error, Status};
 use std::process::ExitCode;
 
-#[derive(Clone, Copy, Default)]
-struct ThreadSample {
-    process_koid: u64,
-    thread_koid: u64,
-    runtime_ticks: u64,
-}
-
-type SampleSet = BTreeMap<u64, ThreadSample>;
+use hyper_top::sampling::{SampleSet, ThreadSample, process_delta};
 
 fn application_main(mut startup: Startup<'_>, args: hyper_top::cli::Top) -> ExitCode {
     match run(&mut startup, &args) {
@@ -71,12 +63,15 @@ fn run(
         }
         render(
             &mut output,
+            args,
             &tasks,
             memory.read()?,
-            previous_cpu,
-            current_cpu,
-            &previous_threads,
-            &current_threads,
+            SamplingInterval {
+                previous_cpu,
+                current_cpu,
+                previous_threads: &previous_threads,
+                current_threads: &current_threads,
+            },
         )?;
         if !args.batch {
             writeln!(output, "Press q or Ctrl-C to quit.")?;
@@ -134,7 +129,7 @@ fn capture_threads(tasks: &TaskInspector) -> hyper_os::Result<SampleSet> {
             samples.insert(
                 thread.koid.get(),
                 ThreadSample {
-                    process_koid: thread.process_koid.map_or(0, Koid::get),
+                    process_koid: thread.process_koid.map_or(0, |koid| koid.get()),
                     thread_koid: thread.koid.get(),
                     runtime_ticks: thread.runtime_ticks,
                 },
@@ -145,15 +140,26 @@ fn capture_threads(tasks: &TaskInspector) -> hyper_os::Result<SampleSet> {
     Ok(samples)
 }
 
-fn render(
-    output: &mut impl Write,
-    tasks: &TaskInspector,
-    memory: hyper_os::inspect::MemoryObservation,
+struct SamplingInterval<'a> {
     previous_cpu: hyper_os::inspect::CpuObservation,
     current_cpu: hyper_os::inspect::CpuObservation,
-    previous_threads: &SampleSet,
-    current_threads: &SampleSet,
+    previous_threads: &'a SampleSet,
+    current_threads: &'a SampleSet,
+}
+
+fn render(
+    output: &mut impl Write,
+    args: &hyper_top::cli::Top,
+    tasks: &TaskInspector,
+    memory: hyper_os::inspect::MemoryObservation,
+    interval: SamplingInterval<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let SamplingInterval {
+        previous_cpu,
+        current_cpu,
+        previous_threads,
+        current_threads,
+    } = interval;
     let idle = current_cpu
         .idle_ticks
         .saturating_sub(previous_cpu.idle_ticks);
@@ -192,37 +198,41 @@ fn render(
             mib(memory.reserved_bytes),
         )
     })
-    .and_then(|()| writeln!(output, "KOID       CPU      THREADS  NAME"))
+    .and_then(|()| writeln!(output, "KOID                CPU      THREADS  NAME"))
     .map_err(|_| Error::InvalidResponse)?;
 
+    let mut rows = Vec::new();
     let mut cursor = Some(ScanCursor::START);
     while let Some(position) = cursor {
         let page = tasks.scan_processes(position)?;
         for process in page.entries() {
-            let (ticks, threads) = process_delta(process.koid, previous_threads, current_threads);
-            write!(output, "{:<10} ", process.koid.get())
-                .and_then(|()| write_percent(output, ticks, total))
-                .and_then(|()| writeln!(output, "  {:<7}  {}", threads, process.name.as_str(),))
-                .map_err(|_| Error::InvalidResponse)?;
+            if args
+                .filter
+                .matches(process.koid.get(), process.name.as_str())
+            {
+                let (ticks, threads) =
+                    process_delta(process.koid.get(), previous_threads, current_threads);
+                rows.push(hyper_top::sampling::ProcessSample {
+                    koid: process.koid.get(),
+                    name: process.name.as_str().into(),
+                    ticks,
+                    threads,
+                });
+            }
         }
         cursor = page.next();
     }
+    hyper_top::sampling::sort(&mut rows, args.sort);
+    if let Some(limit) = args.limit {
+        rows.truncate(limit.get());
+    }
+    for row in rows {
+        write!(output, "0x{:016x} ", row.koid)?;
+        write_percent(output, row.ticks, total)?;
+        writeln!(output, "  {:<7}  {}", row.threads, row.name)?;
+    }
     output.flush()?;
     Ok(())
-}
-
-fn process_delta(process: Koid, previous: &SampleSet, current: &SampleSet) -> (u64, usize) {
-    let mut ticks = 0_u64;
-    let mut threads = 0_usize;
-    for sample in current.values() {
-        if sample.process_koid == process.get() {
-            ticks = ticks.saturating_add(previous.get(&sample.thread_koid).map_or(0, |old| {
-                sample.runtime_ticks.saturating_sub(old.runtime_ticks)
-            }));
-            threads += 1;
-        }
-    }
-    (ticks, threads)
 }
 
 fn write_percent(output: &mut impl Write, value: u64, total: u64) -> std::io::Result<()> {

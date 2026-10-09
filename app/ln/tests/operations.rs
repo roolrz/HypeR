@@ -3,6 +3,23 @@
 
 use super::*;
 
+#[test]
+fn no_dereference_never_creates_inside_symlink_directory() -> io::Result<()> {
+    let d = Directory::new()?;
+    fs::create_dir(d.path("directory"))?;
+    symlink("directory", d.path("alias"))?;
+    assert!(!run(Args {
+        symbolic: true,
+        no_dereference: true,
+        target: PathBuf::from("target"),
+        link: d.path("alias"),
+        ..Args::default()
+    }));
+    assert!(!d.path("directory/target").exists());
+    assert_eq!(fs::read_link(d.path("alias"))?, Path::new("directory"));
+    Ok(())
+}
+
 struct Directory(std::path::PathBuf);
 impl Directory {
     fn new() -> std::io::Result<Self> {
@@ -46,7 +63,8 @@ fn directory_destination() -> io::Result<()> {
         symbolic: false,
         no_target_directory: false,
         target: d.path("file"),
-        link: d.path("out")
+        link: d.path("out"),
+        ..Args::default()
     }));
     assert_eq!(fs::read(d.path("out/file"))?, b"data");
     Ok(())

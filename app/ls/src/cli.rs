@@ -9,11 +9,15 @@ pub enum Sort {
     #[default]
     Name,
     Size,
+    Time,
 }
 
 #[derive(Debug, Parser)]
 #[command(about = "List files with permission modes and readable sizes")]
 pub struct Ls {
+    /// List directory operands themselves instead of their contents.
+    #[arg(short = 'd', long)]
+    pub directory: bool,
     /// Include hidden entries.
     #[arg(short = 'a', long)]
     pub all: bool,
@@ -23,9 +27,15 @@ pub struct Ls {
     /// Show exact byte counts instead of IEC units.
     #[arg(long)]
     pub bytes: bool,
-    /// Sort by name or descending size.
+    /// Sort by name, descending size, or newest modification time.
     #[arg(long, value_enum, default_value = "name")]
     pub sort: Sort,
+    /// Sort newest modification time first.
+    #[arg(short = 't', conflicts_with = "sort")]
+    pub newest: bool,
+    /// Sort largest size first.
+    #[arg(short = 'S', conflicts_with_all = ["sort", "newest"])]
+    pub largest: bool,
     /// Reverse the selected ordering.
     #[arg(short = 'r', long)]
     pub reverse: bool,

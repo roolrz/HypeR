@@ -26,6 +26,15 @@ pub struct Grep {
     pub quiet: bool,
     #[arg(short = 'F', long)]
     pub fixed_strings: bool,
+    /// Stop after NUM selected lines per input; zero reads no lines.
+    #[arg(short = 'm', long)]
+    pub max_count: Option<u64>,
+    /// Require the pattern to match the whole line.
+    #[arg(short = 'x', long)]
+    pub line_regexp: bool,
+    /// Flush each selected line, useful in long-running pipelines.
+    #[arg(long)]
+    pub line_buffered: bool,
     #[arg(short = 'H', long)]
     pub with_filename: bool,
     #[arg(short = 'h', long)]
@@ -60,7 +69,13 @@ impl Grep {
         let regex = RegexBuilder::new(
             &patterns
                 .iter()
-                .map(|p| format!("(?:{p})"))
+                .map(|p| {
+                    if self.line_regexp {
+                        format!("\\A(?:{p})\\z")
+                    } else {
+                        format!("(?:{p})")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("|"),
         )
@@ -87,6 +102,9 @@ impl Grep {
         let mut number = 0_u64;
         let mut selected = 0_u64;
         loop {
+            if self.max_count.is_some_and(|limit| selected >= limit) {
+                break;
+            }
             line.clear();
             if input.read_until(b'\n', &mut line)? == 0 {
                 break;
@@ -113,6 +131,9 @@ impl Grep {
                 }
                 output.write_all(content)?;
                 output.write_all(b"\n")?;
+                if self.line_buffered {
+                    output.flush()?;
+                }
             }
         }
         if self.count && !self.files_with_matches && !self.quiet {

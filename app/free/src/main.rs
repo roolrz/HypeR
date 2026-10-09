@@ -10,17 +10,32 @@ use std::io::Write;
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = hyper_free::cli::Free::parse();
-    let quantity = |bytes: u64| hyper_free::format_bytes(bytes, args.bytes);
     let mut startup = hyper_rt::process::startup()?;
     hyper_os::require_core_abi()?;
     let inspector = MemoryInspector::from_handle(startup.take(startup::MEMORY_INSPECTOR)?);
-    let observation = inspector.read()?;
+    let mut output = std::io::stdout().lock();
+    for sample in 0..args.count.get() {
+        if sample != 0 {
+            std::thread::sleep(std::time::Duration::from_secs_f64(args.seconds));
+            writeln!(output)?;
+        }
+        snapshot(&args, inspector.read()?, &mut output)?;
+        output.flush()?;
+    }
+    Ok(())
+}
+
+fn snapshot(
+    args: &hyper_free::cli::Free,
+    observation: hyper_os::inspect::MemoryObservation,
+    output: &mut impl Write,
+) -> std::io::Result<()> {
+    let quantity = |bytes| args.quantity(bytes);
     let cache = if observation.cache_sample_complete {
         quantity(observation.reclaimable_bytes)
     } else {
         String::from("—")
     };
-    let mut output = std::io::stdout().lock();
     writeln!(
         output,
         "          {:>11}  {:>11}  {:>11}  {:>11}  {:>11}",

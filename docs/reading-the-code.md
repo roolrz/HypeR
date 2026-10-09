@@ -105,7 +105,7 @@ flowchart TB
 2. [vm-runtime `run`](../app/vm-runtime/src/runtime.rs) validates the image, prepares
    its memory and serial channel, creates a pending VM, attaches memory and
    bootstrap information, seals it, installs it and starts the boot vCPU.
-   [vm-support](../app/vm-support/src/lib.rs) contains shared loading/device
+   [vm-support](../lib/vm-support/src/lib.rs) contains shared loading/device
    mechanisms; [SDK VM bindings](../sdk/rust/hyper-os/src/vm.rs) expose the Native
    operations used here.
 3. [VM services](../kernel/src/kernel/vm/service.rs) resolve capabilities and
@@ -373,15 +373,15 @@ flowchart TB
 ```
 
 Read [vm-runtime I/O setup](../app/vm-runtime/src/io_devices.rs),
-[virtio-mmio device model](../app/vm-support/src/virtio_mmio.rs),
-[network configuration](../app/vm-support/src/virtio_net.rs), and
-[asynchronous backend control](../app/vm-support/src/io_backend.rs).
+[virtio-mmio device model](../lib/vm-support/src/virtio_mmio.rs),
+[network configuration](../lib/vm-support/src/virtio_net.rs), and
+[asynchronous backend control](../lib/vm-support/src/io_backend.rs).
 [The runtime supervisor](../app/vm-runtime/src/supervisor.rs) services deferred
 MMIO and backend replies without holding the vCPU in a synchronous RPC.
 The [I/O broker](../app/io-runtime/src/runtime/broker/mod.rs) authorizes client sessions;
 [client bindings](../app/io-runtime/src/runtime/broker/client.rs) own their admission and retirement;
 [broker exchange](../app/io-runtime/src/broker_exchange.rs) handles their control
-traffic. [The protocol](../app/vm-support/src/io_protocol.rs) defines the
+traffic. [The protocol](../lib/vm-support/src/io_protocol.rs) defines the
 negotiation records.
 
 Inside HypeR, [VM I/O services](../kernel/src/kernel/vm/io/service.rs),

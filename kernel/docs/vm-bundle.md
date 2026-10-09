@@ -33,7 +33,7 @@ The policy allows eight named business definitions and budgets their instances,
 a separate resident I/O VM and control-plane headroom. Each business child domain
 allows up to eight vCPUs and 65,536 guest pages (256 MiB). These are admission
 ceilings, not reserved RAM or a promise that every guest fits concurrently.
-See `app/vm-policy/src/lib.rs` for the complete limits. A stopped instance can
+See `lib/vm-policy/src/lib.rs` for the complete limits. A stopped instance can
 be recreated from its retained image with fresh resource and lifecycle owners.
 
 For each provisioned VM, the manager creates a child resource domain and task

@@ -6,15 +6,24 @@ SPDX-License-Identifier: Apache-2.0
 # HypeR runtime linker
 
 This component provides the Native ELF interpreter installed as
-`/lib/ld-hyper-aarch64.so` or `/lib/ld-hyper-riscv64.so`. The kernel maps only the main image and this
-interpreter. Dependency policy, symbol lookup, relocation, constructors,
+`/lib/aarch64-hyper-hyper/ld-hyper-aarch64.so` or
+`/lib/riscv64-hyper-hyper/ld-hyper-riscv64.so`. `/lib` is a relative symlink to
+`lib64`; the interpreter and libraries reside in that architecture's subdirectory.
+The kernel maps only the main image and this interpreter.
+Dependency policy, symbol lookup, relocation, constructors,
 RELRO, and runtime loading remain userspace responsibilities.
 
 Library lookup is capability-relative: the interpreter receives a Directory
-handle and accepts exact relative object names, never ambient search paths.
+handle rooted at `/lib/<arch>-hyper-hyper/` and accepts exact relative object
+names, never ambient search paths or other architecture directories.
 Initial dependencies are global; `hyper_dlopen_at` additionally supports local
 symbol scopes. Loading is eager and bounded, with `RELA` and `RELR`
 support and no writable-executable mapping transition.
+
+The Native [`ldd` command](../../app/README.md#ldd-shared-library-dependency-inspection)
+inspects interpreter and dependency metadata against the standard library layout
+without executing the target. It does not replace loader symbol or relocation
+validation, nor can it infer a different library Directory delegated to a process.
 
 `hyper_dlclose` currently releases a logical caller reference but deliberately
 does not run destructors or reclaim mappings. This conservative lifetime rule

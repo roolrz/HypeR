@@ -13,6 +13,7 @@ use hyper_os::{Error, Status};
 
 use crate::cli::{Handle, ProcessSelector};
 use crate::output;
+use crate::summary::Summary;
 
 pub fn inspect(
     args: &Handle,
@@ -20,6 +21,26 @@ pub fn inspect(
     tasks: Option<&TaskInspector>,
     out: &mut impl Write,
     errors: &mut impl Write,
+) -> io::Result<()> {
+    let mut summary = Summary::default();
+    inspect_entries(args, objects, tasks, out, errors, &mut summary)?;
+    if args.summary {
+        summary.write(
+            args.all || args.process_selector().is_some(),
+            !args.no_headers,
+            out,
+        )?;
+    }
+    Ok(())
+}
+
+fn inspect_entries(
+    args: &Handle,
+    objects: &ObjectInspector,
+    tasks: Option<&TaskInspector>,
+    out: &mut impl Write,
+    errors: &mut impl Write,
+    summary: &mut Summary,
 ) -> io::Result<()> {
     if args.all {
         let processes = processes(require_tasks(tasks)?)?;
@@ -33,6 +54,7 @@ pub fn inspect(
                 process.name.as_str(),
                 out,
                 &mut count,
+                summary,
             ) {
                 Ok(()) => (),
                 Err(error) if process_unavailable(&error) => skipped += 1,
@@ -59,10 +81,12 @@ pub fn inspect(
             ProcessSelector::Koid(_) => "",
         };
         let mut count = 0;
-        list_handles(args, objects, koid, name, out, &mut count).map_err(|e| context(koid, e))?;
+        list_handles(args, objects, koid, name, out, &mut count, summary)
+            .map_err(|e| context(koid, e))?;
         empty(args, count, "handles", out)?;
         if count != 0
             && !args.no_headers
+            && !args.summary
             && let Some(handle) = args.handle
         {
             crate::details::inspect(
@@ -77,9 +101,10 @@ pub fn inspect(
         }
         Ok(())
     } else {
-        let count = list_objects(args, objects, out)?;
+        let count = list_objects(args, objects, out, summary)?;
         if count != 0
             && !args.no_headers
+            && !args.summary
             && let Some(object) = args.object
         {
             let koid = Koid::from_raw(object.get()).map_err(io::Error::other)?;
@@ -133,6 +158,7 @@ fn list_objects(
     args: &Handle,
     inspector: &ObjectInspector,
     out: &mut impl Write,
+    summary: &mut Summary,
 ) -> io::Result<usize> {
     let mut count = 0;
     let mut selected_exists = false;
@@ -141,10 +167,14 @@ fn list_objects(
         |item| {
             selected_exists |= args.object.is_some_and(|id| id.get() == item.koid.get());
             if args.matches_object(item.koid.get(), item.object_kind) {
-                if count == 0 {
-                    output::object_header(args, out)?;
+                if args.summary {
+                    summary.record(item.object_kind, item.koid.get(), false);
+                } else {
+                    if count == 0 {
+                        output::object_header(args, out)?;
+                    }
+                    output::object(args, item, out)?;
                 }
-                output::object(args, item, out)?;
                 count += 1;
             }
             Ok(())
@@ -167,6 +197,7 @@ fn list_handles(
     name: &str,
     out: &mut impl Write,
     count: &mut usize,
+    summary: &mut Summary,
 ) -> io::Result<()> {
     let mut selected_exists = false;
     scan(
@@ -174,17 +205,21 @@ fn list_handles(
         |item| {
             selected_exists |= args.handle.is_some_and(|id| id.get() == item.handle);
             if matches_handle(args, item) {
-                if *count == 0 {
-                    if !args.all && !args.no_headers {
-                        write!(out, "Process 0x{:016x}", process.get())?;
-                        if !name.is_empty() {
-                            write!(out, " {name:?}")?;
+                if args.summary {
+                    summary.record(item.object_kind, item.object_koid.get(), true);
+                } else {
+                    if *count == 0 {
+                        if !args.all && !args.no_headers {
+                            write!(out, "Process 0x{:016x}", process.get())?;
+                            if !name.is_empty() {
+                                write!(out, " {name:?}")?;
+                            }
+                            writeln!(out)?;
                         }
-                        writeln!(out)?;
+                        output::handle_header(args, out)?;
                     }
-                    output::handle_header(args, out)?;
+                    output::handle(args, item, name, out)?;
                 }
-                output::handle(args, item, name, out)?;
                 *count += 1;
             }
             Ok(())
@@ -221,7 +256,7 @@ pub(crate) fn scan<T: Copy, const N: usize>(
 }
 
 fn empty(args: &Handle, count: usize, noun: &str, out: &mut impl Write) -> io::Result<()> {
-    if count == 0 && !args.no_headers {
+    if count == 0 && !args.no_headers && !args.summary {
         writeln!(out, "(no matching {noun})")?;
     }
     Ok(())

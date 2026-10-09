@@ -3,6 +3,7 @@
 
 use clap::{ArgGroup, Parser};
 use hyper_os::handle::{ObjectKind, Rights};
+use hyper_tool_args::parse_id;
 use std::num::NonZeroU64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,6 +66,9 @@ pub struct Handle {
     /// Print table rows only, omitting headers, banners, and type-specific details.
     #[arg(long)]
     pub no_headers: bool,
+    /// Group matching entries by kind, showing object and handle counts.
+    #[arg(long, conflicts_with_all = ["verbose", "list_kinds", "list_rights", "handle"])]
+    pub summary: bool,
     /// List all SDK object kinds and their purposes; no inspector is needed.
     #[arg(long)]
     pub list_kinds: bool,
@@ -82,27 +86,6 @@ impl Handle {
         self.object.is_none_or(|id| id.get() == koid)
             && (self.kind.is_empty() || self.kind.contains(&kind.as_raw()))
     }
-}
-
-fn parse_id(value: &str) -> Result<NonZeroU64, String> {
-    let number = if let Some(hex) = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-    {
-        if hex.is_empty() || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
-            return Err("expected a nonzero 64-bit ID in decimal or 0x hexadecimal".into());
-        }
-        u64::from_str_radix(hex, 16)
-    } else {
-        if value.is_empty() || !value.bytes().all(|c| c.is_ascii_digit()) {
-            return Err("expected a nonzero 64-bit ID in decimal or 0x hexadecimal".into());
-        }
-        value.parse()
-    };
-    number
-        .ok()
-        .and_then(NonZeroU64::new)
-        .ok_or_else(|| "expected a nonzero 64-bit ID in decimal or 0x hexadecimal".into())
 }
 
 fn parse_kind(value: &str) -> Result<u32, String> {

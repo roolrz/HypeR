@@ -24,7 +24,12 @@ broker-test = []
 hyper-os = { workspace = true, features = ["std"] }
 hyper-rt.workspace = true
 hyper-service.workspace = true
-hyper-vm-policy.workspace = true
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "hyper")'.dependencies]
+hyper-vm-policy-shared.workspace = true
+
+[target.'cfg(not(target_os = "hyper"))'.dependencies]
+hyper-vm-policy.workspace = true

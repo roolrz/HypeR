@@ -9,17 +9,32 @@ use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Default, Parser)]
 #[command(
     name = "cp",
     about = "Copy files and directories; -R preserves symbolic links"
 )]
 pub struct Args {
-    #[arg(short = 'R', visible_short_alias = 'r', long)]
-    pub recursive: bool,
+    #[command(flatten)]
+    pub options: CopyOptions,
+    /// Treat DEST as an exact path, even when it is a directory.
+    #[arg(short = 'T', long)]
+    pub no_target_directory: bool,
     /// Source paths followed by the destination. Multiple sources require a directory.
     #[arg(required = true, num_args = 2..)]
     pub paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Default, clap::Args)]
+pub struct CopyOptions {
+    #[arg(short = 'R', visible_short_alias = 'r', long)]
+    pub recursive: bool,
+    /// Skip existing destination entries; new regular files use exclusive creation.
+    #[arg(short = 'n', long)]
+    pub no_clobber: bool,
+    /// Report copied files and links.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
 }
 
 fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
@@ -33,9 +48,9 @@ fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     }
 }
 
-fn destination_metadata(path: &Path) -> io::Result<Option<fs::Metadata>> {
+fn destination_metadata(path: &Path, no_clobber: bool) -> io::Result<Option<fs::Metadata>> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
+        Ok(metadata) if metadata.file_type().is_symlink() && !no_clobber => {
             Err(io::Error::other("refusing to overwrite a symbolic link"))
         }
         Ok(metadata) => Ok(Some(metadata)),
@@ -80,14 +95,44 @@ fn permissions(path: &Path, permissions: fs::Permissions) -> io::Result<()> {
     }
 }
 
-fn copy_regular(source: &Path, target: &Path, mode: fs::Permissions) -> io::Result<()> {
+fn copy_regular(
+    source: &Path,
+    target: &Path,
+    mode: fs::Permissions,
+    no_clobber: bool,
+) -> io::Result<bool> {
     let mut source = fs::File::open(source)?;
-    let mut destination = fs::File::create(target)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    if no_clobber {
+        options.create_new(true);
+    } else {
+        options.create(true).truncate(true);
+    }
+    let mut destination = match options.open(target) {
+        Ok(file) => file,
+        Err(error) if no_clobber && error.kind() == io::ErrorKind::AlreadyExists => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
     io::copy(&mut source, &mut destination)?;
-    permissions(target, mode)
+    destination.set_permissions(mode).or_else(|error| {
+        if error.kind() == io::ErrorKind::Unsupported {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    })?;
+    Ok(true)
 }
 
-pub fn copy(source: &Path, target: &Path, recursive: bool) -> io::Result<()> {
+pub fn copy(
+    source: &Path,
+    target: &Path,
+    options: &CopyOptions,
+    output: &mut impl io::Write,
+) -> io::Result<()> {
     // Keep directory depth off the application stack. Apply new directory
     // permissions after copying their children, so restrictive modes work too.
     let mut pending = vec![Work::Copy(source.to_path_buf(), target.to_path_buf())];
@@ -99,12 +144,22 @@ pub fn copy(source: &Path, target: &Path, recursive: bool) -> io::Result<()> {
                 continue;
             }
         };
-        let metadata = if recursive {
+        let metadata = if options.recursive {
             fs::symlink_metadata(&source)?
         } else {
             fs::metadata(&source)?
         };
-        let destination = destination_metadata(&target)?;
+        if metadata.is_dir() && !options.recursive {
+            return Err(io::Error::other("is a directory (use -R)"));
+        }
+        let destination = destination_metadata(&target, options.no_clobber)?;
+        if options.no_clobber
+            && destination
+                .as_ref()
+                .is_some_and(|dest| !(metadata.is_dir() && dest.is_dir()))
+        {
+            continue;
+        }
         if destination
             .as_ref()
             .is_some_and(|m| same_file(&metadata, m))
@@ -112,11 +167,15 @@ pub fn copy(source: &Path, target: &Path, recursive: bool) -> io::Result<()> {
             return Err(io::Error::other("source and destination are the same file"));
         }
         if metadata.file_type().is_symlink() {
-            symlink(fs::read_link(&source)?, &target)?;
-        } else if metadata.is_dir() {
-            if !recursive {
-                return Err(io::Error::other("is a directory (use -R)"));
+            match symlink(fs::read_link(&source)?, &target) {
+                Err(error)
+                    if options.no_clobber && error.kind() == io::ErrorKind::AlreadyExists =>
+                {
+                    continue;
+                }
+                result => result?,
             }
+        } else if metadata.is_dir() {
             check_directory_target(&source, &target)?;
             if let Some(metadata) = &destination {
                 if !metadata.is_dir() {
@@ -133,10 +192,16 @@ pub fn copy(source: &Path, target: &Path, recursive: bool) -> io::Result<()> {
                 let entry = entry?;
                 pending.push(Work::Copy(entry.path(), target.join(entry.file_name())));
             }
+            continue;
         } else if metadata.is_file() {
-            copy_regular(&source, &target, metadata.permissions())?;
+            if !copy_regular(&source, &target, metadata.permissions(), options.no_clobber)? {
+                continue;
+            }
         } else {
             return Err(io::Error::other("unsupported source file type"));
+        }
+        if options.verbose {
+            writeln!(output, "{} -> {}", source.display(), target.display())?;
         }
     }
     Ok(())
@@ -146,7 +211,7 @@ pub fn run(args: Args) -> bool {
     let Some((destination, sources)) = args.paths.split_last() else {
         return false;
     };
-    let directory = destination.is_dir();
+    let directory = !args.no_target_directory && destination.is_dir();
     if sources.len() > 1 && !directory {
         eprintln!(
             "cp: {}: multiple sources require a destination directory",
@@ -174,7 +239,7 @@ pub fn run(args: Args) -> bool {
         } else {
             destination.clone()
         };
-        if let Err(error) = copy(source, &target, args.recursive) {
+        if let Err(error) = copy(source, &target, &args.options, &mut io::stdout().lock()) {
             eprintln!("cp: {} -> {}: {error}", source.display(), target.display());
             success = false;
         }

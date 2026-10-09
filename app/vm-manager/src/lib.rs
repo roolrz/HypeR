@@ -7,6 +7,9 @@
 //! stop escalation remain owned by `hyper_service::vm`; this layer composes
 //! them with fleet restart intent, console ownership and monotonic deadlines.
 
+#[cfg(target_os = "hyper")]
+extern crate hyper_vm_policy_shared as hyper_vm_policy;
+
 use hyper_service::vm::{self, InstanceEvent, InstanceStatus, StopAction};
 use hyper_vm_policy::fleet;
 use std::time::{Duration, Instant};

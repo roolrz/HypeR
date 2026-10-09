@@ -12,7 +12,9 @@ SPDX-License-Identifier: Apache-2.0
 Open the repository root in VS Code with the `rust-lang.rust-analyzer`
 extension installed. The shared `.vscode/settings.json` explicitly loads all
 Cargo project roots, including the SDK workspace, Native applications,
-and build tools. Run `make sdk ARCH=aarch64` once to prepare the Native target
+shared libraries under `lib/`, and build tools. The shared libraries belong to
+`app/Cargo.toml`; do not add them as separate linked projects. Run
+`make sdk ARCH=aarch64` once to prepare the Native target
 and patched std sources, then **Developer: Reload Window** after updating editor
 settings. Continue opening
 the repository root; no separate editor workspace or generated configuration
@@ -46,6 +48,13 @@ repository-relative or resolved at invocation time, so relocating the checkout
 does not require regenerating settings. Root Make commands still explicitly
 select their production architecture and do not load the app-local Cargo config.
 
+Both editor commands explicitly run once per Cargo workspace. The check script
+resolves the owning workspace with `cargo locate-project` before selecting its
+target and SDK configuration, so invoking it from `lib/tool-args`, a `shared/`
+crate, or an application subdirectory uses the same Native configuration as
+`app/`. A direct invocation from the repository root checks the Native workspace.
+Checks use `--locked` so editor activity cannot silently rewrite lockfiles.
+
 The editor defaults to AArch64, like the existing kernel editor configuration;
 this does not change RISC-V builds. Rerun `make sdk ARCH=aarch64` and restart
 rust-analyzer after changing std/toolchain sources. Other LSP clients can reuse
@@ -77,13 +86,28 @@ Run it from the repository root so Native editor-target defaults are not loaded.
 manifests and builds continue to consume installed SDK sources.
 
 `make app` builds and installs ordinary system applications, including the I/O
-runtime. `make app-fixtures` additionally builds static/dynamic linking probes
+runtime, and the shared libraries under `lib/`. These libraries explicitly belong
+to `app/Cargo.toml`; they use the same installed-SDK boundary, lints, checks and
+host tests as applications. Native consumers select the `shared/` dylib packages;
+host tests use the implementation rlibs. The Native-only delivery packages are
+excluded from host test linking. `make app-fixtures` additionally builds
+static/dynamic linking probes
 and Rust std smoke programs. Specialized VM smoke binaries remain owned by their
 acceptance targets.
 
+Feature-specific fixtures also build the complete workspace and stage its
+executables and DSOs together. `APP_FEATURES` selects package-qualified Cargo
+features; `APP_EXTRA_BINS` selects additional acceptance binaries. Use a separate
+`APP_OUTPUT` to keep instrumented applications and libraries out of the ordinary
+deployment. Updating only a runtime binary can leave its Rust generic symbols
+incompatible with previously staged libraries, even when their SONAMEs match.
+
 [app/deployment.json](../app/deployment.json) is the shared installation and
 initramfs payload manifest. A binary entry defines its Cargo binary, staged
-filename, archive destination, mode, and image membership. Cargo workspace
+filename, archive destination, mode, and image membership. Shared libraries use
+`library` entries in the same manifest and are installed under
+`/lib64/<arch>-hyper-hyper/`. A `symlink` entry creates `/lib -> lib64` in the
+archive. Cargo workspace
 membership remains a build concern; service manifests still own startup and
 capabilities, and board JSON still owns storage and device deployment.
 
@@ -92,9 +116,39 @@ apps and test programs. `NATIVE_IMAGE_PROFILE=system` includes all ordinary apps
 and runtime libraries without acceptance probes; it also avoids building those
 probes. The I/O service is included by the existing I/O/board boot profiles.
 Changing image membership does not delete applications or their capabilities.
-Packaging still copies ELF files before stripping only debug information and
+For AArch64, the runtime filesystem layout is:
+
+```text
+/lib -> lib64
+/lib64/aarch64-hyper-hyper/
+    ld-hyper-aarch64.so
+    libhyper.so
+    libhyper_rust_std.so
+    libhyper_tool_args_shared.so
+    libhyper_vm_policy_shared.so
+    libhyper_vm_support_shared.so
+```
+
+RISC-V uses `riscv64-hyper-hyper` and `ld-hyper-riscv64.so`. ELF `PT_INTERP`
+names `/lib/<arch>-hyper-hyper/ld-hyper-<arch>.so`. The initial process receives
+the architecture subdirectory as its dynamic-library Directory capability and
+passes it to children; the loader opens exact `DT_NEEDED` names relative to that
+handle, with no fallback to another architecture or an ambient search path.
+This runtime directory name does not change the Rust `<arch>-unknown-hyper`
+compiler target. Architecture-specific SDK and application build staging areas
+retain their own `lib/` artifact directories; deployment selects the runtime paths.
+
+Before publication, packaging validates the selected ELF dependency graphs,
+architectures, SONAMEs and dynamic symbols. It copies ELF files before stripping
+only debug information and
 preserves unchanged output timestamps. Use a separate `NATIVE_INITRAMFS` or
 `BOARD_OUTPUT` when comparing profiles.
+
+Archive entry triples normally contain `MODE ARCHIVE_PATH SOURCE`. For a symbolic
+link use `symlink ARCHIVE_PATH RELATIVE_TARGET`; targets are canonical relative
+paths without `.` or `..` components. The packer emits a symlink with mode 0777
+and stores the target text, without following build-host paths. Files must be
+listed under their real directories rather than beneath an archive symlink.
 
 Before packing, `services.json` is checked on the host using init's production
 parser, bootstrap authority policy, and supervision rules. Invalid syntax,

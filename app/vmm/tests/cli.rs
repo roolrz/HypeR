@@ -2,6 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+
+#[test]
+fn wait_is_opt_in_bounded_and_lifecycle_only() -> Result<(), clap::Error> {
+    for command in ["start", "stop", "restart"] {
+        let args = Vmm::try_parse_from(["vmm", command, "alpine", "--wait", "--timeout", "5"])?;
+        assert!(
+            args.command
+                .and_then(|c| c.completion())
+                .is_some_and(|c| c.timeout.as_secs() == 5)
+        );
+        assert!(Vmm::try_parse_from(["vmm", command, "alpine", "--timeout", "5"]).is_err());
+        assert!(
+            Vmm::try_parse_from(["vmm", command, "alpine", "--wait", "--timeout", "0"]).is_err()
+        );
+    }
+    assert!(Vmm::try_parse_from(["vmm", "status", "alpine", "--wait"]).is_err());
+    Ok(())
+}
 #[test]
 fn commands_require_explicit_names() {
     for command in ["status", "start", "stop", "restart", "console", "delete"] {

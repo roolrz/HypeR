@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "hyper-tool-args"
+workspace = "../../app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+autotests = false
+
+[dependencies]
+clap.workspace = true
+
+[lints]
+workspace = true

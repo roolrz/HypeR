@@ -3,6 +3,9 @@
 
 //! Supervised lifetime owner for the trusted, idle Linux storage backend.
 
+#[cfg(target_os = "hyper")]
+extern crate hyper_vm_support_shared as hyper_vm_support;
+
 #[cfg(all(target_os = "hyper", target_arch = "aarch64"))]
 mod runtime;
 

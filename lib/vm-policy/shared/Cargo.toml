@@ -2,22 +2,23 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "hyper-vm-support"
+name = "hyper-vm-policy-shared"
+workspace = "../../../app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-autotests = false
+
+[lib]
+crate-type = ["dylib"]
+test = false
+bench = false
+doctest = false
 
 [dependencies]
-hyper-os = { workspace = true, features = ["std"] }
-hyper-service.workspace = true
-hyper-vm-image.workspace = true
-hyper-vm-policy.workspace = true
-
-[features]
-startup-profile = []
+implementation = { package = "hyper-vm-policy", path = ".." }
+hyper-rust-std.workspace = true
 
 [lints]
 workspace = true

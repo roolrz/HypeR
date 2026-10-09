@@ -17,6 +17,7 @@
         "kernel/Cargo.toml",
         "sdk/abi/Cargo.toml",
         "sdk/rust/Cargo.toml",
+        // This workspace also owns the implementation and shared crates in lib/.
         "app/Cargo.toml",
         "sdk/toolchain/tests/rust-smoke/Cargo.toml",
         "sdk/toolchain/tests/std-smoke/Cargo.toml",
@@ -28,9 +29,11 @@
         "RUSTC_BOOTSTRAP": "1",
         "CARGO_UNSTABLE_JSON_TARGET_SPEC": "true"
     },
+    "rust-analyzer.cargo.buildScripts.invocationStrategy": "per_workspace",
     "rust-analyzer.cargo.buildScripts.overrideCommand": [
         "sh", "-c", "exec sh \"$(git rev-parse --show-toplevel)/scripts/rust-analyzer-check.sh\""
     ],
+    "rust-analyzer.check.invocationStrategy": "per_workspace",
     "rust-analyzer.check.overrideCommand": [
         "sh", "-c", "exec sh \"$(git rev-parse --show-toplevel)/scripts/rust-analyzer-check.sh\""
     ]

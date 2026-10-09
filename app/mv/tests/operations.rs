@@ -3,6 +3,22 @@
 
 use super::*;
 
+#[test]
+fn exact_destination_renames_instead_of_nesting() -> io::Result<()> {
+    let d = Directory::new()?;
+    fs::create_dir(d.path("source"))?;
+    fs::create_dir(d.path("destination"))?;
+    fs::write(d.path("source/file"), b"data")?;
+    assert!(run(Args {
+        no_target_directory: true,
+        paths: vec![d.path("source"), d.path("destination")],
+        ..Args::default()
+    }));
+    assert_eq!(fs::read(d.path("destination/file"))?, b"data");
+    assert!(!d.path("destination/source").exists());
+    Ok(())
+}
+
 struct Directory(std::path::PathBuf);
 impl Directory {
     fn new() -> std::io::Result<Self> {
@@ -43,7 +59,8 @@ fn multiple_sources_and_errors() -> io::Result<()> {
     fs::create_dir(d.path("out"))?;
     fs::write(d.path("file"), b"data")?;
     assert!(!run(Args {
-        paths: vec![d.path("missing"), d.path("file"), d.path("out")]
+        paths: vec![d.path("missing"), d.path("file"), d.path("out")],
+        ..Args::default()
     }));
     assert_eq!(fs::read(d.path("out/file"))?, b"data");
     assert!(Args::try_parse_from(["mv", "one"]).is_err());

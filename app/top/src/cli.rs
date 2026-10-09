@@ -1,7 +1,14 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Sort {
+    Cpu,
+    Name,
+    Koid,
+}
 
 #[derive(Debug, Parser)]
 #[command(about = "Monitor Native CPU, memory and processes")]
@@ -13,16 +20,16 @@ pub struct Top {
     #[arg(short = 'n', long)]
     pub iterations: Option<std::num::NonZeroU32>,
     /// Refresh period in seconds (0.1 to 60).
-    #[arg(short = 'd', long, default_value = "1", value_parser = parse_delay)]
+    #[arg(short = 'd', long, default_value = "1", value_parser = hyper_tool_args::parse_interval)]
     pub delay: f64,
-}
-
-fn parse_delay(value: &str) -> Result<f64, String> {
-    let delay: f64 = value.parse().map_err(|_| "expected seconds".to_string())?;
-    if !delay.is_finite() || !(0.1..=60.0).contains(&delay) {
-        return Err("delay must be between 0.1 and 60 seconds".into());
-    }
-    Ok(delay)
+    #[command(flatten)]
+    pub filter: hyper_tool_args::ProcessFilter,
+    /// Order process rows; ties are resolved by KOID.
+    #[arg(long, value_enum, default_value = "cpu")]
+    pub sort: Sort,
+    /// Show at most this many matching process rows (summary remains system-wide).
+    #[arg(short = 'l', long)]
+    pub limit: Option<std::num::NonZeroUsize>,
 }
 
 #[cfg(test)]

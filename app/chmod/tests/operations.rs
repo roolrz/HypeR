@@ -54,7 +54,13 @@ fn recursion_skips_external_symlink_targets() -> Result<(), Box<dyn std::error::
     fs::create_dir(d.path("tree"))?;
     fs::write(d.path("tree/file"), b"data")?;
     std::os::unix::fs::symlink("../outside", d.path("tree/link"))?;
-    change(&d.path("tree"), &"u=rwX,go=".parse()?, true)?;
+    change(
+        &d.path("tree"),
+        &"u=rwX,go=".parse()?,
+        true,
+        false,
+        &mut io::sink(),
+    )?;
     assert_eq!(
         fs::metadata(d.path("tree"))?.permissions().mode() & 0o777,
         0o700

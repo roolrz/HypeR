@@ -333,12 +333,12 @@ fn default_affinity_survives_config_and_bounded_runtime_transport() {
 #[test]
 fn checked_in_vm_configurations_are_complete() {
     for bytes in [
-        include_bytes!("../../init/tests/config/vms.json").as_slice(),
-        include_bytes!("../../init/tests/config/vms-riscv64.json").as_slice(),
-        include_bytes!("../../init/tests/config/vms-io.json").as_slice(),
-        include_bytes!("../../init/tests/config/vms-power-crash.json").as_slice(),
-        include_bytes!("../../init/tests/config/vms-smp-4.json").as_slice(),
-        include_bytes!("../../init/tests/config/vms-smp-8.json").as_slice(),
+        include_bytes!("../../../app/init/tests/config/vms.json").as_slice(),
+        include_bytes!("../../../app/init/tests/config/vms-riscv64.json").as_slice(),
+        include_bytes!("../../../app/init/tests/config/vms-io.json").as_slice(),
+        include_bytes!("../../../app/init/tests/config/vms-power-crash.json").as_slice(),
+        include_bytes!("../../../app/init/tests/config/vms-smp-4.json").as_slice(),
+        include_bytes!("../../../app/init/tests/config/vms-smp-8.json").as_slice(),
     ] {
         let config = Config::parse(bytes).unwrap();
         for definition in config.machines {
