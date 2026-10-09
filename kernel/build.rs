@@ -73,6 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ("hal/src/arch/riscv64/boot.S", "riscv64_boot.o"),
                 ("hal/src/arch/riscv64/trap.S", "riscv64_trap.o"),
                 ("hal/src/arch/riscv64/context.S", "riscv64_context.o"),
+                ("hal/src/arch/riscv64/fp.S", "riscv64_fp.o"),
                 ("hal/src/arch/riscv64/guest.S", "riscv64_guest.o"),
                 ("hal/src/arch/riscv64/user.S", "riscv64_user.o"),
                 ("hal/src/arch/riscv64/cache.S", "riscv64_cache.o"),
@@ -108,13 +109,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
         println!("cargo:rustc-link-arg-bin=hyper={}", object_path.display());
     }
-    if target == "aarch64-unknown-none-softfloat"
-        && env::var_os("CARGO_FEATURE_KERNEL_SELF_TEST").is_some()
+    if matches!(
+        target.as_str(),
+        "aarch64-unknown-none-softfloat" | "riscv64imac-unknown-none-elf"
+    ) && env::var_os("CARGO_FEATURE_KERNEL_SELF_TEST").is_some()
     {
-        let source = "tests/kernel/native_user_entry/fp.S";
+        let source = if target == "riscv64imac-unknown-none-elf" {
+            "tests/kernel/native_user_entry/fp-riscv64.S"
+        } else {
+            "tests/kernel/native_user_entry/fp.S"
+        };
         println!("cargo:rerun-if-changed={source}");
-        let object = output_directory.join("aarch64_fp_probes.o");
-        compile_assembly(clang_target, None, source, &output_directory, &object)?;
+        let object = output_directory.join("fp_probes.o");
+        compile_assembly(
+            clang_target,
+            (target == "riscv64imac-unknown-none-elf")
+                .then_some("rv64imafdc_h_zicsr_zifencei_zicbom"),
+            source,
+            &output_directory,
+            &object,
+        )?;
         println!("cargo:rustc-link-arg-bin=hyper={}", object.display());
     }
     Ok(())

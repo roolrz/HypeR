@@ -241,7 +241,7 @@ impl InstalledVm {
     #[cfg(feature = "kernel-self-test")]
     #[allow(
         dead_code,
-        reason = "the executable migration fixture currently has only an AArch64 guest payload"
+        reason = "the executable migration fixture has only AArch64 and RISC-V guest payloads"
     )]
     pub(crate) fn start_boot_for_test(self) -> Result<RunningVmForTest, &'static str> {
         let running = RunningVmForTest {
@@ -265,7 +265,7 @@ impl InstalledVm {
 #[cfg(feature = "kernel-self-test")]
 #[allow(
     dead_code,
-    reason = "the executable migration fixture currently has only an AArch64 guest payload"
+    reason = "the executable migration fixture has only AArch64 and RISC-V guest payloads"
 )]
 pub(crate) struct RunningVmForTest {
     thread: ThreadId,
@@ -276,7 +276,7 @@ pub(crate) struct RunningVmForTest {
 impl RunningVmForTest {
     #[allow(
         dead_code,
-        reason = "the executable migration fixture currently has only an AArch64 guest payload"
+        reason = "the executable migration fixture has only AArch64 and RISC-V guest payloads"
     )]
     pub(crate) const fn thread(&self) -> ThreadId {
         self.thread
@@ -284,7 +284,7 @@ impl RunningVmForTest {
 
     #[allow(
         dead_code,
-        reason = "the executable migration fixture currently has only an AArch64 guest payload"
+        reason = "the executable migration fixture has only AArch64 and RISC-V guest payloads"
     )]
     pub(crate) fn stop(self) {
         crate::kernel::vm::installed::InstalledMachine::request_stop(&self.owner);

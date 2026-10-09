@@ -49,5 +49,8 @@ pub(crate) use super::imp::{
     assert_kernel_pan as assert_kernel_access, user_translation_identifier_bits,
 };
 
-#[cfg(all(target_arch = "aarch64", feature = "kernel-self-test"))]
+#[cfg(all(
+    any(target_arch = "aarch64", target_arch = "riscv64"),
+    feature = "kernel-self-test"
+))]
 pub(crate) use super::imp::fp_state_counts_for_test;

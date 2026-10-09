@@ -9,6 +9,7 @@ use hyper::cpu::CpuIndex;
 
 // x0 is the shared counter's IPA. STLR pairs with the host's atomic load;
 // the counter register itself must survive every exception and migration.
+#[cfg(CONFIG_ARCH_AARCH64)]
 const BUSY: [u32; 4] = [
     0xd2800001, // mov x1, #0
     0x91000421, // add x1, x1, #1
@@ -18,6 +19,7 @@ const BUSY: [u32; 4] = [
 
 // Leave guest IRQs masked and arm the virtual timer before WFI. The endpoint
 // timer must wake this vCPU even after its blocked Thread changes physical CPU.
+#[cfg(CONFIG_ARCH_AARCH64)]
 const TIMER: [u32; 12] = [
     0xd2800001, // mov x1, #0
     0xd53be002, // mrs x2, cntfrq_el0
@@ -81,15 +83,19 @@ pub(super) fn run() -> Result<(), Error> {
         );
         return Ok(());
     }
-    exercise(&BUSY)?;
-    exercise(&TIMER)?;
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        exercise(&BUSY)?;
+        exercise(&TIMER)?;
+    }
     exercise_bytes(super::native_user_entry::fp_guest_program(false))?;
     exercise_bytes(super::native_user_entry::fp_guest_program(true))?;
-    crate::pr_info!("HypeR test: lazy FP guest preemption, timer wait and migration passed");
+    crate::pr_info!("HypeR test: guest FP preemption, timer wait and migration passed");
     crate::pr_info!("HypeR test: running and timer-waiting vCPU migration and retirement passed");
     Ok(())
 }
 
+#[cfg(CONFIG_ARCH_AARCH64)]
 fn exercise(program: &[u32]) -> Result<(), Error> {
     let mut code = [0u8; TIMER.len() * 4];
     for (bytes, instruction) in code.chunks_exact_mut(4).zip(program) {
@@ -106,7 +112,7 @@ fn exercise_bytes(code: &[u8]) -> Result<(), Error> {
     let thread = running.thread();
     let result = (|| {
         // SAFETY: The installed VM owner retains this initialized, aligned RAM
-        // throughout the closure. Guest accesses are same-width STLR stores;
+        // throughout the closure. Guest accesses are same-width release stores;
         // only atomic host loads occur until all observation has finished.
         let counter = unsafe { &*counter };
         wait(|| counter_progress(counter, 0))?;

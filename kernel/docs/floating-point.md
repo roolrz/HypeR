@@ -3,14 +3,17 @@
 
 # Floating-point context ownership
 
-AArch64 Native threads and guest vCPUs restore FP/SIMD state on first use in a
-machine run. An integer-only run does not load or save that state. Once loaded,
-the complete register image remains resident across direct Native syscalls,
+AArch64 Native threads and guest vCPUs, and RISC-V Native threads, restore FP
+state on first use in a machine run. Their valid integer-only runs do not load
+or save that state. RISC-V guests restore once at each machine-run entry
+for the platform reason below. Once loaded, the complete register image
+remains resident across direct Native syscalls,
 handled guest exits, and interrupts which return without scheduling.
 
-The privileged AArch64 kernel uses `aarch64-unknown-none-softfloat`. Native
-applications continue using the normal hard-float ABI. Kernel Rust code,
-compiler builtins, and ordinary assembly may not use FP/SIMD registers. The
+The privileged AArch64 kernel uses `aarch64-unknown-none-softfloat`; RISC-V
+retains `riscv64imac-unknown-none-elf`. Native applications continue using
+their normal hard-float ABIs. Kernel Rust code, compiler builtins, and ordinary
+assembly may not use FP/SIMD registers. The
 linked-image test checks this requirement outside three audited assembly leaves
 which initialize, restore, or save and clear an owner's state. An unexpected
 kernel FP access is a fatal synchronous exception, never a request to borrow a
@@ -18,9 +21,10 @@ user's registers.
 
 ## Run boundaries
 
-Each initialized machine context owns all 32 128-bit vector registers, FPCR,
-and FPSR. New contexts start at zero. There is no independent CPU-local owner
-pointer: the existing generation-qualified Native or guest run publication
+Each initialized AArch64 machine context owns all 32 128-bit vector registers,
+FPCR, and FPSR. RISC-V owns all 32 64-bit F/D registers and FCSR. New contexts
+start at zero. There is no independent CPU-local owner pointer: the existing
+generation-qualified Native or guest run publication
 identifies the only lower world permitted to acquire the registers.
 
 Under VHE, `CPTR_EL2.FPEN` records residency for the interrupted lower world.
@@ -31,13 +35,39 @@ advancing the PC. Guest CPACR_EL1 remains guest-owned; HypeR's EL2 control does
 not override the guest operating system's own FP access policy. Optional SVE
 and SME state remains unsupported and trapped.
 
+On RISC-V, the saved HS `sstatus.FS` records residency, independently of the
+owned `vsstatus.FS` policy. Trap entry disables physical FS before privileged
+Rust runs. Because an FS-off Native instruction raises an ordinary illegal
+instruction exception, the first illegal trap restores its bank and retries
+the same PC. A genuine Native illegal instruction faults on the second attempt.
+This conservative retry can restore FP for an illegal integer instruction,
+but valid integer-only runs never restore FP. No instruction fetch or decoder
+is required.
+
+RISC-V guests retain normal `hedeleg` and restore once at every machine-run
+entry, then keep the bank across direct traps. Guest FS policy is unchanged.
+Lazy guest restore requires routing an FS-off illegal trap from VS to HS.
+On the tested QEMU 11.1.2 / OpenSBI 1.8.1 combination, OpenSBI correctly prepares
+a return with `mstatus.MPV=0`, but the CSR write leaves MPV set; `mret` then
+attempts to execute the HS vector in VS and faults. This matches the QEMU
+[change making MPV writes read-only](https://patchew.org/QEMU/20260616100527.1939565-1-alistair.francis%40wdc.com/20260616100527.1939565-5-alistair.francis%40wdc.com/)
+(commit `18645f19578955ec5ff2c40cd2c8753d6bc460c2`). The safe policy does not
+change installed firmware, guess emulator versions, or depend on a test-only
+boot configuration. A future guest first-use policy needs a qualified trap
+route on the supported platform; current RISC-V guests are not fully lazy.
+Guest stop and IRQ-tail actions pass through one final save-and-scrub boundary
+before the assembly anchor unwinds, including deferred device exits.
+
 A real Native unwind saves used state before closing run publication. Guest
-wait, device, terminal, and administrative-stop exits do the same. Guest IRQ
-postludes are also ownership boundaries: they can deactivate, schedule, migrate,
-or terminate the vCPU without unwinding the original exception frame. Before
+wait, device, terminal, and administrative-stop exits do the same. AArch64
+guest IRQ postludes are also ownership boundaries: they can deactivate,
+schedule, migrate, or terminate the vCPU without unwinding the original
+exception frame. Before
 invoking such a callback, entry saves the state and marks the suspended frame
 as requiring another first-use restore. This remains necessary when the
-postlude happens to reconcile interrupts without changing CPUs.
+postlude happens to reconcile interrupts without changing CPUs. RISC-V saves
+and clears the bank before its typed IRQ-tail anchor unwind, then eagerly
+restores it when the guest runner begins the next run.
 
 Save and release clears the physical vector registers and FP controls before
 returning. Startup clears firmware state on every CPU. Consequently no prior
@@ -59,12 +89,15 @@ first-use trap after each ownership boundary, and the soft-float kernel also
 changes the generated code for operations such as memory copies. Workload
 measurements are separate from the isolation tests.
 
-RISC-V and x86-64 retain their existing context handling. This does not enable
-x86 lazy restore or extend the guest CPU model with additional register banks.
+x86-64 retains its existing context handling; this does not add unsupported
+Native or guest execution paths. RVV, SVE and SME register banks remain outside
+the admitted execution contract.
 
 The QEMU self-tests exercise integer-only Native execution, initialized FP
 state, preservation across direct and deferred syscalls, competing owners,
-preemption, and guest affinity migration. The normal Linux guest acceptance
-also exercises Native/guest interleaving. These establish architectural behavior
-in the emulator; physical AArch64 validation remains necessary for implementation
-specific trap and speculative-execution behavior.
+preemption, guest timer waits, and guest affinity migration. RISC-V probes also
+verify genuine VS illegal-instruction delegation and the guest FS=Off policy.
+The normal Linux guest acceptance also exercises Native/guest interleaving.
+These establish architectural behavior
+in the emulator; physical hardware validation remains necessary for
+implementation-specific trap and speculative-execution behavior.

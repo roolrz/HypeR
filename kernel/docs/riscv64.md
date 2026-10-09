@@ -29,12 +29,18 @@ The Rust target remains `riscv64imac-unknown-none-elf`. Ordinary Rust kernel
 code therefore has a conservative soft-float baseline. Clang compiles the
 small architecture assembly set with RV64GC+H but `-mabi=lp64`, keeping object
 ABIs compatible while isolating H, F, D, and Zicbom instructions. Guest
-floating-point state is initialized deterministically and has an explicit
-save/restore context.
+floating-point state is initialized deterministically; the kernel restores it
+once per guest run and saves and clears it at real ownership boundaries. The final
+ELF audit rejects FP/vector instructions outside three state-transfer leaves.
 
 Native applications use RV64GC LP64D through the installed RISC-V SDK, with
 static or dynamic linking and the HypeR Rust std port. A dedicated U-mode trap
-entry retains all integer registers, all 32 floating-point registers, and FCSR.
+entry saves integer registers and disables physical FP access before Rust.
+The run owns all 32 floating-point registers and FCSR; direct trap returns
+retain the bank, while scheduling and deferred exits save and clear it.
+[FP ownership](floating-point.md) documents first-use illegal-instruction
+retry for Native threads, per-run eager guest restore, separate HS/VS FS
+controls, and migration invariants.
 The runtime owns `tp`; kernel Rust executes with the restored host `gp`/`tp`.
 Native calls use `ecall`, `a7` for the operation, `a0`–`a5` for arguments,
 and `a0`–`a2` for status and results.

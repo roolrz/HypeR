@@ -174,7 +174,10 @@ impl GuestAddressSpace {
 
     /// Returns a raw pointer into retained test RAM, without creating a borrow.
     /// Dereferencing requires retaining this VM and using only atomic accesses.
-    #[cfg(all(feature = "kernel-self-test", CONFIG_ARCH_AARCH64))]
+    #[cfg(all(
+        feature = "kernel-self-test",
+        any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)
+    ))]
     pub(crate) fn atomic_counter_for_test(
         &self,
         ipa: u64,

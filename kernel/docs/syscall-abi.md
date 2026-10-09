@@ -101,10 +101,13 @@ not DMA isolation. An untrusted driver domain requires separately qualified
 IOMMU-backed ownership and retirement.
 
 Speculative state, extended registers, debug state, TLS, and address-space
-identifiers are part of the execution boundary. The initial implementation
-must save and clear state eagerly when ownership is uncertain. Lazy switching
-is permitted only after a separate ownership state machine and physical-
-hardware validation exist.
+identifiers are part of the execution boundary. AArch64 and RISC-V use the
+[run-scoped FP ownership contract](floating-point.md): first use restores the
+exact admitted Native owner's initialized state, while every ownership boundary
+saves and clears the physical bank before another context can run. Kernel
+code cannot borrow that bank. QEMU probes validate these state transitions;
+physical trap and speculative-execution behavior still needs hardware
+qualification. Cross-run lazy ownership caching is not implemented.
 
 ## Layer and module boundaries
 

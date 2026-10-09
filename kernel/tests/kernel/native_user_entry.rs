@@ -5,9 +5,9 @@
 
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod aarch64;
-#[cfg(CONFIG_ARCH_AARCH64)]
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 mod fp;
-#[cfg(CONFIG_ARCH_AARCH64)]
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 pub(super) use fp::guest_program as fp_guest_program;
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod atomic_wait;

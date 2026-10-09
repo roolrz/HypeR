@@ -198,7 +198,10 @@ pub(crate) fn reserve<Namespace: IdentifierNamespace>(
 
 /// Force real namespace rollover without installing synthetic owners into
 /// hardware. An anchor proves that a pinned tag survives the rollover.
-#[cfg(all(feature = "kernel-self-test", CONFIG_ARCH_AARCH64))]
+#[cfg(all(
+    feature = "kernel-self-test",
+    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)
+))]
 pub(crate) fn test_rollover<Namespace: IdentifierNamespace>(width: u8) -> Result<(), Error> {
     let anchor = reserve::<Namespace>(width)?.activate()?;
     let pinned = anchor.acquire()?;

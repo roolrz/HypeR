@@ -26,7 +26,7 @@ const EXIT_NONE: u64 = 0;
 const EXIT_NATIVE: u64 = 1;
 const EXIT_FAULT: u64 = 2;
 const EXIT_INTERRUPTED: u64 = 3;
-const NATIVE_STATE: u64 = (2 << 32) | (3 << 13) | registers::SSTATUS_SPIE;
+const NATIVE_STATE: u64 = (2 << 32) | registers::SSTATUS_SPIE;
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
@@ -36,13 +36,11 @@ struct NativeFrame {
     status: u64,
     cause: u64,
     fault_address: u64,
-    floating: [u64; 32],
-    fcsr: u64,
-    _padding: u64,
 }
 #[repr(C, align(16))]
 struct MachineContext {
     frame: NativeFrame,
+    fp: super::fp::State,
     thread: u64,
     image_generation: u64,
     run_generation: u64,
@@ -83,10 +81,8 @@ impl UserContext {
                     status: NATIVE_STATE,
                     cause: 0,
                     fault_address: 0,
-                    floating: [0; 32],
-                    fcsr: 0,
-                    _padding: 0,
                 },
+                fp: super::fp::State::zeroed(),
                 thread: 0,
                 image_generation: 0,
                 run_generation: 0,
@@ -401,6 +397,7 @@ fn capture(mut active: ActiveRun, frame: &NativeFrame, exit_kind: u64) -> Result
     if context.state != RUNNING || context.run_generation != active.generation {
         return Err(Error::InvalidMachineState);
     }
+    super::fp::save(&mut context.fp, frame.status);
     context.frame = *frame;
     context.exit_kind = exit_kind;
     context.state = STOPPED;
@@ -438,7 +435,17 @@ extern "C" fn riscv64_native_trap_dispatch(frame: &mut NativeFrame) -> u64 {
     }
 }
 fn dispatch_synchronous(frame: &mut NativeFrame) -> Result<u64, Error> {
-    let active = active_run()?;
+    let mut active = active_run()?;
+    if frame.cause == 2 && frame.status & registers::SSTATUS_FS_MASK == 0 {
+        // SAFETY: The generation-qualified publication owns this masked run.
+        let context = unsafe { active.context.as_mut() };
+        if context.state != RUNNING || context.run_generation != active.generation {
+            return Err(Error::InvalidMachineState);
+        }
+        super::fp::restore(&context.fp, &mut frame.status)
+            .map_err(|_| Error::InvalidMachineState)?;
+        return Ok(0);
+    }
     if frame.cause == 8 {
         // ECALL is always four bytes, even with compressed instructions enabled.
         frame.pc = frame.pc.checked_add(4).ok_or(Error::InvalidMachineState)?;
@@ -527,8 +534,6 @@ const _: () = {
     assert!(offset_of!(NativeFrame, status) == registers::USER_FRAME_STATUS_OFFSET as usize);
     assert!(offset_of!(NativeFrame, cause) == registers::USER_FRAME_CAUSE_OFFSET as usize);
     assert!(offset_of!(NativeFrame, fault_address) == registers::USER_FRAME_FAULT_OFFSET as usize);
-    assert!(offset_of!(NativeFrame, floating) == registers::USER_FRAME_FLOATING_OFFSET as usize);
-    assert!(offset_of!(NativeFrame, fcsr) == registers::USER_FRAME_FCSR_OFFSET as usize);
     assert!(size_of::<NativeFrame>() == registers::USER_FRAME_SIZE as usize);
     assert!(offset_of!(MachineContext, frame) == 0);
 };

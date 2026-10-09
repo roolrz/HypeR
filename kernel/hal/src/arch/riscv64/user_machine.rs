@@ -39,6 +39,7 @@ pub type ContractError = Error;
 /// Essential-device discovery rejects every enabled CPU without the complete
 /// RV64IMAFDC + Zicsr/Zifencei/H/Sstc/Zicbom contract.
 pub(super) fn discover_local() -> bool {
+    super::fp::initialize_local();
     let previous: u64;
     let probed: u64;
     // SAFETY: Boot admission keeps interrupts masked and no Native roots exist.

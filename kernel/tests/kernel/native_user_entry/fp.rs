@@ -11,12 +11,24 @@ use crate::kernel::task::{self, scheduler};
 use hyper::{cpu::CpuIndex, mm::PAGE_SIZE};
 
 unsafe extern "C" {
-    static aarch64_native_fp_probe_start: u8;
-    static aarch64_native_fp_probe_end: u8;
-    static aarch64_guest_fp_probe_start: u8;
-    static aarch64_guest_fp_probe_end: u8;
-    static aarch64_guest_fp_wait_probe_start: u8;
-    static aarch64_guest_fp_wait_probe_end: u8;
+    #[cfg_attr(CONFIG_ARCH_AARCH64, link_name = "aarch64_native_fp_probe_start")]
+    #[cfg_attr(CONFIG_ARCH_RISCV64, link_name = "riscv64_native_fp_probe_start")]
+    static native_fp_probe_start: u8;
+    #[cfg_attr(CONFIG_ARCH_AARCH64, link_name = "aarch64_native_fp_probe_end")]
+    #[cfg_attr(CONFIG_ARCH_RISCV64, link_name = "riscv64_native_fp_probe_end")]
+    static native_fp_probe_end: u8;
+    #[cfg_attr(CONFIG_ARCH_AARCH64, link_name = "aarch64_guest_fp_probe_start")]
+    #[cfg_attr(CONFIG_ARCH_RISCV64, link_name = "riscv64_guest_fp_probe_start")]
+    static guest_fp_probe_start: u8;
+    #[cfg_attr(CONFIG_ARCH_AARCH64, link_name = "aarch64_guest_fp_probe_end")]
+    #[cfg_attr(CONFIG_ARCH_RISCV64, link_name = "riscv64_guest_fp_probe_end")]
+    static guest_fp_probe_end: u8;
+    #[cfg_attr(CONFIG_ARCH_AARCH64, link_name = "aarch64_guest_fp_wait_probe_start")]
+    #[cfg_attr(CONFIG_ARCH_RISCV64, link_name = "riscv64_guest_fp_wait_probe_start")]
+    static guest_fp_wait_probe_start: u8;
+    #[cfg_attr(CONFIG_ARCH_AARCH64, link_name = "aarch64_guest_fp_wait_probe_end")]
+    #[cfg_attr(CONFIG_ARCH_RISCV64, link_name = "riscv64_guest_fp_wait_probe_end")]
+    static guest_fp_wait_probe_end: u8;
 }
 
 fn program(start: *const u8, end: *const u8) -> &'static [u8] {
@@ -29,13 +41,13 @@ fn program(start: *const u8, end: *const u8) -> &'static [u8] {
 pub(crate) fn guest_program(wait: bool) -> &'static [u8] {
     if wait {
         program(
-            &raw const aarch64_guest_fp_wait_probe_start,
-            &raw const aarch64_guest_fp_wait_probe_end,
+            &raw const guest_fp_wait_probe_start,
+            &raw const guest_fp_wait_probe_end,
         )
     } else {
         program(
-            &raw const aarch64_guest_fp_probe_start,
-            &raw const aarch64_guest_fp_probe_end,
+            &raw const guest_fp_probe_start,
+            &raw const guest_fp_probe_end,
         )
     }
 }
@@ -83,17 +95,31 @@ fn with_probe(
     test: impl FnOnce(&Probe) -> Result<(), Error>,
 ) -> Result<(), Error> {
     let source = program(
-        &raw const aarch64_native_fp_probe_start,
-        &raw const aarch64_native_fp_probe_end,
+        &raw const native_fp_probe_start,
+        &raw const native_fp_probe_end,
     );
     let mut code = [0u8; PAGE_SIZE as usize];
     if source.len() > code.len() || source.len() < 4 {
         return Err(Error::Image);
     }
     code[..source.len()].copy_from_slice(source);
-    // MOVZ x19, #seed. Each independent owner uses a different complete bank.
-    code[..4].copy_from_slice(&(0xd2800013u32 | (u32::from(seed) << 5)).to_le_bytes());
-    let process = prepare_process(domain, group, &code[..source.len()], MachineAbi::Aarch64)?;
+    // Each independent owner uses a different complete bank.
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    let abi = {
+        // MOVZ x19, #seed.
+        code[..4].copy_from_slice(&(0xd2800013u32 | (u32::from(seed) << 5)).to_le_bytes());
+        MachineAbi::Aarch64
+    };
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    let abi = {
+        // Noncompressed LUI/ADDI s3 form a distinct positive 16-bit seed.
+        let high = (u32::from(seed) + 0x800) >> 12;
+        let low = u32::from(seed) & 0xfff;
+        code[..4].copy_from_slice(&(0x9b7u32 | (high << 12)).to_le_bytes());
+        code[4..8].copy_from_slice(&(0x98993u32 | (low << 20)).to_le_bytes());
+        MachineAbi::Riscv64
+    };
+    let process = prepare_process(domain, group, &code[..source.len()], abi)?;
     let result = (|| {
         let cpu = CpuIndex::new(0).ok_or(Error::Scheduler)?;
         let thread = process
@@ -129,7 +155,7 @@ fn with_guest(
         .start_boot_for_test()
         .map_err(|_| Error::Scheduler)?;
     // SAFETY: The installed guest retains its initialized, aligned RAM until
-    // stop completes below. Its STLR counter pairs with our atomic loads.
+    // stop completes below. Its release counter store pairs with our atomic loads.
     let result = test(unsafe { &*counter });
     running.stop();
     super::super::vm_registry::wait_for_vm_usage_release(&domain).map_err(|_| Error::Lifecycle)?;
@@ -185,8 +211,6 @@ pub(super) fn run(domain: &ResourceDomain, group: &TaskGroup) -> Result<(), Erro
     if after.0 <= before.0 || after.1 <= before.1 || after.0 - before.0 != after.1 - before.1 {
         return Err(Error::Terminal);
     }
-    crate::pr_info!(
-        "HypeR test: lazy FP Native/guest isolation, first use, syscall and migration passed"
-    );
+    crate::pr_info!("HypeR test: Native lazy FP and guest register isolation passed");
     Ok(())
 }
