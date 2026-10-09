@@ -126,6 +126,9 @@ typedef struct {
 	uint64_t string_size;
 	const Elf64_Sym *symbols;
 	uint64_t symbol_count;
+	const uint32_t *buckets;
+	const uint32_t *chains;
+	uint32_t bucket_count;
 	const Elf64_Rela *rela;
 	uint64_t rela_count;
 	const Elf64_Rela *plt_rela;
@@ -309,6 +312,43 @@ static int read_exact(hyper_native_handle_t snapshot, uint64_t byte_size, uint64
 	return hyper_vmo_read(snapshot, offset, output, length) == HYPER_NATIVE_STATUS_OK;
 }
 
+static int parse_symbol_hash(Object *object, uint64_t address)
+{
+	const uint32_t *header = object_pointer(object, address, 2 * sizeof(uint32_t));
+	if (header == NULL || !pointer_aligned(header, _Alignof(uint32_t)) || header[0] == 0 ||
+	    header[1] == 0) {
+		last_error = "invalid symbol hash";
+		return 0;
+	}
+	uint32_t bucket_count = header[0];
+	uint32_t symbol_count = header[1];
+	uint64_t words = UINT64_C(2) + bucket_count + symbol_count;
+	if (words > SIZE_MAX / sizeof(uint32_t) ||
+	    object_pointer(object, address, (size_t)words * sizeof(uint32_t)) == NULL) {
+		last_error = "symbol hash outside image";
+		return 0;
+	}
+	const uint32_t *buckets = header + 2;
+	const uint32_t *chains = buckets + bucket_count;
+	/* Every reachable symbol belongs to one bucket. A single table-wide
+	 * budget bounds validation even for cyclic or overlapping hostile chains. */
+	uint32_t remaining = symbol_count - 1;
+	for (uint32_t bucket = 0; bucket < bucket_count; ++bucket) {
+		for (uint32_t index = buckets[bucket]; index != 0; index = chains[index]) {
+			if (index >= symbol_count || remaining == 0) {
+				last_error = "invalid symbol hash chain";
+				return 0;
+			}
+			--remaining;
+		}
+	}
+	object->dynamic.buckets = buckets;
+	object->dynamic.chains = chains;
+	object->dynamic.bucket_count = bucket_count;
+	object->dynamic.symbol_count = symbol_count;
+	return 1;
+}
+
 static int parse_dynamic(Object *object)
 {
 	const Elf64_Dyn *table = NULL;
@@ -443,12 +483,9 @@ static int parse_dynamic(Object *object)
 		last_error = "incomplete dynamic metadata";
 		return 0;
 	}
-	const uint32_t *hash_table = object_pointer(object, hash, 2 * sizeof(uint32_t));
-	if (hash_table == NULL || !pointer_aligned(hash_table, _Alignof(uint32_t))) {
-		last_error = "invalid symbol hash";
+	if (!parse_symbol_hash(object, hash)) {
 		return 0;
 	}
-	object->dynamic.symbol_count = hash_table[1];
 	if (object->dynamic.symbol_count > SIZE_MAX / sizeof(Elf64_Sym)) {
 		last_error = "symbol table size overflow";
 		return 0;
@@ -558,9 +595,29 @@ static Object *object_from_handle(void *handle)
 	return &objects[(value - first) / sizeof(Object)];
 }
 
+static uint32_t symbol_hash(const char *name)
+{
+	uint32_t hash = 0;
+	for (const unsigned char *cursor = (const unsigned char *)name; *cursor != 0; ++cursor) {
+		hash = (hash << 4) + *cursor;
+		uint32_t high = hash & UINT32_C(0xf0000000);
+		hash = (hash ^ (high >> 24)) & ~high;
+	}
+	return hash;
+}
+
 static void *find_symbol_in(const Object *object, const char *name, int *weak)
 {
-	for (uint64_t index = 1; index < object->dynamic.symbol_count; ++index) {
+	const DynamicInfo *dynamic = &object->dynamic;
+	uint32_t index = dynamic->buckets[symbol_hash(name) % dynamic->bucket_count];
+	/* Dynamic metadata may live in writable application mappings. Retain
+	 * lookup bounds even after the complete hash was validated at admission. */
+	for (uint64_t remaining = dynamic->symbol_count; index != 0;
+	     index = dynamic->chains[index], --remaining) {
+		if (index >= dynamic->symbol_count || remaining == 0) {
+			last_error = "invalid symbol hash chain";
+			return NULL;
+		}
 		const Elf64_Sym *symbol = &object->dynamic.symbols[index];
 		if (symbol->section == SHN_UNDEF || symbol->name >= object->dynamic.string_size) {
 			continue;
