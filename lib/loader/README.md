@@ -21,6 +21,15 @@ Initial dependencies are global; `hyper_dlopen_at` additionally supports local
 symbol scopes. Loading is eager and bounded, with `RELA` and `RELR`
 support and no writable-executable mapping transition.
 
+Symbol lookup uses the ELF `DT_HASH` buckets and collision chains, including for
+`dlsym`, so each imported symbol does not rescan every exported Rust symbol.
+The loader validates the complete table range and bounds total chain traversal
+before admission; lookups also retain index and traversal bounds if an
+application later modifies metadata in its own writable mappings. Hashing selects
+candidates within one object; global and dependency-scope traversal retain
+visibility filtering and strong-over-weak selection. The table follows the
+[System V ELF hash format](https://refspecs.linuxfoundation.org/elf/gabi4+/ch5.dynamic.html#hash).
+
 The Native [`ldd` command](../../app/README.md#ldd-shared-library-dependency-inspection)
 inspects interpreter and dependency metadata against the standard library layout
 without executing the target. It does not replace loader symbol or relocation
@@ -57,7 +66,8 @@ Run `sh sdk/toolchain/scripts/check-loader-arch.sh` from the repository root.
 The architecture probe checks machine flags and relocation formulas. A second
 probe compiles the production `rtld.c` directly, supplies bounded in-memory ELF
 views and records Native syscall effects. It covers malformed dynamic metadata,
-file bounds, symbol indices, writable relocation targets, RELR cursor/work
+file bounds, hash collisions and malformed chains, symbol scope and visibility,
+symbol indices, writable relocation targets, RELR cursor/work
 limits, mapping failure cleanup and restoration of a failed load transaction.
 The transaction retains pre-existing references and visibility while discarding
 new dependency mappings in reverse order. It does not promise to undo arbitrary

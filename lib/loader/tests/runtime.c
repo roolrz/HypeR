@@ -22,7 +22,7 @@
 typedef struct {
 	uint64_t padding;
 	Elf64_Dyn dynamic[12];
-	uint32_t hash[4];
+	uint32_t hash[5];
 	Elf64_Sym symbols[2];
 	char strings[16];
 	uintptr_t targets[130];
@@ -68,7 +68,9 @@ static void reset(void)
 	image.dynamic[1] = (Elf64_Dyn){DT_STRTAB, offsetof(Image, strings)};
 	image.dynamic[2] = (Elf64_Dyn){DT_STRSZ, sizeof(image.strings)};
 	image.dynamic[3] = (Elf64_Dyn){DT_SYMTAB, offsetof(Image, symbols)};
+	image.hash[0] = 1;
 	image.hash[1] = 2;
+	image.hash[2] = 1;
 	memcpy(image.strings, "\0known\0", 7);
 }
 
@@ -93,6 +95,35 @@ static void parsing(void)
 	assert(!parse_dynamic(&view));
 	reset();
 	image.hash[1] = UINT32_MAX;
+	assert(!parse_dynamic(&view));
+	reset();
+	image.hash[0] = 0;
+	assert(!parse_dynamic(&view));
+	reset();
+	image.hash[1] = 0;
+	assert(!parse_dynamic(&view));
+	reset();
+	image.hash[0] = UINT32_MAX;
+	assert(!parse_dynamic(&view));
+	reset();
+	segments[0].memsz = offsetof(Image, hash) + 2 * sizeof(uint32_t);
+	assert(!parse_dynamic(&view)); /* Header fits, bucket/chain arrays do not. */
+	assert(strcmp(last_error, "symbol hash outside image") == 0);
+	reset();
+	image.dynamic[0].value++;
+	assert(!parse_dynamic(&view)); /* Misaligned hash words. */
+	reset();
+	image.hash[1] = 1;
+	image.hash[2] = 0;
+	assert(parse_dynamic(&view)); /* A valid image with no named symbols. */
+	reset();
+	image.hash[2] = 2; /* Bucket outside the symbol table. */
+	assert(!parse_dynamic(&view));
+	reset();
+	image.hash[4] = 2; /* Chain outside the symbol table. */
+	assert(!parse_dynamic(&view));
+	reset();
+	image.hash[4] = 1; /* Non-terminating chain. */
 	assert(!parse_dynamic(&view));
 	reset();
 	image.dynamic[3].value++;
@@ -176,6 +207,89 @@ static void relocations(void)
 	assert(!apply_relr(&view));
 	assert(strcmp(last_error, "too many RELR relocations") == 0);
 	free(many);
+}
+
+static void symbols(void)
+{
+	/* Aa and BQ deliberately collide, while Ac belongs to another bucket. */
+	struct {
+		uint64_t padding;
+		Elf64_Dyn dynamic[5];
+		uint32_t hash[9];
+		Elf64_Sym symbols[4];
+		char strings[10];
+	} data = {0};
+
+	Elf64_Phdr headers[] = {
+		{.type = PT_LOAD, .flags = PF_R, .memsz = sizeof(data)},
+		{.type = PT_DYNAMIC,
+		 .vaddr = (uintptr_t)&data.dynamic - (uintptr_t)&data,
+		 .memsz = sizeof(data.dynamic)},
+	};
+	reset();
+	view = (Object){.base = (uintptr_t)&data, .phdr = headers, .phnum = 2};
+	data.dynamic[0] = (Elf64_Dyn){DT_HASH, (uintptr_t)&data.hash - view.base};
+	data.dynamic[1] = (Elf64_Dyn){DT_STRTAB, (uintptr_t)&data.strings - view.base};
+	data.dynamic[2] = (Elf64_Dyn){DT_STRSZ, sizeof(data.strings)};
+	data.dynamic[3] = (Elf64_Dyn){DT_SYMTAB, (uintptr_t)&data.symbols - view.base};
+	uint32_t hash[] = {3, 4, 1, 0, 3, 0, 2, 0, 0};
+	memcpy(data.hash, hash, sizeof(hash));
+	memcpy(data.strings, "\0Aa\0BQ\0Ac\0", sizeof(data.strings));
+	for (unsigned index = 1; index < 4; ++index) {
+		data.symbols[index] = (Elf64_Sym){.name = 1 + 3 * (index - 1),
+						  .info = 1 << 4,
+						  .section = SHN_ABS,
+						  .value = 100 * index};
+	}
+	assert(symbol_hash("Aa") == 0x471 && symbol_hash("BQ") == 0x471);
+	assert(symbol_hash("Ac") == 0x473 && symbol_hash("printf") == 0x77905a6);
+	assert(parse_dynamic(&view));
+	int weak = 0;
+	assert(find_symbol_in(&view, "Aa", &weak) == (void *)100 && !weak);
+	assert(find_symbol_in(&view, "BQ", &weak) == (void *)200 && !weak);
+	assert(find_symbol_in(&view, "Ac", &weak) == (void *)300 && !weak);
+	assert(find_symbol_in(&view, "absent", &weak) == NULL);
+	/* Lookup must use the bucket rather than scan unrelated symbols. */
+	data.hash[4] = 0;
+	assert(find_symbol_in(&view, "Ac", &weak) == NULL);
+	data.hash[4] = 3;
+	data.symbols[1].info = STB_LOCAL << 4;
+	assert(find_symbol_in(&view, "Aa", &weak) == NULL);
+	assert(find_symbol_in(&view, "BQ", &weak) == (void *)200);
+	data.symbols[1].info = STB_WEAK << 4;
+	assert(find_symbol_in(&view, "Aa", &weak) == (void *)100 && weak);
+	data.symbols[1].other = 2; /* Hidden exports cannot satisfy another object. */
+	assert(find_symbol_in(&view, "Aa", &weak) == NULL);
+	data.symbols[1].other = STV_PROTECTED;
+	assert(find_symbol_in(&view, "Aa", &weak) == (void *)100);
+	data.symbols[1].section = SHN_UNDEF;
+	assert(find_symbol_in(&view, "Aa", &weak) == NULL);
+	data.symbols[1].section = SHN_ABS;
+	data.symbols[1].other = STV_DEFAULT;
+	/* Keep global strong-over-weak preference and local dependency scope. */
+	objects[0] = objects[1] = view;
+	objects[0].flags = objects[1].flags = HYPER_RTLD_GLOBAL;
+	Elf64_Sym strong[4];
+	memcpy(strong, data.symbols, sizeof(strong));
+	strong[1].info = 1 << 4;
+	strong[1].value = 400;
+	objects[1].dynamic.symbols = strong;
+	object_count = 2;
+	assert(find_global_symbol("Aa", &weak) == (void *)400 && !weak);
+	objects[1].flags = HYPER_RTLD_LOCAL;
+	assert(find_global_symbol("Aa", &weak) == (void *)100 && weak);
+	objects[0].dynamic.needed_count = 1;
+	objects[0].dependencies[0] = &objects[1];
+	assert(find_symbol_for(&objects[0], "Aa", &weak) == (void *)400 && !weak);
+	assert(hyper_dlsym(&objects[0], "BQ") == (void *)200);
+	/* Admission rejects long cycles too; lookup stays bounded if a process
+	 * later overwrites hash metadata in one of its own writable mappings. */
+	data.hash[7] = 1;
+	assert(!parse_dynamic(&view));
+	assert(find_symbol_in(&objects[0], "AR", &weak) == NULL);
+	data.hash[7] = UINT32_MAX;
+	assert(!parse_dynamic(&view));
+	assert(find_symbol_in(&objects[0], "AR", &weak) == NULL);
 }
 
 static void rollback(void)
@@ -379,8 +493,9 @@ int main(void)
 {
 	parsing();
 	relocations();
+	symbols();
 	rollback();
 	file_bounds();
-	puts("loader production parsing, relocation and rollback passed");
+	puts("loader production parsing, symbol lookup, relocation and rollback passed");
 	return 0;
 }
