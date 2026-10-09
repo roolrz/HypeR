@@ -214,6 +214,17 @@ fn metadata(location: &Location) -> Result<Metadata, Error> {
 }
 
 impl DirectoryObject {
+    /// Creates an independent handle lifecycle for the same directory authority.
+    /// Namespace locations remain pinned; no path lookup or authority expansion occurs.
+    pub(crate) fn try_clone(&self, sponsor: &ResourceDomain) -> Result<Self, Error> {
+        Ok(Self {
+            namespace: self.namespace.clone(),
+            root: self.root.clone(),
+            current: self.current.clone(),
+            _object_charge: reserve_object_charge::<Self>(sponsor)?,
+        })
+    }
+
     pub(crate) fn try_root(
         namespace: FallibleArc<MountNamespace>,
         sponsor: &ResourceDomain,

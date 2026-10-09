@@ -9,9 +9,8 @@ use super::*;
 /// Failure before a child Process becomes visible in any kernel directory.
 #[derive(Debug)]
 pub(crate) enum ChildProcessStartError {
-    Builder(ProcessBuilderError<()>),
     Process(ProcessError),
-    Stack(hyper::exec::startup::Error),
+    Bootstrap(super::super::bootstrap::Error),
     TaskObject(super::super::objects::TaskObjectError),
     VmarObject(MemoryObjectError),
 }
@@ -47,9 +46,13 @@ pub(crate) struct StartedChildProcess {
     _process: Process,
     _initial_thread: UserThread,
     supervisor_handle: HandleValue,
+    startup_channel: HandleValue,
 }
 
 impl StartedChildProcess {
+    pub(crate) const fn startup_channel(&self) -> HandleValue {
+        self.startup_channel
+    }
     pub(crate) const fn supervisor_handle(&self) -> HandleValue {
         self.supervisor_handle
     }
@@ -67,7 +70,7 @@ pub(crate) struct PreparedChildProcessStart {
     retired_scratch_charges: alloc::vec::Vec<CommittedCharge>,
     start_scratch_charge: Option<CommittedCharge>,
     initial_thread: Option<PreparedInitialUserThread>,
-    parent_supervisor: Option<ProcessHandleReservation<1>>,
+    parent_supervisor: Option<ProcessHandleReservation<2>>,
     builder_consumption: Option<PreparedHandleConsumption>,
     root_vmar_object: Option<PreparedHandle>,
     stack_vmar_object: Option<PreparedHandle>,
@@ -75,12 +78,14 @@ pub(crate) struct PreparedChildProcessStart {
     root_vmar_claimed: bool,
     process_object: Option<PublishableRef<ProcessObject, KernelService>>,
     supervisor_object: Option<PreparedHandle>,
+    bootstrap: Option<super::super::bootstrap::PreparedBootstrap>,
 }
 
 pub(crate) struct CommittedChildProcessStart {
     child: Process,
     initial_thread: UserThread,
     supervisor_handle: HandleValue,
+    startup_channel: HandleValue,
     retired_builder: Option<InTransitCapabilities>,
 }
 
@@ -123,6 +128,7 @@ impl ProcessStartTransaction for ProcessStartCoordinator {
             _process: committed.child.clone(),
             _initial_thread: committed.initial_thread.clone(),
             supervisor_handle: committed.supervisor_handle,
+            startup_channel: committed.startup_channel,
         }
     }
 
@@ -131,77 +137,66 @@ impl ProcessStartTransaction for ProcessStartCoordinator {
     }
 }
 
-// Stack encoding and user-page preparation finish before thread/handle
-// admission. Borrow the linear build so these temporary buffers do not remain
-// live on the stack during those later blocking phases.
+// The unpublished channel holds the complete launch message before any
+// thread can run. Numeric IDs refer only to already reserved child slots.
 #[inline(never)]
-fn write_startup_stack(
+fn prepare_bootstrap(
     build: &SealedProcessBuild,
     batches: &[ProcessHandleBatchReservation],
-    startup_count: usize,
-) -> Result<(), ChildProcessStartError> {
-    let arguments = build.arguments().map_err(ChildProcessStartError::Builder)?;
-    let environment = build
-        .environment()
-        .map_err(ChildProcessStartError::Builder)?;
-    let mut startup_records = alloc::vec::Vec::new();
-    startup_records
-        .try_reserve_exact(startup_count)
-        .map_err(|_| ChildProcessStartError::Process(ProcessError::Allocation))?;
+) -> Result<(super::super::bootstrap::PreparedBootstrap, u64), ChildProcessStartError> {
+    use hyper::abi::native::{HyperNativeLoaderStartup, HyperNativeStartupHandle};
+    let count = build.startup_capabilities().len();
     let mut values = batches
         .iter()
-        .flat_map(ProcessHandleBatchReservation::values);
-    for capability in build.startup_capabilities() {
-        let value = match values.next() {
-            Some(value) => *value,
-            None => process_invariant_violation(),
-        };
-        startup_records.push(StartupHandle {
+        .flat_map(ProcessHandleBatchReservation::values)
+        .skip(count);
+    let mut next = || match values.next() {
+        Some(v) => v.get(),
+        None => process_invariant_violation(),
+    };
+    let root_vmar = next();
+    let stack_vmar = next();
+    let executable = next();
+    let channel = next();
+    let runtime_directory = next();
+    let layout = build.child().process().image().bootstrap();
+    let header = HyperNativeLoaderStartup {
+        size: 88,
+        handle_count: count as u32,
+        data_size: build.data().len() as u32,
+        flags: hyper::abi::native::HYPER_NATIVE_LOADER_STARTUP_REPLY as u32,
+        runtime_directory,
+        executable,
+        executable_size: build.executable().bytes().len() as u64,
+        root_vmar,
+        stack_vmar,
+        stack_base: layout.stack_base,
+        stack_size: layout.stack_size,
+        loader_base: layout.loader_base,
+        loader_size: layout.loader_size,
+    };
+    let records = build
+        .startup_capabilities()
+        .iter()
+        .zip(
+            batches
+                .iter()
+                .flat_map(ProcessHandleBatchReservation::values),
+        )
+        .map(|(capability, value)| HyperNativeStartupHandle {
             purpose: capability.purpose(),
+            flags: 0,
             handle: value.get(),
         });
-    }
-    let root_vmar_value = match values.next() {
-        Some(value) => *value,
-        None => process_invariant_violation(),
-    };
-    startup_records.push(StartupHandle {
-        purpose: hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR as u32,
-        handle: root_vmar_value.get(),
-    });
-    let stack_vmar_value = match values.next() {
-        Some(value) => *value,
-        None => process_invariant_violation(),
-    };
-    startup_records.push(StartupHandle {
-        purpose: hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_INITIAL_STACK_VMAR as u32,
-        handle: stack_vmar_value.get(),
-    });
-    if values.next().is_some() {
-        process_invariant_violation();
-    }
-    let stack = build
-        .stack_layout()
-        .encode(
-            build.child().process().image().auxiliary(),
-            &arguments,
-            &environment,
-            &startup_records,
-        )
-        .map_err(ChildProcessStartError::Stack)?;
-    let length = u64::try_from(stack.bytes().len())
-        .map_err(|_| ChildProcessStartError::Stack(hyper::exec::startup::Error::TooLarge))?;
-    let range = UserSlice::new(UserAddress::new(stack.base()), length)
-        .map_err(|_| ChildProcessStartError::Stack(hyper::exec::startup::Error::AddressOverflow))?;
-    let write = build
-        .child()
-        .reserve_initial_stack_write(range)
-        .map_err(ChildProcessStartError::Process)?;
-    write
-        .copy_from(stack.bytes())
-        .map_err(|error| ChildProcessStartError::Process(ProcessError::UserMemory(error)))?;
-    write.complete();
-    Ok(())
+    super::super::bootstrap::prepare(
+        &build.child().process().resource_domain(),
+        build.executable(),
+        header,
+        records,
+        build.data(),
+    )
+    .map(|bootstrap| (bootstrap, channel))
+    .map_err(ChildProcessStartError::Bootstrap)
 }
 
 impl PreparedChildProcessStart {
@@ -220,7 +215,7 @@ impl PreparedChildProcessStart {
         build: SealedProcessBuild,
     ) -> Result<Self, StartPreparationFailure<ChildProcessStartError>> {
         let child = build.child().process().clone();
-        let startup_count = match build.startup_capabilities().len().checked_add(2) {
+        let startup_count = match build.startup_capabilities().len().checked_add(5) {
             Some(count) => count,
             None => {
                 return Err(start_failure(
@@ -242,14 +237,7 @@ impl PreparedChildProcessStart {
                 ));
             }
         };
-        let start_scratch_charge = match reserve_start_scratch(
-            &child,
-            startup_count,
-            batch_count,
-            build.argument_count(),
-            build.environment_count(),
-            build.stack_layout().total_bytes(),
-        ) {
+        let start_scratch_charge = match reserve_start_scratch(&child, startup_count, batch_count) {
             Ok(charge) => charge,
             Err(error) => {
                 return Err(start_failure(ChildProcessStartError::Process(error), build));
@@ -282,22 +270,26 @@ impl PreparedChildProcessStart {
                 build,
             ));
         }
-        if let Err(error) = write_startup_stack(&build, &child_handle_batches, startup_count) {
-            abort_child_handle_batches(&child, &mut child_handle_batches);
-            return Err(start_failure(error, build));
-        }
+        let (bootstrap, channel) = match prepare_bootstrap(&build, &child_handle_batches) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                abort_child_handle_batches(&child, &mut child_handle_batches);
+                return Err(start_failure(error, build));
+            }
+        };
 
-        let initial_thread = match build
-            .child()
-            .prepare_initial_user_thread(build.thread_name(), build.affinity())
-        {
+        let initial_thread = match build.child().prepare_initial_user_thread(
+            build.thread_name(),
+            build.affinity(),
+            channel,
+        ) {
             Ok(thread) => thread,
             Err(error) => {
                 abort_child_handle_batches(&child, &mut child_handle_batches);
                 return Err(start_failure(ChildProcessStartError::Process(error), build));
             }
         };
-        let parent_supervisor = match parent.reserve_handles::<1>() {
+        let parent_supervisor = match parent.reserve_handles::<2>() {
             Ok(reservation) => reservation,
             Err(error) => {
                 drop(initial_thread);
@@ -420,6 +412,7 @@ impl PreparedChildProcessStart {
             root_vmar_claimed: true,
             process_object: Some(process_object),
             supervisor_object: Some(supervisor_object),
+            bootstrap: Some(bootstrap),
         })
     }
 
@@ -433,7 +426,7 @@ impl PreparedChildProcessStart {
             None => process_invariant_violation(),
         };
         let process_name = ProcessNameSnapshot::from_validated(build.thread_name());
-        let (prepared_child, _, startup_capabilities) = build.into_parts();
+        let (prepared_child, startup_capabilities) = build.into_parts();
         for capability in startup_capabilities {
             let (mut handles, storage_charge) = capability.take_authority().into_prepared_handles();
             if handles.len() != 1 {
@@ -457,6 +450,14 @@ impl PreparedChildProcessStart {
             None => process_invariant_violation(),
         };
         self.prepared_startup_handles.push(stack_vmar);
+        let bootstrap = match self.bootstrap.take() {
+            Some(b) => b,
+            None => process_invariant_violation(),
+        };
+        self.prepared_startup_handles.push(bootstrap.executable);
+        self.prepared_startup_handles.push(bootstrap.child_channel);
+        self.prepared_startup_handles
+            .push(bootstrap.runtime_directory);
         self.prepared_startup_handles.reverse();
         publish_unpublished_startup_handles(&mut self);
 
@@ -473,7 +474,8 @@ impl PreparedChildProcessStart {
             None => process_invariant_violation(),
         };
         let child = prepared_child.publish(process_object, process_name);
-        let (supervisor_handle, retired_builder) = commit_parent_builder_replacement(&mut self);
+        let (supervisor_handle, startup_channel, retired_builder) =
+            commit_parent_builder_replacement(&mut self, bootstrap.parent_channel);
         child.commit_initial_execution(thread_id);
         drop(self.start_scratch_charge.take());
         self.root_vmar_claimed = false;
@@ -481,6 +483,7 @@ impl PreparedChildProcessStart {
             child,
             initial_thread,
             supervisor_handle,
+            startup_channel,
             retired_builder: Some(retired_builder),
         }
     }
@@ -490,6 +493,7 @@ impl PreparedChildProcessStart {
         let supervisor_object = self.supervisor_object.take();
         drop(supervisor_object);
         drop(self.process_object.take());
+        drop(self.bootstrap.take());
         if let Some(consumption) = self.builder_consumption.take() {
             consumption.rollback();
         }
@@ -526,6 +530,7 @@ impl Drop for PreparedChildProcessStart {
             || self.root_vmar_claimed
             || self.process_object.is_some()
             || self.supervisor_object.is_some()
+            || self.bootstrap.is_some()
             || self.start_scratch_charge.is_some()
         {
             process_invariant_violation();
@@ -540,9 +545,6 @@ fn reserve_start_scratch(
     child: &Process,
     startup_count: usize,
     batch_count: usize,
-    argument_count: usize,
-    environment_count: usize,
-    stack_bytes: usize,
 ) -> Result<CommittedCharge, ProcessError> {
     let allocations = [
         (
@@ -559,10 +561,6 @@ fn reserve_start_scratch(
             core::mem::size_of::<alloc::vec::Vec<ChargeReservation>>(),
         ),
         (batch_count, core::mem::size_of::<CommittedCharge>()),
-        (argument_count, core::mem::size_of::<&str>()),
-        (environment_count, core::mem::size_of::<&str>()),
-        (startup_count, core::mem::size_of::<StartupHandle>()),
-        (1, stack_bytes),
     ];
     let bytes = allocations
         .into_iter()
@@ -644,7 +642,8 @@ fn publish_unpublished_startup_handles(prepared: &mut PreparedChildProcessStart)
 
 fn commit_parent_builder_replacement(
     prepared: &mut PreparedChildProcessStart,
-) -> (HandleValue, InTransitCapabilities) {
+    startup_channel: PreparedHandle,
+) -> (HandleValue, HandleValue, InTransitCapabilities) {
     let mut source = match prepared.builder_consumption.take() {
         Some(mut consumption) => match consumption.transfer.take() {
             Some(source) => source,
@@ -667,6 +666,7 @@ fn commit_parent_builder_replacement(
     let mut retired_transfer_storage = None;
     let mut builder_batch = None;
     let mut supervisor_value = None;
+    let mut startup_channel = Some(startup_channel);
     prepared.parent.inner.state.with(|state| {
         if source.moved_values.as_slice() != [prepared.builder_handle] {
             process_invariant_violation();
@@ -688,12 +688,21 @@ fn commit_parent_builder_replacement(
         };
         let ((detached_builder, retired), values) = prepared.parent.inner.handles.with(|table| {
             let detached = claim.commit_with_storage(table);
-            let values = destination_token.publish(table, [published_supervisor]);
+            let values = destination_token.publish(
+                table,
+                [
+                    published_supervisor,
+                    match startup_channel.take() {
+                        Some(h) => h,
+                        None => process_invariant_violation(),
+                    },
+                ],
+            );
             (detached, values)
         });
         builder_batch = Some(detached_builder);
         retired_transfer_storage = Some(retired);
-        supervisor_value = Some(values[0]);
+        supervisor_value = Some(values);
 
         source.detach_source_charges(&mut state.handle_accounting);
 
@@ -705,7 +714,7 @@ fn commit_parent_builder_replacement(
             Some(record) => record,
             None => process_invariant_violation(),
         };
-        if charges.len() != 1 {
+        if charges.len() != 2 {
             process_invariant_violation();
         }
         state.handle_accounting.install(record, &mut charges);
@@ -730,7 +739,8 @@ fn commit_parent_builder_replacement(
         None => process_invariant_violation(),
     };
     (
-        value,
+        value[0],
+        value[1],
         InTransitCapabilities::new(detached_builder, storage_charge),
     )
 }

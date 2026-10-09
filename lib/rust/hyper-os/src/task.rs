@@ -12,13 +12,11 @@ use crate::handle::{
 use crate::{Error, Result, Status};
 
 const _: () = assert!(hyper_abi::HYPER_NATIVE_PROCESS_NAME_MAX_BYTES <= usize::MAX as u64);
-const _: () = assert!(hyper_abi::HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES <= usize::MAX as u64);
-const _: () = assert!(hyper_abi::HYPER_NATIVE_PROCESS_ENVIRONMENT_MAX_BYTES <= usize::MAX as u64);
 const _: () = assert!(hyper_abi::HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS <= usize::MAX as u64);
 
 const MAX_NAME_BYTES: usize = hyper_abi::HYPER_NATIVE_PROCESS_NAME_MAX_BYTES as usize;
-const MAX_ARGUMENT_BYTES: usize = hyper_abi::HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES as usize;
-const MAX_ENVIRONMENT_BYTES: usize = hyper_abi::HYPER_NATIVE_PROCESS_ENVIRONMENT_MAX_BYTES as usize;
+const MAX_ARGUMENT_BYTES: usize = 4096;
+const MAX_ENVIRONMENT_BYTES: usize = 4096;
 const MAX_AFFINITY_WORDS: usize = hyper_abi::HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS as usize;
 
 const BUILDER_RIGHTS: Rights = Rights::TRANSFER
@@ -211,11 +209,13 @@ fn adopt_produced_handle<T: TypedObject>(
 
 /// One mutable or sealed process construction transaction.
 ///
-/// The kernel owns the authoritative phase so this wrapper remains valid when
-/// transferred between processes. Mutators fail with `BAD_STATE` after seal;
-/// `start` and `abort` consume this Rust owner only when the kernel commits.
+/// The kernel owns transaction phase and capability transfers. This wrapper
+/// stages argv/environment locally and uploads them before sealing or transfer.
+/// Received builders may be sealed and started, but cannot append to the sender's
+/// local argument list. `start` and `abort` consume the owner when the kernel commits.
 pub struct ProcessBuilder {
     handle: OwnedHandle<ProcessBuilderObject>,
+    data: core::cell::RefCell<Option<crate::launch_data::LaunchData>>,
 }
 
 impl ProcessBuilder {
@@ -238,13 +238,19 @@ impl ProcessBuilder {
             )?
         };
         let handle = validate_produced_handle::<ProcessBuilderObject>(owner, BUILDER_RIGHTS)?;
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            data: core::cell::RefCell::new(Some(crate::launch_data::LaunchData::new())),
+        })
     }
 
     /// Wraps an already typed owner received through a trusted SDK path.
     #[must_use]
     pub const fn from_handle(handle: OwnedHandle<ProcessBuilderObject>) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            data: core::cell::RefCell::new(None),
+        }
     }
 
     /// Replaces the process and initial-thread name.
@@ -260,7 +266,11 @@ impl ProcessBuilder {
         if argument.len() > MAX_ARGUMENT_BYTES || argument.as_bytes().contains(&0) {
             return Err(Error::InvalidProcessArgument);
         }
-        Status::from_raw(raw_ops::add_argument(self.handle.as_handle_ref(), argument)).into_result()
+        self.data
+            .borrow_mut()
+            .as_mut()
+            .ok_or(Error::Status(Status::BAD_STATE))?
+            .append(argument, false)
     }
 
     /// Appends one `name=value` environment entry.
@@ -268,11 +278,11 @@ impl ProcessBuilder {
         if environment.len() > MAX_ENVIRONMENT_BYTES || !valid_environment(environment) {
             return Err(Error::InvalidProcessEnvironment);
         }
-        Status::from_raw(raw_ops::add_environment(
-            self.handle.as_handle_ref(),
-            environment,
-        ))
-        .into_result()
+        self.data
+            .borrow_mut()
+            .as_mut()
+            .ok_or(Error::Status(Status::BAD_STATE))?
+            .append(environment, true)
     }
 
     /// Replaces the CPU affinity bitmap.
@@ -344,14 +354,18 @@ impl ProcessBuilder {
 
     /// Irreversibly seals the builder against further mutation.
     pub fn seal(&self) -> Result<()> {
-        Status::from_raw(raw_ops::seal(self.handle.as_handle_ref())).into_result()
+        self.flush_data()?;
+        Status::from_raw(raw_ops::seal(self.handle.as_handle_ref())).into_result()?;
+        self.data.borrow_mut().take();
+        Ok(())
     }
 
     /// Starts the sealed process and returns only supervisor authority.
     ///
     /// A rejected kernel operation returns the builder in [`StartFailure`].
-    /// A malformed successful response is instead a committed failure: the
-    /// builder has been consumed, so the caller must not retry it as a fresh start.
+    /// After commit, waits for runtime readiness. A loader failure stops and
+    /// joins the child; it is a committed failure, as is a malformed successful
+    /// response. Neither returns the consumed builder for retry.
     pub fn start(self) -> core::result::Result<OwnedHandle<ProcessObject>, StartFailure> {
         let result = raw_ops::start(self.handle.as_handle_ref());
         let status = Status::from_raw(result.status);
@@ -362,14 +376,29 @@ impl ProcessBuilder {
             });
         }
         let _ = self.handle.into_raw();
-        // SAFETY: after the consume-on-success input is disarmed, the
-        // successful start result is the sole live owner of its raw value.
-        let owner = unsafe {
-            crate::handle::adopt_produced_handle_excluding::<AnyObject>(result.value0, &[])
+        // SAFETY: the successful consume-builder call transfers both distinct
+        // result owners; the input owner was disarmed before adoption.
+        let (process, channel) = unsafe {
+            crate::handle::adopt_produced_handle_pair::<AnyObject, AnyObject>([
+                result.value0,
+                result.value1,
+            ])
         }
         .map_err(StartFailure::Committed)?;
-        validate_produced_handle::<ProcessObject>(owner, PROCESS_SUPERVISOR_RIGHTS)
-            .map_err(StartFailure::Committed)
+        let process = validate_produced_handle::<ProcessObject>(process, PROCESS_SUPERVISOR_RIGHTS)
+            .map_err(StartFailure::Committed)?;
+        let channel = validate_produced_handle::<crate::handle::ByteChannelObject>(
+            channel,
+            Rights::READ.union(Rights::WAIT),
+        )
+        .map_err(StartFailure::Committed)?;
+        Status::from_raw(raw_ops::wait_launch(
+            process.as_handle_ref().raw().get(),
+            channel.as_handle_ref().raw().get(),
+        ))
+        .into_result()
+        .map_err(StartFailure::Committed)?;
+        Ok(process)
     }
 
     /// Aborts this builder and discards every capability it owns.
@@ -386,10 +415,29 @@ impl ProcessBuilder {
         }
     }
 
-    /// Recovers the typed owner for direct rendezvous transfer.
-    #[must_use]
-    pub fn into_handle(self) -> OwnedHandle<ProcessBuilderObject> {
-        self.handle
+    /// Uploads local arguments before transferring the typed builder owner.
+    /// A receiver may seal/start it; appending to the sender's argument list is
+    /// intentionally unsupported because that list is SDK-local state.
+    pub fn into_handle(
+        self,
+    ) -> core::result::Result<OwnedHandle<ProcessBuilderObject>, BuilderFailure> {
+        if let Err(error) = self.flush_data() {
+            return Err(BuilderFailure {
+                error,
+                builder: self,
+            });
+        }
+        Ok(self.handle)
+    }
+
+    fn flush_data(&self) -> Result<()> {
+        let data = self.data.borrow();
+        if let Some(data) = data.as_ref() {
+            let bytes = data.encode()?;
+            Status::from_raw(raw_ops::set_data(self.handle.as_handle_ref(), &bytes))
+                .into_result()?;
+        }
+        Ok(())
     }
 }
 
@@ -634,8 +682,22 @@ mod raw_ops {
     }
 
     string_operation!(set_name, hyper_sys::process_builder_set_name);
-    string_operation!(add_argument, hyper_sys::process_builder_add_argument);
-    string_operation!(add_environment, hyper_sys::process_builder_add_environment);
+    pub(super) fn set_data(
+        builder: HandleRef<'_, ProcessBuilderObject>,
+        bytes: &[u8],
+    ) -> hyper_abi::HyperNativeStatus {
+        // SAFETY: the live typed handle and borrowed bytes outlive this call.
+        unsafe {
+            hyper_sys::process_builder_set_data(builder.raw().get(), bytes.as_ptr(), bytes.len())
+        }
+    }
+    pub(super) fn wait_launch(process: u64, channel: u64) -> hyper_abi::HyperNativeStatus {
+        unsafe extern "C" {
+            fn hyper_launch_wait(process: u64, channel: u64) -> i64;
+        }
+        // SAFETY: the caller retains validated process/channel owners until return.
+        unsafe { hyper_launch_wait(process, channel) }
+    }
 
     pub(super) fn set_affinity(
         builder: HandleRef<'_, ProcessBuilderObject>,
@@ -773,18 +835,14 @@ mod raw_ops {
         }
     }
 
-    pub(super) fn add_argument(
+    pub(super) fn set_data(
         _builder: HandleRef<'_, ProcessBuilderObject>,
-        _value: &str,
+        _bytes: &[u8],
     ) -> hyper_abi::HyperNativeStatus {
-        hyper_abi::HYPER_NATIVE_STATUS_OK
+        0
     }
-
-    pub(super) fn add_environment(
-        _builder: HandleRef<'_, ProcessBuilderObject>,
-        _value: &str,
-    ) -> hyper_abi::HyperNativeStatus {
-        hyper_abi::HYPER_NATIVE_STATUS_OK
+    pub(super) fn wait_launch(_process: u64, _channel: u64) -> hyper_abi::HyperNativeStatus {
+        0
     }
 
     pub(super) fn set_affinity(
@@ -819,7 +877,7 @@ mod raw_ops {
         hyper_sys::CallResult {
             status: hyper_abi::HYPER_NATIVE_STATUS_OK,
             value0: hyper_abi::HYPER_NATIVE_OBJECT_PROCESS.into(),
-            value1: 0,
+            value1: u64::from(hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL) + 0x10000,
         }
     }
 

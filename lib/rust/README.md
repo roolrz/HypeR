@@ -41,9 +41,11 @@ typed startup purposes shared by providers and consumers; each service still
 owns its message payload semantics, and the SDK imposes no generic IPC wire
 envelope.
 
-The initial runtime reuses the C startup parser and selected architecture syscall veneer from
-`lib/hyper`. This preserves one machine entry contract while the Rust API is
-established. Loader/CRT startup reserves a private heap VMAR before application entry, and
+The initial runtime reuses the SDK startup parser and architecture syscall
+veneer from `lib/hyper`. The startup vector comes from the userspace loader;
+the kernel only supplies a bootstrap channel, mapping capabilities and opaque
+data. The dynamic loader or static CRT initializes a private heap VMAR before
+application entry, and
 `hyper-rt` installs the `libhyper` process heap as Rust's global allocator.
 Applications can use `alloc` without implementing an allocator:
 
@@ -65,6 +67,16 @@ Use fallible collection APIs such as `try_reserve` where OOM is recoverable;
 infallible allocation failure follows Rust's allocation-error path and the
 runtime's aborting panic policy. Memory use remains charged to the process's
 resource domain. See [the C heap contract](../hyper/README.md#process-heap).
+
+`task::ProcessBuilder` stages arguments and environment entries in SDK-owned
+memory, then uploads their encoding before `seal()` or `into_handle()`.
+Transferring the typed builder therefore also transfers its staged data;
+`into_handle()` is fallible. A receiver using `from_handle()` may seal and start
+the builder, but cannot append to the sender's local argument list. Successful
+`start()` waits for runtime readiness. A kernel syscall failure returns a
+recoverable builder; a userspace loading failure after kernel commit produces
+`StartFailure::Committed`, requests child stop and waits for termination.
+Readiness precedes constructors and application entry.
 
 `hyper-cargo` in freestanding mode rebuilds `core` and `alloc` as PIC for Native PIE linking using
 the pinned compiler's `rust-src`. The driver locally enables Cargo's unstable

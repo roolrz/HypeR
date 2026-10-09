@@ -1293,33 +1293,14 @@ pub const CONSTANTS: &[AbiConstant] = &[
         name: "elf_abi_version",
         value: 0,
     },
-    // HypeR-private auxiliary-vector tags. The pointed-to startup-handle
-    // array is immutable process-startup data and contains exactly the number
-    // of records carried by `auxv_startup_handle_count`.
+    // Fixed kernel-to-loader transport bounds; payload semantics belong to userspace.
     AbiConstant {
-        name: "auxv_startup_handles",
-        value: 0x4859_0001,
+        name: "process_startup_data_max_bytes",
+        value: 16 * 1024,
     },
     AbiConstant {
-        name: "auxv_startup_handle_count",
-        value: 0x4859_0002,
-    },
-    AbiConstant {
-        name: "auxv_initial_stack_base",
-        value: 0x4859_0003,
-    },
-    AbiConstant {
-        name: "auxv_initial_stack_capacity",
-        value: 0x4859_0004,
-    },
-    AbiConstant {
-        name: "auxv_initial_stack_size",
-        value: 0x4859_0005,
-    },
-    // Raw main-image PT_GNU_STACK request; zero selects SDK policy.
-    AbiConstant {
-        name: "auxv_main_stack_size",
-        value: 0x4859_0006,
+        name: "loader_startup_reply",
+        value: 1,
     },
     AbiConstant {
         name: "startup_handle_purpose_initial_stack_vmar",
@@ -1687,22 +1668,6 @@ pub const CONSTANTS: &[AbiConstant] = &[
     },
     AbiConstant {
         name: "process_name_max_bytes",
-        value: 64,
-    },
-    AbiConstant {
-        name: "process_argument_max_bytes",
-        value: 4 * 1024,
-    },
-    AbiConstant {
-        name: "process_environment_max_bytes",
-        value: 4 * 1024,
-    },
-    AbiConstant {
-        name: "process_max_arguments",
-        value: 64,
-    },
-    AbiConstant {
-        name: "process_max_environment",
         value: 64,
     },
     AbiConstant {
@@ -3258,6 +3223,79 @@ pub const RECORDS: &[Record] = &[
         alignment: 8,
     },
     Record {
+        name: "loader_startup",
+        fields: &[
+            Field {
+                name: "size",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "handle_count",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "data_size",
+                kind: FieldKind::U32,
+                offset: 8,
+            },
+            Field {
+                name: "flags",
+                kind: FieldKind::U32,
+                offset: 12,
+            },
+            Field {
+                name: "executable",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "executable_size",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+            Field {
+                name: "root_vmar",
+                kind: FieldKind::U64,
+                offset: 32,
+            },
+            Field {
+                name: "stack_vmar",
+                kind: FieldKind::U64,
+                offset: 40,
+            },
+            Field {
+                name: "stack_base",
+                kind: FieldKind::U64,
+                offset: 48,
+            },
+            Field {
+                name: "stack_size",
+                kind: FieldKind::U64,
+                offset: 56,
+            },
+            Field {
+                name: "loader_base",
+                kind: FieldKind::U64,
+                offset: 64,
+            },
+            Field {
+                name: "loader_size",
+                kind: FieldKind::U64,
+                offset: 72,
+            },
+            Field {
+                name: "runtime_directory",
+                kind: FieldKind::U64,
+                offset: 80,
+            },
+        ],
+        minimum_size: 88,
+        size: 88,
+        alignment: 8,
+    },
+    Record {
         name: "startup_handle",
         fields: STARTUP_HANDLE_FIELDS,
         minimum_size: 16,
@@ -4576,17 +4614,17 @@ const PROCESS_BUILDER_SET_NAME_ARGUMENTS: &[Argument] = &[
     },
 ];
 
-const PROCESS_BUILDER_ADD_ARGUMENT_ARGUMENTS: &[Argument] = &[
+const PROCESS_BUILDER_SET_DATA_ARGUMENTS: &[Argument] = &[
     process_builder_argument(RIGHT_WRITE, HandleDisposition::Borrow),
     Argument {
-        name: "argument",
+        name: "data",
         kind: ValueKind::UserAddress,
         handle: None,
         memory: Some(UserMemory {
             direction: MemoryDirection::Read,
             length: MemoryLength::Bytes {
-                argument: "argument_size",
-                maximum_bytes: 4 * 1024,
+                argument: "data_size",
+                maximum_bytes: 16 * 1024,
             },
             record: None,
             handles: None,
@@ -4594,32 +4632,7 @@ const PROCESS_BUILDER_ADD_ARGUMENT_ARGUMENTS: &[Argument] = &[
         }),
     },
     Argument {
-        name: "argument_size",
-        kind: ValueKind::ByteCount,
-        handle: None,
-        memory: None,
-    },
-];
-
-const PROCESS_BUILDER_ADD_ENVIRONMENT_ARGUMENTS: &[Argument] = &[
-    process_builder_argument(RIGHT_WRITE, HandleDisposition::Borrow),
-    Argument {
-        name: "environment",
-        kind: ValueKind::UserAddress,
-        handle: None,
-        memory: Some(UserMemory {
-            direction: MemoryDirection::Read,
-            length: MemoryLength::Bytes {
-                argument: "environment_size",
-                maximum_bytes: 4 * 1024,
-            },
-            record: None,
-            handles: None,
-            validation_order: 0,
-        }),
-    },
-    Argument {
-        name: "environment_size",
+        name: "data_size",
         kind: ValueKind::ByteCount,
         handle: None,
         memory: None,
@@ -4701,14 +4714,24 @@ const PROCESS_BUILDER_START_ARGUMENTS: &[Argument] = &[process_builder_argument(
     RIGHT_START,
     HandleDisposition::ConsumeOnCommit,
 )];
-const PROCESS_BUILDER_START_RESULTS: &[ResultValue] = &[ResultValue {
-    name: "process",
-    kind: ValueKind::Handle,
-    handle: Some(ProducedHandle {
-        object: ProducedObject::Kind("process"),
-        rights: ProducedRights::Fixed(PROCESS_SUPERVISOR_RIGHTS),
-    }),
-}];
+const PROCESS_BUILDER_START_RESULTS: &[ResultValue] = &[
+    ResultValue {
+        name: "process",
+        kind: ValueKind::Handle,
+        handle: Some(ProducedHandle {
+            object: ProducedObject::Kind("process"),
+            rights: ProducedRights::Fixed(PROCESS_SUPERVISOR_RIGHTS),
+        }),
+    },
+    ResultValue {
+        name: "startup_channel",
+        kind: ValueKind::Handle,
+        handle: Some(ProducedHandle {
+            object: ProducedObject::Kind("byte_channel"),
+            rights: ProducedRights::Fixed(RIGHT_READ | RIGHT_WAIT),
+        }),
+    },
+];
 const PROCESS_BUILDER_ABORT_ARGUMENTS: &[Argument] = &[process_builder_argument(
     RIGHT_REQUEST_STOP,
     HandleDisposition::ConsumeOnCommit,
@@ -6090,23 +6113,9 @@ pub const SYSCALLS: &[Syscall] = &[
     },
     Syscall {
         number: 24,
-        name: "process_builder_add_argument",
+        name: "process_builder_set_data",
         feature: FeatureGate::Core,
-        arguments: PROCESS_BUILDER_ADD_ARGUMENT_ARGUMENTS,
-        results: &[],
-        blocking: BlockingClass::Never,
-        cancellation: CancellationClass::None,
-        restart: RestartClass::Never,
-        completion: CompletionClass::Returns,
-        audit: AuditClass::Task,
-        flags: FlagPolicy::None,
-        failure_results: &[],
-    },
-    Syscall {
-        number: 25,
-        name: "process_builder_add_environment",
-        feature: FeatureGate::Core,
-        arguments: PROCESS_BUILDER_ADD_ENVIRONMENT_ARGUMENTS,
+        arguments: PROCESS_BUILDER_SET_DATA_ARGUMENTS,
         results: &[],
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
@@ -9369,8 +9378,8 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "The PCI-function profile presents one endpoint at guest BDF 00:00.0 through an 8 MiB aperture. Resource kinds PCI_ECAM and PCI_MSI describe a virtual 1 MiB ECAM window and 4 KiB GICv2m frame; PCI_BAR0 through PCI_BAR0+5 describe implemented memory BARs. Resource offsets are relative to the assigned guest aperture; bus_address is the initial virtual PCI address of a BAR. MEMORY_64 and PREFETCHABLE flags apply only to BAR resources; other resources have zero flags and bus_address. PCI configuration and MSI-X are mediated: physical host-bridge, interrupt-controller and DMA-window registers are never guest resources. The interrupt argument selects the first of interrupt_count consecutive GIC SPIs (at most 64); the AArch64 reference GIC has 256 IDs. Linux owns the entire endpoint and its child drivers. DMA bus addresses equal the admitted host physical extent plus dma_bus_offset; this translation is not an IOMMU boundary. Firmware-initialized devices remain fail-closed if link or DMA translation validation fails. Clearing bus mastering alone is not proof of DMA retirement; a PCI assignment without a proven reset/quiescence protocol retains its DMA backing and physical claim on teardown.",
     "system_config queries a public scalar system property by u64 key. PAGE_SIZE (1) returns the Native mapping granule in bytes, immutable for the lifetime of a process. Unknown keys return NOT_SUPPORTED. Unused argument registers must be zero. Success returns the value in value0 and zero in value1. This query requires no inspector capability and does not expose privileged observations.",
     "vmar_allocate(parent, address, size, options) uses address as the low end. Options zero treats nonzero address as a hint, choosing the nearest fitting free interval with lower-base tie breaking; address zero selects the lowest free interval. VMAR_ALLOCATE_EXACT requires the exact address, including zero. Unknown flags are invalid. Size is nonzero, addresses and size page aligned, and intervals must not overflow. Success returns child in value0 and actual base in value1. Selection and reservation commit atomically within parent authority. No fitting free interval returns NO_MEMORY.",
-    "system_config key SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT returns the HAL application-exclusive address limit in value0 and zero in value1. It describes profile geometry, not VMAR authority. The initial loader grants ROOT_VMAR from one page to that limit.",
-    "Native startup supplies kernel-minted ROOT_VMAR and INITIAL_STACK_VMAR handles; process builders may not replace either purpose. Initial-stack auxiliary values describe the temporary bootstrap VMAR base (including its lower guard), usable capacity and mapped size. Its top is base + page_size + capacity; only [top - size, top) is mapped read-write, with an unmapped guard at each end. AUXV_MAIN_STACK_SIZE independently carries the raw main ELF PT_GNU_STACK request, with zero selecting SDK policy. The SDK creates the final main stack using its worker-stack allocator, copies startup data, switches SP without returning to bootstrap frames, then unmaps and destroys the bootstrap VMAR before constructors or app entry. The app startup view omits the consumed bootstrap handle and reports final-stack geometry. Closing a VMAR handle alone does not unmap or destroy its reservation. Final stacks support explicit downward growth within their reserved capacity; faults do not implicitly grow them.",
+    "system_config key SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT returns the HAL application-exclusive address limit in value0 and zero in value1. It describes profile geometry, not VMAR authority. The kernel grants ROOT_VMAR from one page to that limit.",
+    "Every Native process, including init, enters the installed userspace-loader for its host architecture. The kernel maps only its restricted ET_DYN bootstrap ELF and an empty guarded stack; the first argument register holds a ByteChannel handle. Its queued message contains loader_startup, handle_count startup_handle records, then data_size opaque bytes. size is 88; flags permits only loader_startup_reply. Executable is a read/map/execute immutable VMO with the exact file length. root_vmar and stack_vmar identify child-owned mapping authority; stack_base and stack_size describe mapped usable stack bytes with an unmapped guard at each end. loader_base and loader_size describe the bootstrap image. runtime_directory is a bootstrap-only read/execute Directory scoped to /lib64. No argv, environment, auxv, application ELF parsing or relocation belongs to this kernel entry contract. The SDK closes bootstrap-only handles and retires the bootstrap image and stack before application entry. Closing a VMAR handle alone does not unmap or destroy its reservation.",
     "Virtual CPU set_affinity borrows a VirtualCpu with WRITE and accepts the same nonempty little-endian u64 CPU-mask word array as process-builder affinity. Bits above the kernel CPU limit are rejected; the mask must contain a schedulable CPU. The current assignment is retained when allowed; otherwise the scheduler selects an allowed registered CPU and safely migrates the saved context. This is explicit affinity enforcement, not load balancing. OK means the update or required handoff was accepted; migration may complete before or after return. An overlapping incompatible handoff or CPU-local wait returns busy. VM stop or guest power operations may supersede the request. Stopping, detached, and reaped endpoints reject new affinity updates. VirtualCpu info extends its 24-byte prefix with host_cpu and migration_target at offsets 24 and 28, one scheduler placement observation rather than running state or a completion token. Value 0xffffffff means unavailable assignment or no pending migration; older kernels return only the original prefix.",
     "Guest mapping creation borrows backend VirtualMachine WRITE and GuestMemory MAP, populates the full stable grant, and returns an owned mapping handle plus a backend-VM-local non-reused token. The backend IPA envelope must contain all sparse aliases: alias = 64 GiB + host physical address, with host addresses below 256 GiB. Unadmitted envelope holes have no RAM or page bitmap entries. The kernel constructs immutable frontend-ordered, coalesced physical extents; neither Native policy nor Linux may replace their addresses. Backend notification write64 0x28 admits one token exactly once to that unique notification route; read64 0x30/0x38/0x40/0x48 return frontend base, total bytes, status, extent count. Write64 0x50 selects an extent index; read64 0x58/0x60/0x68/0x70 return alias, frontend-relative offset, byte length, and query status. Rejection clears the old reply. Extents cover the entire frontend range without holes or overlapping physical pages. After draining vhost and releasing all page pins, only that backend route may write64 the token at 0x20 to certify quiescence. Mapping release accepts never-admitted or quiescent tokens, withdraws lookup, clears leaves, waits for every CPU translation acknowledgement, then releases backing. Closing a mapping handle alone quarantines its pages until backend VM retirement. Notification control operation 3 permanently disconnects both routes, only when no admitted mapping remains; a disconnected route never affects an address or IRQ reused by a subsequent connection.",
     "Native block creation dedicates one fully resident 1048576-byte guest-memory grant permanently to one kernel virtio-scsi initiator; repeated creation from that grant fails. The backend VM must retain the matching mapping until execution and physical DMA are quiescent. Six standard split queues (control, event, and four request queues) have size 8, descriptor offsets n*4096, available offsets n*4096+256, and used offsets n*4096+512, relative to guest_base. Userspace negotiates VERSION_1 with the backend before activation. Activation enables notifications and issues READ CAPACITY(16), accepting only 512-byte sectors; capacity is never supplied by userspace. MAP on the block is exclusive filesystem mount authority; directory WRITE|EXECUTE is additionally required. Mounting retains an independent block owner after its setup handle closes. Reads use bounded batches across the four request queues; writes and flushes remain ordered. Requests use shared queues and blocking kernel notifications, not per-request userspace RPC. Unretired request failures permanently disconnect the initiator and never recycle its buffer. PEER_CLOSED reports disconnection. The physical pages remain retained by backend mappings until VM/DMA retirement; notification closure alone never proves DMA quiescence.",
@@ -9406,9 +9415,9 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "Capability disposition move consumes its source only on ok and requires transfer. Capability disposition duplicate retains its source and requires transfer plus duplicate. Unknown operations, repeated source handles, kind mismatches, and rights violations reject the complete transaction.",
     "Capability-channel try_send returns peer_closed when no peer remains; otherwise it returns would_block only when no receiver is queued. It FIFO-matches the oldest fully published receiver. A size, kind, rights, operation, or copy mismatch rejects that transaction for both participants without scanning later receivers.",
     "Capability-channel timeout, cancellation, and peer close can win only before a receiver is matched. Once matched, sender completion or rejection owns the transaction through commit, including races with the deadline, cancellation, or close; both participants observe the same committed outcome.",
-    "Process-builder create borrows its authority handles and retains kernel object references independently of the caller handles. Builders are mutable only before seal. Every successful mutator applies completely; every failure leaves the builder unchanged. Seal is irreversible. Start requires a sealed builder and returns only a supervisor process handle. Start and abort consume the builder handle only on ok; every failure preserves it.",
-    "A process-builder name is nonempty UTF-8 without embedded NUL bytes. The argv vector contains at least one entry; individual argument strings are UTF-8 and may be empty but contain no NUL byte. Every UTF-8 environment entry contains a nonempty name with no '=' followed by '=' and a NUL-free value. Counts and individual byte lengths remain within the published constants.",
-    "Process-builder set_name and set_affinity replace their prior values; add_argument and add_environment append in order. Process-builder affinity is a nonempty little-endian array of u64 CPU-mask words. Bits above process_affinity_max_cpus and bits which cannot designate an allowed CPU are rejected.",
+    "Process-builder create borrows its authority handles and retains kernel object references independently of caller handles. Builders are mutable only before seal. Every successful mutator applies completely; every failure leaves the builder unchanged. Seal is irreversible and prepares only the bootstrap process image. Start requires a sealed builder, consumes it atomically, and returns a supervisor Process plus a READ/WAIT startup ByteChannel. It commits child publication, not successful application loading. Syscall failure preserves the builder; asynchronous bootstrap failure does not restore it. The SDK waits for its loader result protocol and stops failed children before returning a committed launch error.",
+    "A process-builder name is nonempty UTF-8 without embedded NUL bytes. set_data replaces bounded opaque bytes, up to process_startup_data_max_bytes, without kernel interpretation. Arguments, environment, their limits and the loader result protocol are SDK policy. Boot init receives an empty payload.",
+    "Process-builder set_name, set_data and set_affinity replace their prior values. Affinity is a nonempty little-endian array of u64 CPU-mask words. Bits above process_affinity_max_cpus and bits which cannot designate an allowed CPU are rejected.",
     "Process-builder add_handle requires a nonzero purpose unique within the builder, an expected nonzero exact object kind, and either exact granted rights or capability_disposition_same_rights. Move consumes the source only when the mutator returns ok; duplicate retains it and additionally requires duplicate. Failure preserves both builder and source.",
     "A VirtualMachineCreationAuthority may derive one resource-domain-bound VirtualMachineCreationLease. The lease is single-use and is consumed only when VirtualMachine creation publishes a PendingVirtualMachine handle successfully.",
     "Virtual-machine info appends resident_memory_bytes after the original 32-byte prefix. UINT64_MAX means unavailable during retirement. It counts currently allocated primary VMO backing, including RAM, explicitly admitted shared pools, and uploaded pages not yet mapped by stage-2; overlapping ranges of the same VMO count once. Dynamic backend alias windows, translation tables, and Native runtime memory are excluded. Shared pages are attributed independently in each guest and are not additive across guests. Inspection samples bounded page chunks and is not a globally atomic memory snapshot.",

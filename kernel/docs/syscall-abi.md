@@ -140,8 +140,10 @@ authority.
 ## Process image and execution route
 
 Each installed `ProcessImage` owns immutable machine ABI, ABI family, execution
-route, initial entry/stack/TLS values, and auxiliary startup values. Its address
-space is owned separately by `Process`; mutable registers belong to the Thread.
+route, initial entry/stack/TLS values, and bootstrap mapping bounds. For Native
+processes these describe the userspace loader and temporary stack, not the final
+application entry or its auxv. The address space is owned separately by
+`Process`; mutable registers belong to the Thread.
 The Native ABI revision is validated at construction and remains zero during
 pre-release development, rather than being stored redundantly in the image.
 
@@ -162,6 +164,39 @@ The route stays fixed for the installed image. Process construction and
 publication use the existing builder transaction. In-place image replacement,
 `PreparedExec`, multiple execution views, and vDSO selection are not implemented
 contracts; adding them requires explicit ownership and failure-path review.
+
+### Native process startup
+
+The kernel maps only the installed restricted bootstrap ELF,
+`/lib64/userspace-loader-hyper-<arch>`, and an empty guarded temporary stack.
+The first argument register carries a ByteChannel handle whose queued message
+contains `loader_startup`, tagged startup handles, and opaque startup data.
+The fixed record supplies executable VMO and mapping capabilities plus their
+actual bounds; handle values already belong to the child's table. The
+[generated ABI reference](../../sdk/abi/docs/native.md) defines record layouts,
+rights and syscall result slots.
+
+`process_builder_set_data` replaces up to 16 KiB of opaque data; an empty input
+clears it. The kernel validates the bounds and copies the bytes, without parsing
+arguments or environment entries. Their encoding and limits belong to the SDK.
+Builder creation captures the executable snapshot; sealing prepares the
+bootstrap environment. Neither validates the application's ELF or resolves
+dependencies.
+
+`process_builder_start` consumes the sealed builder only on success and returns
+a supervisor Process in `value0` plus a READ/WAIT ByteChannel in `value1`.
+Success means the child has been published and its bootstrap can run. A syscall
+failure leaves the builder available; later userspace loading failures cannot
+restore it. The SDK waits on its startup-result protocol and, on failure,
+requests child stop and waits for termination. A queued successful result is
+read before interpreting peer closure, allowing short-lived children to spawn
+successfully. Readiness precedes constructors and `main`.
+
+Init uses the same bootstrap with empty startup data and no reply request.
+Application ELF parsing, initial `argc`/`argv`/`envp`/auxv, relocation, final
+stack placement and heap policy belong to the loaders and runtime. See the
+[Native init contract](native-init.md#executable-image) and
+[userspace loader](../../lib/userspace-loader/README.md) for that handoff.
 
 ## Entry and completion contract
 
@@ -711,7 +746,7 @@ shared ABI pages; individual permissions and discovery belong to the facility
 which installs them. The reservation does not establish a fixed vDSO address,
 grant application write authority, or allocate physical memory.
 
-The loader grants process ROOT_VMAR from one page up to the HAL application
+The kernel grants process ROOT_VMAR from one page up to the HAL application
 limit, as specified in the [Native init contract](native-init.md#executable-image).
 The main stack and both guards remain below that limit. System-reserved user
 addresses remain outside application authority. RISC-V needs no wider translation mode to reserve system pages
@@ -943,11 +978,14 @@ map/unmap/protect and page-table work do not acquire a logarithmic bound from
 this index change. Tree nodes also have more per-entry overhead than a packed
 vector.
 
-SDK worker stacks use independent automatically placed child VMARs, including
-their guard pages; they no longer consume a fixed SDK stack arena. The loader supplies a temporary bootstrap stack; the runtime creates the final
-main stack through its ordinary allocator and retires the bootstrap after switching SP.
+SDK main and worker stacks use independent automatically placed child VMARs,
+including their guard pages; they do not consume a fixed SDK stack arena. The
+kernel supplies a temporary bootstrap stack. The runtime creates the final
+main stack through its ordinary stack allocator, copies startup data, switches
+SP, then retires the bootstrap image and stack.
 
 `SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT` (key 2) returns the selected HAL
 application-exclusive address limit in value0, with value1 zero. It describes
-the architecture profile, not authority over a particular VMAR. The loader's
-ROOT_VMAR covers one page up to this limit; libraries must still obey their handles.
+the architecture profile, not authority over a particular VMAR. The
+kernel-provided ROOT_VMAR covers one page up to this limit; libraries must still
+obey their handles.

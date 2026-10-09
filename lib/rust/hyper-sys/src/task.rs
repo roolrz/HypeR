@@ -141,52 +141,23 @@ pub unsafe fn process_builder_set_name(
     }
 }
 
-/// Appends one argv entry to a process builder.
+/// Replaces the builder's bounded opaque userspace startup payload.
 ///
 /// # Safety
-///
-/// `builder` must remain live with write rights and `argument` must remain
-/// readable for `argument_size` bytes.
+/// `builder` must remain live with WRITE rights; `data` must be readable for `size` bytes.
 #[inline]
-pub unsafe fn process_builder_add_argument(
+pub unsafe fn process_builder_set_data(
     builder: abi::HyperNativeHandle,
-    argument: *const u8,
-    argument_size: usize,
+    data: *const u8,
+    size: usize,
 ) -> abi::HyperNativeStatus {
-    // SAFETY: the caller establishes the handle and buffer contracts.
+    // SAFETY: the caller establishes handle and input-buffer validity.
     unsafe {
         ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT,
+            abi::HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_DATA,
             builder,
-            argument.addr() as u64,
-            argument_size as u64,
-            0,
-            0,
-            0,
-        )
-        .status
-    }
-}
-
-/// Appends one `name=value` environment entry to a process builder.
-///
-/// # Safety
-///
-/// `builder` must remain live with write rights and `environment` must remain
-/// readable for `environment_size` bytes.
-#[inline]
-pub unsafe fn process_builder_add_environment(
-    builder: abi::HyperNativeHandle,
-    environment: *const u8,
-    environment_size: usize,
-) -> abi::HyperNativeStatus {
-    // SAFETY: the caller establishes the handle and buffer contracts.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ENVIRONMENT,
-            builder,
-            environment.addr() as u64,
-            environment_size as u64,
+            data.addr() as u64,
+            size as u64,
             0,
             0,
             0,
@@ -281,7 +252,10 @@ pub unsafe fn process_builder_seal(builder: abi::HyperNativeHandle) -> abi::Hype
 /// # Safety
 ///
 /// The caller must exclusively own `builder`. `OK` consumes it and publishes
-/// one nonzero Process handle in `value0`; every failure preserves `builder`.
+/// a supervisor Process handle in `value0` and a READ/WAIT `ByteChannel` in
+/// `value1`. The child runs userspace-loader; callers must consume its startup
+/// result before reporting application readiness. Every syscall failure preserves
+/// `builder`; a later loader failure does not restore it.
 #[inline]
 pub unsafe fn process_builder_start(builder: abi::HyperNativeHandle) -> CallResult {
     // SAFETY: the caller owns the builder's consume-on-success transition.

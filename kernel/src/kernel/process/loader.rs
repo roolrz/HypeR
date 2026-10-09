@@ -3,45 +3,86 @@
 
 //! Native executable loading into unpublished Process address spaces.
 
-use alloc::vec::Vec;
-use core::mem::size_of;
-
-use hyper::exec::{
-    elf::{Image, ImageKind, Machine, Relocation, SegmentPermissions},
-    startup::Layout as StartupStackLayout,
-};
+use hyper::exec::bootstrap::{Image, Machine};
 use hyper::mm::{PAGE_SIZE, UniqueFallibleArc};
+use hyper::sync::PublishedOnce;
 
 use super::{ImageError, MachineAbi, ProcessImage};
-use crate::kernel::accounting::{ResourceAmount, ResourceDomain, ResourceError, ResourceKind};
+use crate::kernel::accounting::{ResourceDomain, ResourceError};
 use crate::kernel::mm::user_space::{
     MachineError, NativeAddressSpace, NativeImageSegment, Permissions, UserAddress, UserSlice,
 };
+use crate::kernel::vfs::ExecutableSnapshot;
 
-const USER_ROOT_BASE: u64 = PAGE_SIZE;
-const PIE_MAPPING_BASE: u64 = 0x40_0000;
-const INTERPRETER_MAPPING_BASE: u64 = 0x1000_0000;
-const DYNAMIC_LIBRARY_MAPPING_BASE: u64 = 0x2000_0000;
-// Temporary execution space for the SDK loader/runtime, not the app stack.
-const BOOTSTRAP_STACK_SIZE: u64 = 128 * 1024;
-const BOOTSTRAP_STACK_TOP: u64 = 0x3f_f000;
-const MAXIMUM_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const LOADER_BASE: u64 = 0x10_0000;
+const STACK_SIZE: u64 = 128 * 1024;
+const STACK_TOP: u64 = 0x3f_f000;
 
-fn application_address_limit() -> Result<u64, Error> {
-    let plan = crate::hal::user::address_space_plan().map_err(MachineError::from)?;
-    Ok(plan.application_limit())
+struct BootstrapProgram {
+    snapshot: ExecutableSnapshot,
+    image: Image,
+    runtime_directory: crate::kernel::vfs::DirectoryObject,
+}
+static PROGRAM: PublishedOnce<BootstrapProgram> = PublishedOnce::new();
+
+/// Published once by init, before any userspace task can create children.
+/// Retaining the snapshot shares immutable code pages on every subsequent start.
+#[cfg_attr(
+    feature = "kernel-self-test",
+    allow(dead_code, reason = "Self-test images do not launch init")
+)]
+pub(crate) fn initialize_loader(domain: &ResourceDomain) -> Result<(), Error> {
+    use crate::hal::user::HostMachine;
+    let path = match crate::hal::user::host_machine() {
+        HostMachine::Aarch64 => "/lib64/userspace-loader-hyper-aarch64",
+        HostMachine::Riscv64 => "/lib64/userspace-loader-hyper-riscv64",
+        _ => return Err(Error::UnsupportedMachine),
+    };
+    let snapshot = crate::kernel::vfs::lookup(path, domain)
+        .map_err(|_| Error::Address)?
+        .ok_or(Error::Address)?
+        .into_executable()
+        .ok_or(Error::Address)?;
+    let image = Image::parse(snapshot.bytes()).map_err(Error::Elf)?;
+    validate_host_machine(image.machine)?;
+    let root = crate::kernel::vfs::root_directory(domain).map_err(|_| Error::Address)?;
+    let directory = root
+        .open_directory("/lib64", domain)
+        .map_err(|_| Error::Address)?;
+    PROGRAM
+        .publish(BootstrapProgram {
+            snapshot,
+            image,
+            runtime_directory: directory,
+        })
+        .map_err(|_| Error::Address)
 }
 
-/// Architecture-independent bootstrap layout; the SDK owns final stack policy.
-pub(crate) fn initial_stack_top() -> Result<u64, Error> {
-    Ok(BOOTSTRAP_STACK_TOP)
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BootstrapLayout {
+    pub(crate) stack_base: u64,
+    pub(crate) stack_size: u64,
+    pub(crate) loader_base: u64,
+    pub(crate) loader_size: u64,
 }
 
 #[derive(Debug)]
 pub(crate) enum Error {
     Address,
-    Allocation,
-    Elf(hyper::exec::elf::Error),
+    #[cfg_attr(
+        feature = "kernel-self-test",
+        allow(
+            dead_code,
+            reason = "Only boot loader admission constructs this failure"
+        )
+    )]
+    Elf(
+        #[allow(
+            dead_code,
+            reason = "Retains bootstrap validation details for diagnostics"
+        )]
+        hyper::exec::bootstrap::Error,
+    ),
     Image(
         #[expect(
             dead_code,
@@ -58,6 +99,13 @@ pub(crate) enum Error {
         )]
         crate::kernel::task::scheduler::Error,
     ),
+    #[cfg_attr(
+        feature = "kernel-self-test",
+        allow(
+            dead_code,
+            reason = "Only boot loader admission constructs this failure"
+        )
+    )]
     UnsupportedMachine,
 }
 
@@ -84,61 +132,20 @@ pub(crate) struct LoadedProcessImage {
     pub(crate) address_space: UniqueFallibleArc<NativeAddressSpace>,
 }
 
-pub(crate) fn load_native(
-    snapshot: &crate::kernel::vfs::ExecutableSnapshot,
-    domain: ResourceDomain,
-    initial_stack: StartupStackLayout,
-) -> Result<LoadedProcessImage, Error> {
-    let bytes = snapshot.bytes();
-    if bytes.len() > MAXIMUM_IMAGE_BYTES as usize {
-        return Err(Error::Address);
-    }
-    let allocation = Image::process_allocation_plan(bytes).map_err(Error::Elf)?;
-    let scratch_bytes = allocation
-        .parser_bytes()
-        .and_then(|bytes| {
-            allocation
-                .segment_capacity()
-                .checked_mul(core::mem::size_of::<NativeImageSegment>())
-                .and_then(|segments| bytes.checked_add(segments))
-        })
-        .and_then(|bytes| u64::try_from(bytes).ok())
-        .ok_or(Error::Allocation)?;
-    let _scratch_charge = domain
-        .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, scratch_bytes))?
-        .commit();
-    let executable = Image::parse_process_with_plan(bytes, allocation).map_err(Error::Elf)?;
-    validate_host_machine(executable.machine())?;
-    let load_bias = select_load_bias(&executable)?;
-    let stack = hyper::exec::startup::StackReservation::try_new(
-        initial_stack_top()?,
-        BOOTSTRAP_STACK_SIZE,
-        BOOTSTRAP_STACK_SIZE,
-        USER_ROOT_BASE,
-    )
-    .map_err(|_| Error::Address)?;
-    validate_layout(&executable, load_bias, application_address_limit()?)?;
-    if relocated_address(load_bias, executable.minimum_mapping_address())? < PIE_MAPPING_BASE {
-        return Err(Error::Address);
-    }
-
+/// Installs only the fixed bootstrap program and an empty guarded stack.
+/// Application ELF interpretation is deliberately absent from this boundary.
+pub(crate) fn load_native(domain: ResourceDomain) -> Result<LoadedProcessImage, Error> {
+    let program = PROGRAM.get().ok_or(Error::Address)?;
+    let limit = crate::hal::user::address_space_plan()
+        .map_err(MachineError::from)?
+        .application_limit();
     let root = UserSlice::new(
-        UserAddress::new(USER_ROOT_BASE),
-        application_address_limit()?
-            .checked_sub(USER_ROOT_BASE)
-            .ok_or(Error::Address)?,
+        UserAddress::new(PAGE_SIZE),
+        limit.checked_sub(PAGE_SIZE).ok_or(Error::Address)?,
     )
     .map_err(|_| Error::Address)?;
-    let address_space = NativeAddressSpace::try_new(domain.clone(), root)?;
-    match prepare_address_space(
-        &executable,
-        snapshot,
-        load_bias,
-        initial_stack,
-        stack,
-        &address_space,
-        &domain,
-    ) {
+    let address_space = NativeAddressSpace::try_new(domain, root)?;
+    match prepare_address_space(program, &address_space) {
         Ok(image) => Ok(LoadedProcessImage {
             image,
             address_space,
@@ -151,144 +158,72 @@ pub(crate) fn load_native(
 }
 
 fn prepare_address_space(
-    executable: &Image<'_>,
-    snapshot: &crate::kernel::vfs::ExecutableSnapshot,
-    load_bias: u64,
-    initial_stack: StartupStackLayout,
-    stack: hyper::exec::startup::StackReservation,
+    program: &BootstrapProgram,
     address_space: &NativeAddressSpace,
-    domain: &ResourceDomain,
 ) -> Result<ProcessImage, Error> {
-    let mut segments = prepare_segments(executable, snapshot, load_bias, address_space)?;
-    let interpreter = match executable.interpreter() {
-        Some(path) => Some(load_interpreter(
-            path,
-            executable.machine(),
-            address_space,
-            domain,
-        )?),
-        None => None,
-    };
-    if let Some(loaded) = &interpreter {
-        validate_dynamic_layout(executable, load_bias, loaded)?;
-    }
-    if interpreter.is_none() {
-        apply_relocations(executable, load_bias, &mut segments)?;
-    }
-
-    let stack_range = UserSlice::new(UserAddress::new(stack.mapped_base()), stack.size)
-        .map_err(|_| Error::Address)?;
-    let reservation_range = UserSlice::new(UserAddress::new(stack.base), stack.reservation_size())
-        .map_err(|_| Error::Address)?;
-    let stack_vmar = address_space.reserve_initial_stack(reservation_range)?;
-    if initial_stack.stack_top() != stack.base + PAGE_SIZE + stack.capacity
-        || initial_stack.stack_pointer() < stack_range.base().get()
-        || initial_stack.stack_pointer() >= stack_range.end().get()
-        || !initial_stack.stack_pointer().is_multiple_of(16)
-    {
-        return Err(Error::Address);
-    }
-    let stack_segment =
-        NativeImageSegment::try_new(address_space, stack_range, Permissions::read_write())?;
-
-    let pin = crate::kernel::task::scheduler::preempt_disable()?;
-    let (entry, interpreter_base) = interpreter.as_ref().map_or(
-        (relocated_address(load_bias, executable.entry())?, 0),
-        |loaded| (loaded.entry, loaded.load_bias),
-    );
-    let install_result = install_segments(
-        address_space,
-        segments,
-        interpreter.map(|loaded| loaded.segments),
-        stack_segment,
-        stack_vmar,
-        &pin,
-    );
-    // Mapping installation needs CPU affinity, but it does not define a
-    // scheduling point. In particular, the bootstrap loader runs before the
-    // first transition to an IRQ-enabled Thread context. Restore only the
-    // pin's accounting here and leave deferred scheduling to the caller's
-    // ordinary return or blocking boundary.
-    crate::kernel::task::scheduler::preempt_enable_without_reschedule(pin)?;
-    install_result?;
-
-    let program_entry = relocated_address(load_bias, executable.entry())?;
-    ProcessImage::try_native_with_auxiliary(
-        machine_abi(executable.machine()),
-        UserAddress::new(entry),
-        UserAddress::new(initial_stack.stack_pointer()),
-        UserAddress::new(0),
-        hyper::exec::startup::AuxiliaryValues {
-            program_header: relocated_address(load_bias, executable.program_header_address())?,
-            program_header_entry_size: 56,
-            program_header_count: u64::from(executable.program_header_count()),
-            interpreter_base,
-            program_entry,
-            initial_stack_base: stack.base,
-            initial_stack_capacity: stack.capacity,
-            initial_stack_size: stack.size,
-            main_stack_size: executable.requested_stack_size(),
-        },
+    let stack_base = STACK_TOP - STACK_SIZE;
+    let reservation = UserSlice::new(
+        UserAddress::new(stack_base - PAGE_SIZE),
+        STACK_SIZE + 2 * PAGE_SIZE,
     )
-    .map(|image| image.with_initial_stack_vmar(stack_vmar))
-    .map_err(Error::Image)
-}
-
-struct LoadedInterpreter {
-    segments: Vec<NativeImageSegment>,
-    entry: u64,
-    load_bias: u64,
-    mapping_start: u64,
-    mapping_end: u64,
-}
-
-fn validate_dynamic_layout(
-    executable: &Image<'_>,
-    load_bias: u64,
-    interpreter: &LoadedInterpreter,
-) -> Result<(), Error> {
-    let executable_end = relocated_address(load_bias, executable.maximum_mapping_address())?;
-    if executable_end > interpreter.mapping_start
-        || interpreter.mapping_end > DYNAMIC_LIBRARY_MAPPING_BASE
-    {
-        return Err(Error::Address);
+    .map_err(|_| Error::Address)?;
+    let stack_vmar = address_space.reserve_initial_stack(reservation)?;
+    // Every mapping installation, including executable cache maintenance, uses
+    // the existing address-space transaction and CPU pinning mechanisms.
+    for segment in program.image.segments() {
+        let range = UserSlice::new(
+            UserAddress::new(LOADER_BASE + segment.address),
+            segment.size,
+        )
+        .map_err(|_| Error::Address)?;
+        let permissions = if segment.executable {
+            Permissions::read_execute()
+        } else if segment.writable {
+            Permissions::read_write()
+        } else {
+            Permissions::read_only()
+        };
+        let prepared = NativeImageSegment::try_from_snapshot(
+            address_space,
+            range,
+            permissions,
+            program.snapshot.storage().clone(),
+            segment.file_offset,
+            segment.file_size,
+            segment.data_offset,
+        )?;
+        let pin = crate::kernel::task::scheduler::preempt_disable()?;
+        let result = prepared.install(address_space, &pin);
+        crate::kernel::task::scheduler::preempt_enable_without_reschedule(pin)?;
+        result?;
     }
-    Ok(())
-}
-
-fn load_interpreter(
-    path: &str,
-    executable_machine: Machine,
-    address_space: &NativeAddressSpace,
-    domain: &ResourceDomain,
-) -> Result<LoadedInterpreter, Error> {
-    let file = crate::kernel::vfs::lookup(path, domain)
-        .map_err(|_| Error::Address)?
-        .ok_or(Error::Address)?;
-    let snapshot = file.into_executable().ok_or(Error::Address)?;
-    let bytes = snapshot.bytes();
-    if bytes.len() > MAXIMUM_IMAGE_BYTES as usize {
-        return Err(Error::Address);
-    }
-    let plan = Image::allocation_plan(bytes).map_err(Error::Elf)?;
-    let image = Image::parse_with_plan(bytes, plan).map_err(Error::Elf)?;
-    if image.machine() != executable_machine || image.kind() != ImageKind::PositionIndependent {
-        return Err(Error::UnsupportedMachine);
-    }
-    let load_bias = INTERPRETER_MAPPING_BASE
-        .checked_sub(image.minimum_mapping_address())
-        .filter(|bias| bias.is_multiple_of(PAGE_SIZE))
-        .ok_or(Error::Address)?;
-    validate_layout(&image, load_bias, DYNAMIC_LIBRARY_MAPPING_BASE)?;
-    let mut segments = prepare_segments(&image, &snapshot, load_bias, address_space)?;
-    apply_relocations(&image, load_bias, &mut segments)?;
-    Ok(LoadedInterpreter {
-        segments,
-        entry: relocated_address(load_bias, image.entry())?,
-        load_bias,
-        mapping_start: relocated_address(load_bias, image.minimum_mapping_address())?,
-        mapping_end: relocated_address(load_bias, image.maximum_mapping_address())?,
+    let stack = NativeImageSegment::try_new(
+        address_space,
+        UserSlice::new(UserAddress::new(stack_base), STACK_SIZE).map_err(|_| Error::Address)?,
+        Permissions::read_write(),
+    )?;
+    let pin = crate::kernel::task::scheduler::preempt_disable()?;
+    let result = stack.install_in_vmar(address_space, stack_vmar, &pin);
+    crate::kernel::task::scheduler::preempt_enable_without_reschedule(pin)?;
+    result?;
+    ProcessImage::try_native(
+        machine_abi(program.image.machine),
+        UserAddress::new(LOADER_BASE + program.image.entry),
+        UserAddress::new(STACK_TOP),
+        UserAddress::new(0),
+    )
+    .map(|image| {
+        image.with_bootstrap(
+            stack_vmar,
+            BootstrapLayout {
+                stack_base,
+                stack_size: STACK_SIZE,
+                loader_base: LOADER_BASE,
+                loader_size: program.image.size,
+            },
+        )
     })
+    .map_err(Error::Image)
 }
 
 fn machine_abi(machine: Machine) -> MachineAbi {
@@ -298,6 +233,10 @@ fn machine_abi(machine: Machine) -> MachineAbi {
     }
 }
 
+#[cfg_attr(
+    feature = "kernel-self-test",
+    allow(dead_code, reason = "Self-test images do not launch init")
+)]
 fn validate_host_machine(machine: Machine) -> Result<(), Error> {
     use crate::hal::user::HostMachine;
     if matches!(
@@ -320,131 +259,12 @@ fn retire_failed_address_space(address_space: UniqueFallibleArc<NativeAddressSpa
     }
 }
 
-fn select_load_bias(image: &Image<'_>) -> Result<u64, Error> {
-    match image.kind() {
-        ImageKind::Executable => Ok(0),
-        ImageKind::PositionIndependent => PIE_MAPPING_BASE
-            .checked_sub(image.minimum_mapping_address())
-            .filter(|bias| bias.is_multiple_of(PAGE_SIZE))
-            .ok_or(Error::Address),
-    }
-}
-
-fn validate_layout(image: &Image<'_>, load_bias: u64, mapping_end: u64) -> Result<(), Error> {
-    let start = relocated_address(load_bias, image.minimum_mapping_address())?;
-    let end = relocated_address(load_bias, image.maximum_mapping_address())?;
-    if start < USER_ROOT_BASE || start >= end || end > mapping_end {
-        return Err(Error::Address);
-    }
-    let mut total = 0u64;
-    for segment in image.segments() {
-        total = total
-            .checked_add(segment.mapping_size())
-            .ok_or(Error::Address)?;
-        if total > MAXIMUM_IMAGE_BYTES {
-            return Err(Error::Address);
-        }
-    }
-    Ok(())
-}
-
-fn prepare_segments(
-    image: &Image<'_>,
-    snapshot: &crate::kernel::vfs::ExecutableSnapshot,
-    load_bias: u64,
-    address_space: &NativeAddressSpace,
-) -> Result<Vec<NativeImageSegment>, Error> {
-    let mut prepared = Vec::new();
-    prepared
-        .try_reserve_exact(image.segments().len())
-        .map_err(|_| Error::Allocation)?;
-    for segment in image.segments() {
-        let address = relocated_address(load_bias, segment.mapping_address())?;
-        let range = UserSlice::new(UserAddress::new(address), segment.mapping_size())
-            .map_err(|_| Error::Address)?;
-        let loaded = NativeImageSegment::try_from_snapshot(
-            address_space,
-            range,
-            map_permissions(segment.permissions()),
-            snapshot.storage().clone(),
-            segment.file_offset() - segment.data_offset(),
-            segment.data().len() as u64,
-            segment.data_offset(),
-        )?;
-        prepared.push(loaded);
-    }
-    Ok(prepared)
-}
-
-fn apply_relocations(
-    image: &Image<'_>,
-    load_bias: u64,
-    segments: &mut [NativeImageSegment],
-) -> Result<(), Error> {
-    for relocation in image.relocations() {
-        let target = UserAddress::new(relocated_address(load_bias, relocation.target())?);
-        let segment = segment_containing(segments, target).ok_or(Error::Address)?;
-        let value = match relocation {
-            Relocation::Relative { addend, .. } => add_signed(load_bias, addend)?,
-            Relocation::RelativeInPlace { .. } => segment
-                .read_word(target)?
-                .checked_add(load_bias)
-                .ok_or(Error::Address)?,
-        };
-        segment.write_word(target, value)?;
-    }
-    Ok(())
-}
-
-fn install_segments(
-    address_space: &NativeAddressSpace,
-    segments: Vec<NativeImageSegment>,
-    interpreter: Option<Vec<NativeImageSegment>>,
-    stack: NativeImageSegment,
-    stack_vmar: crate::kernel::mm::user_space::Vmar,
-    pin: &(impl hyper::cpu::PinnedExecution + 'static),
-) -> Result<(), Error> {
-    for segment in segments {
-        segment.install(address_space, pin)?;
-    }
-    if let Some(interpreter) = interpreter {
-        for segment in interpreter {
-            segment.install(address_space, pin)?;
-        }
-    }
-    stack.install_in_vmar(address_space, stack_vmar, pin)?;
-    Ok(())
-}
-
-fn segment_containing(
-    segments: &mut [NativeImageSegment],
-    address: UserAddress,
-) -> Option<&mut NativeImageSegment> {
-    let end = address.checked_add(size_of::<u64>() as u64)?;
-    segments
-        .iter_mut()
-        .find(|segment| segment.range().base() <= address && end <= segment.range().end())
-}
-
-const fn map_permissions(permissions: SegmentPermissions) -> Permissions {
-    if permissions.executable() {
-        Permissions::read_execute()
-    } else if permissions.writable() {
-        Permissions::read_write()
-    } else {
-        Permissions::read_only()
-    }
-}
-
-fn relocated_address(load_bias: u64, address: u64) -> Result<u64, Error> {
-    load_bias.checked_add(address).ok_or(Error::Address)
-}
-
-fn add_signed(base: u64, addend: i64) -> Result<u64, Error> {
-    if addend >= 0 {
-        base.checked_add(addend as u64).ok_or(Error::Address)
-    } else {
-        base.checked_sub(addend.unsigned_abs())
-            .ok_or(Error::Address)
-    }
+/// Creates a fresh bootstrap-only directory object for each launch. Caching a
+/// publication would try to reactivate the object after an earlier loader closed
+/// its last handle. Retain the immutable location, not a userspace handle lifecycle.
+pub(crate) fn runtime_directory(
+    domain: &ResourceDomain,
+) -> Result<crate::kernel::vfs::DirectoryObject, crate::kernel::vfs::VfsError> {
+    let program = PROGRAM.get().ok_or(crate::kernel::vfs::VfsError::Missing)?;
+    program.runtime_directory.try_clone(domain)
 }

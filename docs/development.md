@@ -233,7 +233,8 @@ exact coverage and supported runtime expectations.
 | `kernel/src/mm/`, `kernel/src/sync/`, `kernel/src/time/` | Reusable allocation, synchronization, and timing mechanisms |
 | `sdk/abi/` | Native ABI schema, generated Rust definitions, C header, and reference |
 | `lib/hyper/` | Freestanding Native C runtime and architecture syscall veneers |
-| `lib/loader/` | Native userspace ELF interpreter, relocation, and runtime loading |
+| `lib/userspace-loader/` | Native executable mapping and initial stack construction |
+| `lib/dynamic-loader/` | Native userspace ELF interpreter, relocation, and runtime loading |
 | `lib/rust/` | Safe `no_std` Native OS binding, raw syscalls, and Rust runtime entry |
 | `sdk/toolchain/` | Clang/Cargo drivers, linker contract, and transactional SDK assembly |
 | `app/` | Native system applications built only against the assembled SDK |
@@ -363,7 +364,11 @@ For focused maintenance feedback, `make app-test APP_TEST_PACKAGE=hyper-vm-manag
 executes the same fleet decisions used by the service, with explicit event time
 and recorded resource effects. `make app-test APP_TEST_PACKAGE=hyper-vm-support`
 checks the shared image/device/protocol mechanisms. `make sdk-test` includes
-C/Rust transport capture tests; `sh sdk/toolchain/scripts/check-loader-arch.sh`
+C/Rust transport capture tests; `sh sdk/toolchain/scripts/check-dynamic-loader.sh`
 executes the production loader's parser, relocator and rollback paths against
-host fixtures (UBSan on all hosts, ASan additionally on Linux). These checks
+host fixtures. `sh sdk/toolchain/scripts/check-userspace-loader.sh` checks the
+executable mapper, startup-vector handoff and early self-relocator for both
+architectures. Both scripts use UBSan on all hosts and ASan additionally on
+Linux. C runtime tests also cover final-stack retirement and loader-result
+handling. These checks
 complement, rather than replace, Native dynamic-linking and cross-VM acceptance.

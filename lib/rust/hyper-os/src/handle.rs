@@ -714,6 +714,9 @@ mod raw_ops {
         // upper bits as a stand-in for the kernel's generation-qualified slot.
         let object_kind = (raw.get() & 0xff) as u32;
         let rights = match object_kind {
+            hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL if raw.get() == 0x10002 => {
+                hyper_abi::HYPER_NATIVE_RIGHT_READ | hyper_abi::HYPER_NATIVE_RIGHT_WAIT
+            }
             hyper_abi::HYPER_NATIVE_OBJECT_PROCESS_BUILDER => {
                 hyper_abi::HYPER_NATIVE_RIGHT_TRANSFER
                     | hyper_abi::HYPER_NATIVE_RIGHT_INSPECT

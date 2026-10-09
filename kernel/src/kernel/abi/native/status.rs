@@ -320,8 +320,6 @@ pub(super) fn status_from_process_builder_start_error(
         ProcessBuilderError::Busy => HYPER_NATIVE_STATUS_BUSY,
         ProcessBuilderError::ExecutableFile(error) => status_from_vfs_error(error),
         ProcessBuilderError::DuplicateStartupPurpose
-        | ProcessBuilderError::EmptyArguments
-        | ProcessBuilderError::InvalidEnvironment
         | ProcessBuilderError::InvalidAffinity
         | ProcessBuilderError::InvalidStartupPurpose
         | ProcessBuilderError::InvalidString => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
@@ -329,8 +327,7 @@ pub(super) fn status_from_process_builder_start_error(
         ProcessBuilderError::Object(error) => status_from_object_creation_error(error),
         ProcessBuilderError::Process(error) => status_from_process_error(error),
         ProcessBuilderError::Resource(error) => status_from_resource_error(error),
-        ProcessBuilderError::Stack(error) => status_from_startup_stack_error(error),
-        ProcessBuilderError::StartupHandleLimit | ProcessBuilderError::StringLimit => {
+        ProcessBuilderError::StartupHandleLimit | ProcessBuilderError::DataLimit => {
             HYPER_NATIVE_STATUS_RESOURCE_LIMIT
         }
         ProcessBuilderError::UnsupportedStartupKind => HYPER_NATIVE_STATUS_NOT_SUPPORTED,
@@ -351,8 +348,6 @@ pub(super) fn status_from_process_builder_error(
         ProcessBuilderError::Busy => HYPER_NATIVE_STATUS_BUSY,
         ProcessBuilderError::ExecutableFile(error) => status_from_vfs_error(error),
         ProcessBuilderError::DuplicateStartupPurpose
-        | ProcessBuilderError::EmptyArguments
-        | ProcessBuilderError::InvalidEnvironment
         | ProcessBuilderError::InvalidAffinity
         | ProcessBuilderError::InvalidStartupPurpose
         | ProcessBuilderError::InvalidString => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
@@ -360,8 +355,7 @@ pub(super) fn status_from_process_builder_error(
         ProcessBuilderError::Object(error) => status_from_object_creation_error(error),
         ProcessBuilderError::Process(error) => status_from_process_error(error),
         ProcessBuilderError::Resource(error) => status_from_resource_error(error),
-        ProcessBuilderError::Stack(error) => status_from_startup_stack_error(error),
-        ProcessBuilderError::StartupHandleLimit | ProcessBuilderError::StringLimit => {
+        ProcessBuilderError::StartupHandleLimit | ProcessBuilderError::DataLimit => {
             HYPER_NATIVE_STATUS_RESOURCE_LIMIT
         }
         ProcessBuilderError::UnsupportedStartupKind => HYPER_NATIVE_STATUS_NOT_SUPPORTED,
@@ -372,9 +366,8 @@ pub(super) fn status_from_child_process_start_error(
     error: ChildProcessStartError,
 ) -> HyperNativeStatus {
     match error {
-        ChildProcessStartError::Builder(error) => status_from_process_builder_error(error),
         ChildProcessStartError::Process(error) => status_from_process_error(error),
-        ChildProcessStartError::Stack(error) => status_from_startup_stack_error(error),
+        ChildProcessStartError::Bootstrap(error) => status_from_bootstrap_error(error),
         ChildProcessStartError::TaskObject(error) => status_from_task_object_error(error),
         ChildProcessStartError::VmarObject(error) => status_from_memory_object_error(error),
     }
@@ -507,8 +500,7 @@ pub(super) const fn status_from_loader_error(
 ) -> HyperNativeStatus {
     match error {
         crate::kernel::process::LoaderError::Address => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
-        crate::kernel::process::LoaderError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
-        crate::kernel::process::LoaderError::Elf(error) => status_from_elf_error(error),
+        crate::kernel::process::LoaderError::Elf(_) => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         crate::kernel::process::LoaderError::Image(_) => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         crate::kernel::process::LoaderError::Machine(error) => status_from_machine_error(error),
         crate::kernel::process::LoaderError::Resource(error) => status_from_resource_error(error),
@@ -519,31 +511,16 @@ pub(super) const fn status_from_loader_error(
     }
 }
 
-pub(super) const fn status_from_elf_error(error: hyper::exec::elf::Error) -> HyperNativeStatus {
-    match error {
-        hyper::exec::elf::Error::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
-        hyper::exec::elf::Error::UnsupportedClass
-        | hyper::exec::elf::Error::UnsupportedDataEncoding
-        | hyper::exec::elf::Error::UnsupportedFileType
-        | hyper::exec::elf::Error::UnsupportedInterpreter
-        | hyper::exec::elf::Error::UnsupportedMachine
-        | hyper::exec::elf::Error::UnsupportedOperatingSystemAbi
-        | hyper::exec::elf::Error::UnsupportedAbiVersion
-        | hyper::exec::elf::Error::UnsupportedRelocation
-        | hyper::exec::elf::Error::UnsupportedTls => HYPER_NATIVE_STATUS_NOT_SUPPORTED,
-        _ => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
-    }
-}
-
-pub(super) const fn status_from_startup_stack_error(
-    error: hyper::exec::startup::Error,
+fn status_from_bootstrap_error(
+    error: crate::kernel::process::bootstrap::Error,
 ) -> HyperNativeStatus {
+    use crate::kernel::process::bootstrap::Error;
     match error {
-        hyper::exec::startup::Error::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
-        hyper::exec::startup::Error::TooLarge => HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
-        hyper::exec::startup::Error::AddressOverflow
-        | hyper::exec::startup::Error::EmbeddedNul
-        | hyper::exec::startup::Error::LayoutMismatch => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        Error::Channel(error) => status_from_byte_channel_error(error),
+        Error::Vfs(error) => status_from_vfs_error(error),
+        Error::Memory(error) => status_from_memory_object_error(error),
+        Error::Process(error) => status_from_process_error(error),
+        Error::Scheduler(_) => HYPER_NATIVE_STATUS_INTERNAL,
     }
 }
 
@@ -737,7 +714,7 @@ pub(super) const fn status_from_machine_error(error: MachineError) -> HyperNativ
         MachineError::Hal(_) | MachineError::Identifier(_) | MachineError::Vmo(_) => {
             HYPER_NATIVE_STATUS_INTERNAL
         }
-        MachineError::InvalidRange | MachineError::SizeOverflow => HYPER_NATIVE_STATUS_FAULT,
+        MachineError::SizeOverflow => HYPER_NATIVE_STATUS_FAULT,
     }
 }
 

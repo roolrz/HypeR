@@ -542,9 +542,12 @@ continuation reacquires its scheduler pin and current execution payload rather
 than retaining a CPU-affine borrow. RISC-V uses private Sv39 roots, a dedicated
 U-mode trap vector and full integer/FP state capture. x86-64 currently rejects
 native-user entry as unsupported. Process lifetime, handles, rights, syscall
-numbers, ELF policy, compatibility routing, residency, and resource accounting
-remain in the kernel. The scheduler-owned `UserExecution` strongly retains its
-Process, native address space, and per-Thread machine context.
+numbers, bootstrap ELF admission, residency, and resource accounting remain in
+the kernel. Application ELF parsing, stack encoding and relocation belong to
+`lib/userspace-loader`, `lib/dynamic-loader` and the SDK runtime. The kernel
+publishes a bootstrap Thread before ordinary ELF loading; SDK spawn waits for
+the userspace startup result. The scheduler-owned `UserExecution` strongly
+retains its Process, native address space, and per-Thread machine context.
 
 `UserThread` wraps one canonical kernel object rather than maintaining a
 parallel task identity. Internal observers and eventual userspace handles share
@@ -552,8 +555,9 @@ its KOID, rights ceiling, and level-triggered termination state. Global object
 and Process directories retain only weak references. Their cursor-based
 snapshots combine object headers with bounded per-Process handle-table pages,
 providing a pointer-free diagnostic graph without changing object lifetime or
-placing reverse-reference locks on capability hot paths. Rendering is allowed
-only from normal kernel context; fatal diagnostics remain lock-independent.
+placing reverse-reference locks on capability hot paths. The Native `handle`
+tool renders these snapshots through scoped inspector capabilities. Snapshot queries run in
+normal kernel context; fatal diagnostics remain lock-independent.
 Process and Thread labels are copied into bounded immutable identity snapshots
 before publication. This keeps `ps` output meaningful without retaining loader
 paths, builder storage, scheduler allocations, or authority-bearing references.
@@ -637,7 +641,9 @@ The concrete startup order is boot-critical CPU power, memory/allocator,
 immutable initramfs publication, debug and scheduler, host IRQ/crash/time,
 one-shot SMP admission, stage-1 address-space sealing, platform drivers,
 complete VM initialization, and scheduling of the Native init worker. The
-worker loads and publishes init after interrupt-masked bootstrap has exited.
+worker admits the userspace loader, snapshots `/init`, and publishes its
+bootstrap process after interrupt-masked bootstrap has exited. The userspace
+loader then maps init and its interpreter.
 Kernel self-test images run standalone mechanism tests, report completion and retire the
 bootstrap execution. Linux integration boots Native init and uses userspace VMM
 tools; kernel self-tests need only an empty ramfs archive. Sealing takes the

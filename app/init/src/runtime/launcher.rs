@@ -71,13 +71,26 @@ impl ServiceLauncher {
         }
 
         builder.seal().map_err(LaunchError::service_image)?;
-        builder.start().map_err(|failure| match failure {
-            // Rejection still owns the unpublished builder; dropping it rolls
-            // back the prepared image and capabilities before continuing.
-            StartFailure::Rejected { error, .. } => LaunchError::service_resources(error),
-            // A malformed result after publication cannot be treated as a
-            // service that never started: supervisor ownership is unknown.
-            StartFailure::Committed(_) => LaunchError::OperatingSystem,
+        builder.start().map_err(|failure| {
+            let (error, committed) = match failure {
+                StartFailure::Rejected { error, .. } => (error, false),
+                StartFailure::Committed(error) => (error, true),
+            };
+            let message = format!(
+                "HypeR init: service '{}' {} failed: {error:?}\n",
+                service.name(),
+                if committed { "loader" } else { "start" }
+            );
+            let _ = self
+                .authorities
+                .console
+                .as_emergency_console()
+                .write_all(message.as_bytes());
+            if committed {
+                LaunchError::service_image(error)
+            } else {
+                LaunchError::service_resources(error)
+            }
         })
     }
 }

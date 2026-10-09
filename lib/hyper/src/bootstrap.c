@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2026 roolrz
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <hyper/launch.h>
 #include <hyper/startup.h>
 #include <hyper/stack.h>
 #include <hyper/syscall.h>
@@ -12,6 +13,8 @@
 static hyper_native_handle_t bootstrap_vmar;
 static uintptr_t bootstrap_base;
 static size_t bootstrap_size;
+static uintptr_t loader_base, loader_size;
+static hyper_native_handle_t loader_root, startup_channel;
 static void (*continuation)(const uintptr_t *);
 
 extern _Noreturn void __hyper_runtime_switch_stack(uintptr_t sp, void (*entry)(const uintptr_t *));
@@ -26,6 +29,19 @@ static _Noreturn void finish(const uintptr_t *stack)
 	if (status != HYPER_NATIVE_STATUS_OK)
 		hyper_process_exit(status);
 	bootstrap_vmar = 0;
+	if (loader_size) {
+		status = hyper_vmar_unmap(loader_root, loader_base, loader_size);
+		if (status)
+			hyper_process_exit(status);
+	}
+	if (startup_channel) {
+		hyper_launch_result_t result = {.status = 0};
+		status = hyper_byte_channel_write(startup_channel, &result, sizeof(result));
+		(void)hyper_handle_close(startup_channel);
+		startup_channel = 0;
+		if (status)
+			hyper_process_exit(status);
+	}
 	continuation(stack);
 	hyper_process_exit(HYPER_NATIVE_STATUS_INTERNAL);
 }
@@ -43,18 +59,24 @@ _Noreturn void hyper_runtime_start(const uintptr_t *stack, void (*entry)(const u
 	for (size_t i = 0; i < original.auxiliary_count; ++i) {
 		hyper_auxiliary_entry_t item = original.auxiliary[i];
 		unsigned bit = 0;
-		if (item.key == HYPER_NATIVE_AUXV_INITIAL_STACK_BASE) {
+		if (item.key == HYPER_AUXV_INITIAL_STACK_BASE) {
 			base = item.value;
 			bit = 1;
 		}
-		if (item.key == HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY) {
+		if (item.key == HYPER_AUXV_INITIAL_STACK_CAPACITY) {
 			capacity = item.value;
 			bit = 2;
 		}
-		if (item.key == HYPER_NATIVE_AUXV_INITIAL_STACK_SIZE) {
+		if (item.key == HYPER_AUXV_INITIAL_STACK_SIZE) {
 			bootstrap_size = item.value;
 			bit = 4;
 		}
+		if (item.key == HYPER_AUXV_LOADER_BASE)
+			loader_base = item.value;
+		if (item.key == HYPER_AUXV_LOADER_SIZE)
+			loader_size = item.value;
+		if (item.key == HYPER_AUXV_STARTUP_CHANNEL)
+			startup_channel = item.value;
 		if (seen & bit)
 			hyper_process_exit(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
 		seen |= bit;
@@ -66,6 +88,10 @@ _Noreturn void hyper_runtime_start(const uintptr_t *stack, void (*entry)(const u
 	hyper_native_status_t status = hyper_startup_find_handle(
 		&original, HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_INITIAL_STACK_VMAR, &bootstrap_vmar);
 	if (status != HYPER_NATIVE_STATUS_OK)
+		hyper_process_exit(status);
+	status = hyper_startup_find_handle(&original, HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR,
+					   &loader_root);
+	if (status)
 		hyper_process_exit(status);
 	status = hyper_runtime_initialize(stack);
 	if (status != HYPER_NATIVE_STATUS_OK)

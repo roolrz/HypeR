@@ -3,5 +3,4 @@
 
 //! Validated executable formats consumed by kernel image loaders.
 
-pub mod elf;
-pub mod startup;
+pub mod bootstrap;

@@ -3,6 +3,8 @@
  */
 
 #include <hyper/heap.h>
+#include <hyper/relocate.h>
+extern const Elf64_Ehdr __ehdr_start __attribute__((visibility("hidden")));
 #include <hyper/startup.h>
 #include <hyper/syscall.h>
 #include <hyper/thread.h>
@@ -17,6 +19,8 @@ static __attribute__((noreturn)) void run(const uintptr_t *initial_stack)
 
 __attribute__((noreturn)) void __hyper_crt_start(const uintptr_t *initial_stack)
 {
+	if (!hyper_elf_auxiliary(initial_stack, 7) && !hyper_elf_self_relocate(&__ehdr_start))
+		hyper_process_exit(HYPER_NATIVE_STATUS_NOT_SUPPORTED);
 	/* The dynamic loader already made the one-way handoff before constructors. */
 	if (hyper_runtime_startup())
 		run(initial_stack);

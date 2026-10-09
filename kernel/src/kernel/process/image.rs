@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Immutable execution identity selected by a trusted image loader.
+//! Immutable execution identity and kernel-prepared bootstrap mappings.
 
 use core::num::NonZeroU64;
 
@@ -110,6 +110,9 @@ impl UserThreadStart {
 
 /// Fixed execution identity for one installed image generation.
 ///
+/// Native entry and stack values describe the userspace loader's initial
+/// environment. Final application ELF metadata and auxv stay in userspace.
+///
 /// Mutable registers and mappings belong to `UserThread` and `NativeAddressSpace`,
 /// respectively. Keeping route selection immutable prevents syscall semantics
 /// from changing beneath a running thread.
@@ -120,40 +123,16 @@ pub(crate) struct ProcessImage {
     entry: UserAddress,
     stack: UserAddress,
     tls: UserAddress,
-    auxiliary: hyper::exec::startup::AuxiliaryValues,
+    bootstrap: super::loader::BootstrapLayout,
     initial_stack_vmar: Option<crate::kernel::mm::user_space::Vmar>,
 }
 
 impl ProcessImage {
-    #[cfg(feature = "kernel-self-test")]
-    #[cfg_attr(
-        feature = "kernel-self-test",
-        allow(
-            dead_code,
-            reason = "Native lifecycle self-tests require a HAL with user execution support"
-        )
-    )]
     pub(crate) fn try_native(
         machine: MachineAbi,
         entry: UserAddress,
         stack: UserAddress,
         tls: UserAddress,
-    ) -> Result<Self, ImageError> {
-        Self::try_native_with_auxiliary(
-            machine,
-            entry,
-            stack,
-            tls,
-            hyper::exec::startup::AuxiliaryValues::minimal(entry.get()),
-        )
-    }
-
-    pub(crate) fn try_native_with_auxiliary(
-        machine: MachineAbi,
-        entry: UserAddress,
-        stack: UserAddress,
-        tls: UserAddress,
-        auxiliary: hyper::exec::startup::AuxiliaryValues,
     ) -> Result<Self, ImageError> {
         Self::try_new(
             machine,
@@ -163,7 +142,6 @@ impl ProcessImage {
             entry,
             stack,
             tls,
-            auxiliary,
         )
     }
 
@@ -176,7 +154,6 @@ impl ProcessImage {
         entry: UserAddress,
         stack: UserAddress,
         tls: UserAddress,
-        auxiliary: hyper::exec::startup::AuxiliaryValues,
     ) -> Result<Self, ImageError> {
         if entry.get() == 0 {
             return Err(ImageError::InvalidEntry);
@@ -204,18 +181,20 @@ impl ProcessImage {
             entry,
             stack,
             tls,
-            auxiliary,
+            bootstrap: super::loader::BootstrapLayout::default(),
             initial_stack_vmar: None,
         })
     }
 
     /// The address space owns the reservation; this token identifies the
-    /// loader-created VMAR to wrap in a startup capability before first entry.
-    pub(crate) fn with_initial_stack_vmar(
+    /// kernel-created temporary VMAR to wrap in a startup capability before first entry.
+    pub(crate) fn with_bootstrap(
         mut self,
         vmar: crate::kernel::mm::user_space::Vmar,
+        layout: super::loader::BootstrapLayout,
     ) -> Self {
         self.initial_stack_vmar = Some(vmar);
+        self.bootstrap = layout;
         self
     }
 
@@ -235,8 +214,8 @@ impl ProcessImage {
         self.route
     }
 
-    pub(crate) const fn auxiliary(&self) -> hyper::exec::startup::AuxiliaryValues {
-        self.auxiliary
+    pub(crate) const fn bootstrap(&self) -> super::loader::BootstrapLayout {
+        self.bootstrap
     }
 
     pub(crate) const fn initial_thread(&self) -> UserThreadStart {

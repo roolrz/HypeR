@@ -157,12 +157,7 @@ hyper_call_result_t hyper_process_builder_create(hyper_native_handle_t factory,
 						 hyper_native_handle_t executable);
 hyper_native_status_t hyper_process_builder_set_name(hyper_native_handle_t builder,
 						     const void *name, size_t name_size);
-hyper_native_status_t hyper_process_builder_add_argument(hyper_native_handle_t builder,
-							 const void *argument,
-							 size_t argument_size);
-hyper_native_status_t hyper_process_builder_add_environment(hyper_native_handle_t builder,
-							    const void *environment,
-							    size_t environment_size);
+hyper_native_status_t hyper_process_builder_set_data(hyper_native_handle_t builder, const void *data, size_t size);
 hyper_native_status_t hyper_process_builder_set_affinity(hyper_native_handle_t builder,
 							 const uint64_t *words, size_t word_count);
 hyper_native_status_t hyper_process_builder_add_handle(hyper_native_handle_t builder,

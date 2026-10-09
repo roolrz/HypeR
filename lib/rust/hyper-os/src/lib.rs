@@ -12,6 +12,7 @@
 #[cfg(all(feature = "std", target_os = "hyper"))]
 extern crate std;
 
+extern crate alloc;
 mod abi;
 pub mod block;
 pub mod capability_channel;
@@ -23,6 +24,7 @@ pub mod fs;
 pub mod guest_io;
 pub mod handle;
 pub mod inspect;
+mod launch_data;
 pub mod memory;
 mod relay;
 pub mod startup;

@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <hyper/launch.h>
 #include <hyper/startup.h>
 #include <stdbool.h>
 
@@ -53,13 +54,13 @@ static hyper_native_status_t parse_auxiliary(const hyper_auxiliary_entry_t *auxi
 			startup->handle_count = (size_t)handle_count;
 			return HYPER_NATIVE_STATUS_OK;
 		}
-		if (entry.key == HYPER_NATIVE_AUXV_STARTUP_HANDLES) {
+		if (entry.key == HYPER_AUXV_STARTUP_HANDLES) {
 			if (saw_handles) {
 				return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 			}
 			handles = entry.value;
 			saw_handles = true;
-		} else if (entry.key == HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT) {
+		} else if (entry.key == HYPER_AUXV_STARTUP_HANDLE_COUNT) {
 			if (saw_handle_count) {
 				return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 			}
@@ -86,7 +87,7 @@ hyper_native_status_t hyper_startup_parse(const uintptr_t *initial_stack, hyper_
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 	}
 	for (size_t index = 0; index < argument_count; ++index) {
-		if (!bounded_string(arguments[index], HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES)) {
+		if (!bounded_string(arguments[index], HYPER_LAUNCH_MAX_STRING_BYTES)) {
 			return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 		}
 	}
@@ -101,7 +102,7 @@ hyper_native_status_t hyper_startup_parse(const uintptr_t *initial_stack, hyper_
 	}
 	for (size_t index = 0; index < environment_count; ++index) {
 		if (!bounded_string(environment[index],
-				    HYPER_NATIVE_PROCESS_ENVIRONMENT_MAX_BYTES)) {
+				    HYPER_LAUNCH_MAX_STRING_BYTES)) {
 			return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 		}
 	}

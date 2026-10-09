@@ -22,7 +22,8 @@ separate from HypeR Lib.
   channels, VMO/VMAR operations, staged Process construction, and core
   lifecycle wrappers;
 - a shared process heap with `malloc`, `calloc`, `realloc`, `free`, and `aligned_alloc`;
-- freestanding `memcpy`, `memmove`, `memset`, `memcmp`, and `strlen`;
+- freestanding memory and string primitives, including `memcpy`, `memset`,
+  `memcmp`, `memchr`, `strlen`, `strcmp`, `strncmp`, and `strchr`;
 - Clang-only cross compilation into `libhyper.a` and `libhyper.so`; and
 - a public-interface-only Native application fixture for product integration.
 
@@ -32,7 +33,7 @@ functional.
 
 ## Process heap
 
-The loader enters the shared runtime startup handoff after relocation and before
+The dynamic loader enters the shared runtime startup handoff after relocation and before
 any application or DSO constructors. Static CRT performs this handoff itself;
 dynamic CRT uses the already initialized runtime before calling `hyper_main`.
 Initialization uses the process's bootstrap ROOT_VMAR capability. The heap's
@@ -97,13 +98,23 @@ startup handle cannot break later thread creation. Address-space exhaustion is
 reported and destroyed reservations are reusable. `hyper_stack_create()` and
 `hyper_runtime_thread_spawn_with_stack()` accept an explicit capacity.
 
-The kernel loader supplies only a temporary bootstrap stack through
-INITIAL_STACK_VMAR and geometry auxiliary entries. Runtime initialization
+The main stack initially maps 256 KiB unless the application's `PT_GNU_STACK`
+requests a different size. Requests are rounded up to pages and enlarged when
+needed for the entry vector and handoff frames. This differs from the 64 KiB
+default for ordinary SDK workers.
+
+The kernel supplies a temporary stack and its VMAR through the bootstrap
+channel. `userspace-loader` maps the application and interpreter, then encodes
+INITIAL_STACK_VMAR and stack geometry in the SDK-private startup vector.
+Runtime initialization
 creates the final main stack through the same allocator as worker stacks,
 copies startup strings and records, and performs a non-returning assembly SP
 switch. It releases the bootstrap mapping and VMAR from the new stack before
-constructors and app entry. The consumed handle is omitted from the app startup
-view. The dynamic loader uses the same shared-runtime handoff as static CRT;
+constructors and app entry. It also releases the userspace-loader mapping and
+acknowledges readiness to the parent. Readiness precedes constructors and `main`;
+it is not an application-health acknowledgement. Init has no waiting parent.
+The consumed handle is omitted from the app startup view. The dynamic loader
+uses the same shared-runtime handoff as static CRT;
 it never restores the abandoned bootstrap SP. Normal
 main return terminates the process, whose address space reclaims its reservation.
 Worker reclamation waits for Native TERMINATED, including detached

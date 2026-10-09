@@ -5,13 +5,11 @@
 //!
 //! A builder owns the authority and allocation work needed to construct one
 //! child. It deliberately does not expose the partially constructed Process.
-//! The eventual syscall layer may therefore publish one supervisor Process
-//! handle at the same commit that makes the initial Thread runnable.
+//! The syscall layer can therefore publish supervisor Process and startup-channel
+//! handles at the same commit that makes the initial Thread runnable.
 
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
-
-use hyper::exec::startup::Layout as StartupStackLayout;
 
 use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceDomainObject, ResourceError,
@@ -31,8 +29,7 @@ use crate::kernel::vfs::{ExecutableSnapshot, FileObject, VfsError};
 use hyper::sync::InterruptSpinLock;
 
 use super::builder_input::{
-    ABI_AFFINITY_WORDS, MAX_ARGUMENTS, MAX_ENVIRONMENT, MAX_STARTUP_HANDLES,
-    MAX_TOTAL_STRING_BYTES, valid_argument, valid_environment, valid_name,
+    ABI_AFFINITY_WORDS, MAX_STARTUP_DATA_BYTES, MAX_STARTUP_HANDLES, valid_name,
 };
 use super::builder_policy::BuilderStorable;
 use super::{
@@ -52,8 +49,6 @@ pub(crate) enum ProcessBuilderError<E> {
     ExecutableFile(VfsError),
     Busy,
     DuplicateStartupPurpose,
-    EmptyArguments,
-    InvalidEnvironment,
     Image(LoaderError),
     InvalidAffinity,
     InvalidStartupPurpose,
@@ -63,9 +58,8 @@ pub(crate) enum ProcessBuilderError<E> {
     Object(ObjectCreationError),
     Process(super::ProcessError),
     Resource(ResourceError),
-    Stack(hyper::exec::startup::Error),
     StartupHandleLimit,
-    StringLimit,
+    DataLimit,
     Transaction(E),
     UnsupportedStartupKind,
 }
@@ -112,95 +106,6 @@ impl StartupCapability {
     }
 }
 
-struct LaunchStrings {
-    arguments: Vec<String>,
-    environment: Vec<String>,
-    total_bytes: usize,
-}
-
-impl LaunchStrings {
-    fn try_new() -> Result<Self, ProcessBuilderError<()>> {
-        let mut arguments = Vec::new();
-        arguments
-            .try_reserve_exact(MAX_ARGUMENTS)
-            .map_err(|_| ProcessBuilderError::Allocation)?;
-        let mut environment = Vec::new();
-        environment
-            .try_reserve_exact(MAX_ENVIRONMENT)
-            .map_err(|_| ProcessBuilderError::Allocation)?;
-        Ok(Self {
-            arguments,
-            environment,
-            total_bytes: 0,
-        })
-    }
-
-    fn add_argument(&mut self, value: &str) -> Result<(), ProcessBuilderError<()>> {
-        if self.arguments.len() == MAX_ARGUMENTS {
-            return Err(ProcessBuilderError::StringLimit);
-        }
-        if !valid_argument(value) {
-            return Err(ProcessBuilderError::InvalidString);
-        }
-        let (owned, new_total) = copy_string(value, self.total_bytes)?;
-        self.arguments
-            .try_reserve(1)
-            .map_err(|_| ProcessBuilderError::Allocation)?;
-        self.arguments.push(owned);
-        self.total_bytes = new_total;
-        Ok(())
-    }
-
-    fn add_environment(&mut self, value: &str) -> Result<(), ProcessBuilderError<()>> {
-        if self.environment.len() == MAX_ENVIRONMENT {
-            return Err(ProcessBuilderError::StringLimit);
-        }
-        if !valid_environment(value) {
-            return Err(ProcessBuilderError::InvalidEnvironment);
-        }
-        let (owned, new_total) = copy_string(value, self.total_bytes)?;
-        self.environment
-            .try_reserve(1)
-            .map_err(|_| ProcessBuilderError::Allocation)?;
-        self.environment.push(owned);
-        self.total_bytes = new_total;
-        Ok(())
-    }
-
-    fn argument_refs(&self) -> Result<Vec<&str>, ProcessBuilderError<()>> {
-        string_refs(&self.arguments)
-    }
-
-    fn environment_refs(&self) -> Result<Vec<&str>, ProcessBuilderError<()>> {
-        string_refs(&self.environment)
-    }
-}
-
-fn copy_string(
-    value: &str,
-    current_total: usize,
-) -> Result<(String, usize), ProcessBuilderError<()>> {
-    let new_total = current_total
-        .checked_add(value.len().saturating_add(1))
-        .filter(|total| *total <= MAX_TOTAL_STRING_BYTES)
-        .ok_or(ProcessBuilderError::StringLimit)?;
-    let mut owned = String::new();
-    owned
-        .try_reserve_exact(value.len())
-        .map_err(|_| ProcessBuilderError::Allocation)?;
-    owned.push_str(value);
-    Ok((owned, new_total))
-}
-
-fn string_refs(strings: &[String]) -> Result<Vec<&str>, ProcessBuilderError<()>> {
-    let mut references = Vec::new();
-    references
-        .try_reserve_exact(strings.len())
-        .map_err(|_| ProcessBuilderError::Allocation)?;
-    references.extend(strings.iter().map(String::as_str));
-    Ok(references)
-}
-
 struct BuilderPlan {
     // These canonical owners are captured only after the syscall layer has
     // resolved the corresponding typed handles and rights. The builder does
@@ -209,7 +114,7 @@ struct BuilderPlan {
     group: TaskGroup,
     domain: ResourceDomain,
     executable: ExecutableSnapshot,
-    strings: LaunchStrings,
+    data: Vec<u8>,
     thread_name: Option<String>,
     affinity: CpuMask,
     startup: Vec<StoredStartupCapability>,
@@ -266,7 +171,6 @@ impl Drop for StoredStartupCapability {
 pub(super) struct SealedProcessBuild {
     child: Option<PreparedProcess>,
     plan: BuilderPlan,
-    stack_layout: StartupStackLayout,
 }
 
 impl SealedProcessBuild {
@@ -277,24 +181,11 @@ impl SealedProcessBuild {
         }
     }
 
-    pub(super) fn arguments(&self) -> Result<Vec<&str>, ProcessBuilderError<()>> {
-        self.plan.strings.argument_refs()
+    pub(super) fn data(&self) -> &[u8] {
+        &self.plan.data
     }
-
-    pub(super) fn environment(&self) -> Result<Vec<&str>, ProcessBuilderError<()>> {
-        self.plan.strings.environment_refs()
-    }
-
-    pub(super) fn argument_count(&self) -> usize {
-        self.plan.strings.arguments.len()
-    }
-
-    pub(super) fn environment_count(&self) -> usize {
-        self.plan.strings.environment.len()
-    }
-
-    pub(super) const fn stack_layout(&self) -> StartupStackLayout {
-        self.stack_layout
+    pub(super) fn executable(&self) -> &ExecutableSnapshot {
+        &self.plan.executable
     }
 
     pub(super) fn thread_name(&self) -> &str {
@@ -313,22 +204,12 @@ impl SealedProcessBuild {
     }
 
     /// Returns every linear owner to the process subsystem for commit.
-    pub(super) fn into_parts(
-        mut self,
-    ) -> (
-        PreparedProcess,
-        StartupStackLayout,
-        Vec<StoredStartupCapability>,
-    ) {
+    pub(super) fn into_parts(mut self) -> (PreparedProcess, Vec<StoredStartupCapability>) {
         let child = match self.child.take() {
             Some(child) => child,
             None => builder_invariant_violation(),
         };
-        (
-            child,
-            self.stack_layout,
-            core::mem::take(&mut self.plan.startup),
-        )
+        (child, core::mem::take(&mut self.plan.startup))
     }
 
     fn abort(mut self) {
@@ -361,15 +242,15 @@ enum BuilderState {
 /// Backend contract for the single child-publication commit.
 ///
 /// `prepare_start` must perform every fallible operation: destination
-/// reservations, initial-stack encoding and copy, dormant Thread construction,
+/// reservations, bootstrap-message preparation, dormant Thread construction,
 /// scheduler admission, builder-handle consumption preparation, and
-/// supervisor-handle reservation. On failure it returns the complete
+/// supervisor/result-channel handle reservation. On failure it returns the complete
 /// `SealedProcessBuild`, including every builder-owned startup authority, while
 /// the child remains invisible.
 ///
 /// `commit_start` is the sole publication point and must be infallible. It
-/// publishes the child Process, installs startup handles, emits only the
-/// supervisor Process authority to the parent, and makes the initial Thread
+/// publishes the child Process, installs startup handles, returns the
+/// supervisor Process and startup result channel to the parent, and makes the initial Thread
 /// runnable in that order under the transaction's serialization contract. It
 /// runs only after abort-vs-start arbitration and never under the builder state
 /// lock. Destruction and zero-handle callbacks remain deferred to
@@ -422,7 +303,9 @@ impl ProcessBuilder {
             .executable_snapshot(domain.domain())
             .map_err(ProcessBuilderError::ExecutableFile)?;
         let object_charge = reserve_builder_charge(domain.domain())?;
-        let strings = LaunchStrings::try_new()?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(MAX_STARTUP_DATA_BYTES)
+            .map_err(|_| ProcessBuilderError::Allocation)?;
         let mut startup = Vec::new();
         startup
             .try_reserve_exact(MAX_USER_STARTUP_HANDLES)
@@ -432,7 +315,7 @@ impl ProcessBuilder {
                 group: group.group().clone(),
                 domain: domain.domain().clone(),
                 executable,
-                strings,
+                data,
                 thread_name: None,
                 affinity: CpuMask::ALL,
                 startup,
@@ -490,16 +373,16 @@ impl ProcessBuilder {
         self.finish_open_operation(plan, result)
     }
 
-    pub(crate) fn add_argument(&self, value: &str) -> Result<(), ProcessBuilderError<()>> {
+    /// Replaces a bounded opaque userspace payload. The kernel does not
+    /// interpret arguments, environment entries, or the runtime's wire format.
+    pub(crate) fn set_data(&self, data: &[u8]) -> Result<(), ProcessBuilderError<()>> {
         let mut plan = self.take_open_plan()?;
-        let result = plan.strings.add_argument(value);
-        self.finish_open_operation(plan, result)
-    }
-
-    pub(crate) fn add_environment(&self, value: &str) -> Result<(), ProcessBuilderError<()>> {
-        let mut plan = self.take_open_plan()?;
-        let result = plan.strings.add_environment(value);
-        self.finish_open_operation(plan, result)
+        if data.len() > MAX_STARTUP_DATA_BYTES {
+            return self.finish_open_operation(plan, Err(ProcessBuilderError::DataLimit));
+        }
+        plan.data.clear();
+        plan.data.extend_from_slice(data);
+        self.finish_open_operation(plan, Ok(()))
     }
 
     pub(crate) fn set_affinity(&self, affinity: CpuMask) -> Result<(), ProcessBuilderError<()>> {
@@ -511,20 +394,19 @@ impl ProcessBuilder {
         self.finish_open_operation(plan, Ok(()))
     }
 
-    /// Completes all image-loading work while the child remains unpublished.
+    /// Prepares the bootstrap address space while the child remains unpublished.
     ///
     /// Every error leaves the builder Open and reusable. Sealing claims no
     /// source handles, creates no Thread and publishes no Process identity.
     pub(crate) fn seal(&self) -> Result<(), ProcessBuilderError<()>> {
         let plan = self.take_open_plan()?;
-        let (prepared, stack_layout) = match prepare_sealed_process(&plan) {
+        let prepared = match prepare_sealed_process(&plan) {
             Ok(prepared) => prepared,
             Err(error) => return self.finish_open_operation(plan, Err(error)),
         };
         let mut sealed = Some(SealedProcessBuild {
             child: Some(prepared),
             plan,
-            stack_layout,
         });
         let aborted = self.state.with(|state| {
             require_busy_state(state);
@@ -922,47 +804,12 @@ fn copy_name(name: &str) -> Result<String, ProcessBuilderError<()>> {
     Ok(owned)
 }
 
-fn prepare_sealed_process(
-    plan: &BuilderPlan,
-) -> Result<(PreparedProcess, StartupStackLayout), ProcessBuilderError<()>> {
+fn prepare_sealed_process(plan: &BuilderPlan) -> Result<PreparedProcess, ProcessBuilderError<()>> {
     if plan.thread_name.is_none() {
         return Err(ProcessBuilderError::MissingName);
     }
-    if plan.strings.arguments.is_empty() {
-        return Err(ProcessBuilderError::EmptyArguments);
-    }
-    let reference_count = plan
-        .strings
-        .arguments
-        .len()
-        .checked_add(plan.strings.environment.len())
-        .ok_or(ProcessBuilderError::Allocation)?;
-    let reference_bytes = reference_count
-        .checked_mul(core::mem::size_of::<&str>())
-        .and_then(|bytes| u64::try_from(bytes).ok())
-        .ok_or(ProcessBuilderError::Allocation)?;
-    let _reference_charge = plan
-        .domain
-        .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, reference_bytes))
-        .map_err(ProcessBuilderError::Resource)?
-        .commit();
-    let arguments = plan.strings.argument_refs()?;
-    let environment = plan.strings.environment_refs()?;
-    let startup_handle_count = plan
-        .startup
-        .len()
-        .checked_add(2)
-        .ok_or(ProcessBuilderError::StartupHandleLimit)?;
-    let stack_layout = StartupStackLayout::try_new(
-        super::initial_stack_top().map_err(ProcessBuilderError::Image)?,
-        &arguments,
-        &environment,
-        startup_handle_count,
-    )
-    .map_err(ProcessBuilderError::Stack)?;
     let domain = plan.domain.clone();
-    let loaded = load_native(&plan.executable, domain.clone(), stack_layout)
-        .map_err(ProcessBuilderError::Image)?;
+    let loaded = load_native(domain.clone()).map_err(ProcessBuilderError::Image)?;
     let prepared = match PreparedProcess::try_new(
         loaded.image,
         plan.group.clone(),
@@ -976,7 +823,7 @@ fn prepare_sealed_process(
             return Err(ProcessBuilderError::Process(error));
         }
     };
-    Ok((prepared, stack_layout))
+    Ok(prepared)
 }
 
 fn validate_startup_capability(
@@ -1026,16 +873,11 @@ fn reserve_builder_charge(
     let bytes = object_allocation_size::<ProcessBuilder>()
         .and_then(|value| {
             value.checked_add(
-                (MAX_ARGUMENTS + MAX_ENVIRONMENT).checked_mul(core::mem::size_of::<String>())?,
-            )
-        })
-        .and_then(|value| {
-            value.checked_add(
                 MAX_USER_STARTUP_HANDLES
                     .checked_mul(core::mem::size_of::<StoredStartupCapability>())?,
             )
         })
-        .and_then(|value| value.checked_add(MAX_TOTAL_STRING_BYTES))
+        .and_then(|value| value.checked_add(MAX_STARTUP_DATA_BYTES))
         .and_then(|value| value.checked_add(super::builder_input::MAX_NAME_BYTES))
         .and_then(|value| u64::try_from(value).ok())
         .ok_or(ProcessBuilderError::Allocation)?;

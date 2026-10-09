@@ -431,11 +431,8 @@ pub(in crate::kernel) fn dispatch_deferred(
         abi::HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_NAME => {
             handlers::sys_process_builder_set_name(services, invocation.arguments())
         }
-        abi::HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT => {
-            handlers::sys_process_builder_add_argument(services, invocation.arguments())
-        }
-        abi::HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ENVIRONMENT => {
-            handlers::sys_process_builder_add_environment(services, invocation.arguments())
+        abi::HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_DATA => {
+            handlers::sys_process_builder_set_data(services, invocation.arguments())
         }
         abi::HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_AFFINITY => {
             handlers::sys_process_builder_set_affinity(services, invocation.arguments())

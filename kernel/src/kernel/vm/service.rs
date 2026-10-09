@@ -277,9 +277,7 @@ const fn classify_machine_error(error: crate::kernel::mm::user_space::MachineErr
 
     match error {
         MachineError::Allocation | MachineError::Page(_) => Error::NoMemory,
-        MachineError::Address(_) | MachineError::InvalidRange | MachineError::SizeOverflow => {
-            Error::Fault
-        }
+        MachineError::Address(_) | MachineError::SizeOverflow => Error::Fault,
         MachineError::Logical(error) => classify_address_space_error(error),
         MachineError::Resource(error) => classify_resource_error(error),
         MachineError::Residency(_) | MachineError::Transport => Error::Busy,

@@ -175,7 +175,7 @@ impl Command {
         let stdout = prepare_stdio(builder.0, 1, self.stdout.as_ref().unwrap_or(&default))?;
         let stderr = prepare_stdio(builder.0, 2, self.stderr.as_ref().unwrap_or(&default))?;
         let mut process = 0;
-        cvt(unsafe { ffi::__hyper_std_process_start(builder.0, &mut process) })?;
+        cvt(unsafe { ffi::__hyper_std_process_start(&mut builder.0, &mut process) })?;
         builder.0 = 0;
         Ok((
             Process {

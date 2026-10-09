@@ -74,11 +74,10 @@ const PURPOSES: [u32; HANDLE_COUNT] = {
 #[inline(never)]
 pub(super) fn install(
     init: &BootProcess,
-    arguments: &[&str],
     group: &TaskGroup,
     domain: &ResourceDomain,
-) -> Result<(), Error> {
-    bootstrap::install_handles(init, arguments, PURPOSES, |handles| {
+) -> Result<u64, Error> {
+    bootstrap::install_handles(init, PURPOSES, |handles| {
         prepare_handles(init, group, domain, handles)
     })
 }

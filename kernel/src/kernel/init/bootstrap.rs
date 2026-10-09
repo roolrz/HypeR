@@ -3,26 +3,19 @@
 
 //! Fallible construction of one dormant boot Process.
 
-use hyper::exec::startup::{Layout as StackLayout, StartupHandle};
 use hyper::fs::NodeKind;
 
 use crate::kernel::accounting::ResourceDomain;
 use crate::kernel::capability::{HandleValue, PreparedHandle};
-use crate::kernel::mm::user_space::{UserAddress, UserSlice};
 use crate::kernel::process::{
-    PreparedProcess, Process, ProcessError, ProcessHandleReservation, ProcessObject, TaskGroup,
-    UserThread, load_native,
+    PreparedProcess, Process, ProcessHandleReservation, ProcessObject, TaskGroup, load_native,
 };
-use crate::kernel::task::scheduler::CpuMask;
 
 use super::Error;
 
-const ENVIRONMENT: &[&str] = &[];
-
 pub(super) struct BootProcess {
     pub(super) process: Process,
-    pub(super) thread: UserThread,
-    pub(super) stack_layout: StackLayout,
+    executable: crate::kernel::vfs::ExecutableSnapshot,
 }
 
 // Image loading and authority installation are consecutive boot phases. Their
@@ -30,9 +23,7 @@ pub(super) struct BootProcess {
 #[inline(never)]
 pub(super) fn prepare(
     path: &'static str,
-    arguments: &'static [&'static str],
     thread_name: &'static str,
-    startup_handle_count: usize,
     group: &TaskGroup,
     domain: &ResourceDomain,
 ) -> Result<BootProcess, Error> {
@@ -46,14 +37,7 @@ pub(super) fn prepare(
         return Err(Error::NotExecutable);
     }
     let executable = executable.into_executable().ok_or(Error::NotExecutable)?;
-    let stack_layout = StackLayout::try_new(
-        crate::kernel::process::initial_stack_top().map_err(Error::Image)?,
-        arguments,
-        ENVIRONMENT,
-        startup_handle_count,
-    )
-    .map_err(Error::Stack)?;
-    let loaded = load_native(&executable, domain.clone(), stack_layout).map_err(Error::Image)?;
+    let loaded = load_native(domain.clone()).map_err(Error::Image)?;
     let prepared = match PreparedProcess::try_new(
         loaded.image,
         group.clone(),
@@ -80,27 +64,19 @@ pub(super) fn prepare(
         object,
         crate::kernel::process::ProcessNameSnapshot::from_validated(thread_name),
     );
-    let thread = process.create_initial_user_thread(thread_name, CpuMask::ALL)?;
     Ok(BootProcess {
         process,
-        thread,
-        stack_layout,
+        executable,
     })
 }
 
 pub(super) fn install_handles<const N: usize>(
     boot: &BootProcess,
-    arguments: &[&str],
     purposes: [u32; N],
     prepare: impl FnOnce(&mut [Option<PreparedHandle>; N]) -> Result<(), Error>,
-) -> Result<(), Error> {
+) -> Result<u64, Error> {
     let reservation = boot.process.reserve_handles::<N>()?;
     let values = reservation.values();
-    if let Err(error) = write_startup(boot, arguments, &purposes, &values) {
-        boot.process.abort_handles(reservation);
-        return Err(error);
-    }
-
     // One owner table is filled in place. Partial preparation is automatically
     // retired on failure; no handle is visible before the batch publication.
     let mut slots = [const { None }; N];
@@ -109,7 +85,16 @@ pub(super) fn install_handles<const N: usize>(
         boot.process.abort_handles(reservation);
         return Err(error);
     }
-    finish_handles(boot, reservation, &values, &mut slots)
+    let channel = match install_bootstrap(boot, &purposes, &values) {
+        Ok(channel) => channel,
+        Err(error) => {
+            drop(slots);
+            boot.process.abort_handles(reservation);
+            return Err(error);
+        }
+    };
+    finish_handles(boot, reservation, &values, &mut slots)?;
+    Ok(channel)
 }
 
 // Authority construction can enter VFS. Keep the publication array and its
@@ -135,36 +120,77 @@ fn finish_handles<const N: usize>(
     }
 }
 
-// No capability constructors or publication run while the encoded stack and
-// COW write reservation exist. Only the reserved handle values cross phases.
+// Init has no parent awaiting a result. An empty opaque payload asks the
+// installed userspace runtime to supply its own initial argument policy.
 #[inline(never)]
-fn write_startup<const N: usize>(
+fn install_bootstrap<const N: usize>(
     boot: &BootProcess,
-    arguments: &[&str],
     purposes: &[u32; N],
     values: &[HandleValue; N],
-) -> Result<(), Error> {
-    let startup_handles = core::array::from_fn::<_, N, _>(|index| StartupHandle {
-        purpose: purposes[index],
-        handle: values[index].get(),
-    });
-    let stack = boot
-        .stack_layout
-        .encode(
-            boot.process.image().auxiliary(),
-            arguments,
-            ENVIRONMENT,
-            &startup_handles,
+) -> Result<u64, Error> {
+    use hyper::abi::native::*;
+    let reservation = boot.process.reserve_handles::<3>()?;
+    let extra = reservation.values();
+    let root = purposes
+        .iter()
+        .position(|p| u64::from(*p) == HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR);
+    let stack = purposes
+        .iter()
+        .position(|p| u64::from(*p) == HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_INITIAL_STACK_VMAR);
+    let (root, stack) = match (root, stack) {
+        (Some(root), Some(stack)) => (root, stack),
+        _ => hyper::debug::invariant_failure("init startup VMARs missing"),
+    };
+    let layout = boot.process.image().bootstrap();
+    let header = HyperNativeLoaderStartup {
+        size: 88,
+        handle_count: (N - 2) as u32,
+        data_size: 0,
+        flags: 0,
+        runtime_directory: extra[2].get(),
+        executable: extra[0].get(),
+        executable_size: boot.executable.bytes().len() as u64,
+        root_vmar: values[root].get(),
+        stack_vmar: values[stack].get(),
+        stack_base: layout.stack_base,
+        stack_size: layout.stack_size,
+        loader_base: layout.loader_base,
+        loader_size: layout.loader_size,
+    };
+    let records = purposes
+        .iter()
+        .zip(values)
+        .enumerate()
+        .filter(|(i, _)| *i != root && *i != stack)
+        .map(|(_, (purpose, value))| HyperNativeStartupHandle {
+            purpose: *purpose,
+            flags: 0,
+            handle: value.get(),
+        });
+    let prepared = match crate::kernel::process::bootstrap::prepare(
+        &boot.process.resource_domain(),
+        &boot.executable,
+        header,
+        records,
+        &[],
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            boot.process.abort_handles(reservation);
+            return Err(Error::Bootstrap(error));
+        }
+    };
+    drop(prepared.parent_channel);
+    let published = boot
+        .process
+        .publish_handles(
+            reservation,
+            [
+                prepared.executable,
+                prepared.child_channel,
+                prepared.runtime_directory,
+            ],
         )
-        .map_err(Error::Stack)?;
-    let stack_length = u64::try_from(stack.bytes().len())
-        .map_err(|_| Error::Stack(hyper::exec::startup::Error::TooLarge))?;
-    let stack_range = UserSlice::new(UserAddress::new(stack.base()), stack_length)
-        .map_err(|_| Error::Stack(hyper::exec::startup::Error::AddressOverflow))?;
-    let output = boot.process.reserve_user_write(stack_range)?;
-    output
-        .copy_from(stack.bytes())
-        .map_err(|error| Error::Process(ProcessError::UserMemory(error)))?;
-    output.complete();
-    Ok(())
+        .map_err(|failure| Error::Process(failure.error))?;
+    Ok(published[1].get())
 }

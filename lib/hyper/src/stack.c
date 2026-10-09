@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2026 roolrz
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <hyper/launch.h>
 #include <hyper/stack.h>
 #include <hyper/syscall.h>
 #include <hyper/system.h>
@@ -145,7 +146,7 @@ hyper_native_status_t hyper_stack_initialize(const hyper_startup_t *startup, hyp
 	/* PT_GNU_STACK is an application request, not a bootstrap-stack size. */
 	size_t requested = 256 * 1024;
 	for (size_t i = 0; i < startup->auxiliary_count; ++i) {
-		if (startup->auxiliary[i].key == HYPER_NATIVE_AUXV_MAIN_STACK_SIZE &&
+		if (startup->auxiliary[i].key == HYPER_AUXV_MAIN_STACK_SIZE &&
 		    startup->auxiliary[i].value)
 			requested = startup->auxiliary[i].value;
 	}

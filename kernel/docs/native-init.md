@@ -28,10 +28,11 @@ Native SDK bindings for bootstrap handles, capability delegation and service
 construction; these operations are not provided by the Rust standard library.
 Using `std` does not grant additional authority.
 
-Before `main`, the Native runtime initializes the heap, attaches the initial
-thread and initializes runtime capabilities from the kernel-provided startup
-record. This does not require init's child services to be running. Standard
-I/O uses delegated stream handles when present and otherwise falls back to a
+Before `main`, the Native runtime initializes the heap, creates the final main
+stack, attaches the initial thread and adopts the capabilities delivered through
+the userspace loader's startup vector. This does not require init's child
+services to be running. Standard I/O uses delegated stream handles when present
+and otherwise falls back to a
 bootstrap Console capability, allowing init to report startup errors before
 the console services exist.
 
@@ -55,86 +56,97 @@ or trailing slashes, duplicate canonical names, and a non-directory root entry
 are rejected. A conventional `.` directory entry is accepted but is not
 indexed.
 
-The archive must contain `/init` as a regular file with at least one executable
-mode bit. Missing, non-regular, or non-executable init entries stop kernel
-startup.
+The archive must contain `/init` and `/lib64/userspace-loader-hyper-<arch>` as
+regular files with at least one executable mode bit. The default dynamically
+linked init also needs its interpreter and dependency libraries. Both `system`
+and `development` deployment profiles install the two loaders; the userspace
+loader is required even for a statically linked init.
 
 ## Executable image
 
-The kernel process loader accepts little-endian AArch64 and RISC-V ELF64 images branded
-with HypeR ELF OSABI 63, ABI version 0, and either `ET_EXEC` or `ET_DYN` type.
-Every load segment must be readable, use at most 4 KiB alignment, be
-page-congruent with its file offset, remain nonempty in memory, and be free of
-page-level overlap. Writable and executable permissions are mutually
-exclusive, and the entry point must lie in executable segment memory.
-The executable and interpreter must match the running architecture. RISC-V
-images use LP64D, permit compressed instructions, and reject other ELF flags;
-their entry point may be two-byte aligned. AArch64 entry points are four-byte aligned.
+Every Native process first enters `/lib64/userspace-loader-hyper-<arch>`, including
+`/init`. The kernel validates and retains this restricted bootstrap ELF once;
+it maps shared immutable segments and an empty guarded stack for each child.
+Its first argument register carries a ByteChannel handle. The queued launch
+message describes installed executable/VMAR capabilities, a bootstrap-only
+`/lib64` directory, mapping bounds and opaque SDK data. The kernel does not
+parse application ELF, construct argv/auxv, or perform Native application
+relocation. This does not change kernel-image relocation during boot.
 
-Static images reject an interpreter, dynamic dependencies, text relocations,
-nonempty TLS segments, an executable stack, symbol-based relocations, and
-unsupported relocation tables. Static PIE images may use
-architecture-matching `R_AARCH64_RELATIVE` or `R_RISCV_RELATIVE` RELA entries,
-and RELR entries. Relocation targets
-must be aligned, unique, and contained in writable declared segment memory;
-relocations can never modify code or a read-only segment.
-The process loader also recognizes an absolute `PT_INTERP` path. It maps the
-trusted interpreter at 256 MiB and transfers the main image's program-header,
-entry, and interpreter-base values through standard auxiliary entries. The
-userspace interpreter performs eager architecture-specific symbol relocation, seals
-`PT_GNU_RELRO`, and resolves dependencies relative to a delegated
-`/lib/<arch>-hyper-hyper` (physically `/lib64/<arch>-hyper-hyper`)
-Directory capability. A dynamic main image must expose its mapped program
-header table through one consistent `PT_PHDR` entry. Main images remain below
-the interpreter, and runtime libraries occupy a separate range beginning at
-512 MiB.
+The [userspace loader](../../lib/userspace-loader/README.md) owns ordinary
+ELF64 admission, application/interpreter mappings and the System V stack.
+It accepts branded AArch64 and RISC-V `ET_EXEC`/`ET_DYN` images, enforces
+nonoverlapping readable load segments and rejects W+X, nonempty ELF TLS and
+executable stacks. `PT_INTERP` names a direct file in `/lib64`. The interpreter
+is mapped at 256 MiB; dynamic main program headers must be exposed by a consistent
+`PT_PHDR`. Dependencies start at 512 MiB and resolve only through the delegated
+architecture library directory. Bootstrap-only file/directory handles close
+before program execution.
+
+The [dynamic loader](../../lib/dynamic-loader/README.md) self-relocates at its
+entry, then owns symbol resolution, dependency loading, RELA/RELR, RELRO and
+constructors. Static CRT performs its own relative relocation. Both share the
+SDK's final-stack handoff. Relocation can never grant writable access to code;
+the kernel independently enforces executable provenance and W^X on mappings.
 
 The [Native 64-bit application ABI](syscall-abi.md#native-64-bit-application-address-space-contract)
 uses architecture-specific application and system-managed user regions.
 Current application limits are 128 TiB on AArch64 VA48 and 128 GiB on RISC-V
-Sv39; these are provisional kernel layout policy. The current process
-layout grants ROOT_VMAR from one page up to the HAL application address limit.
+Sv39; these are provisional kernel layout policy. The kernel grants ROOT_VMAR
+from one page up to the HAL application address limit.
 An `ET_DYN` image is biased so its lowest mapped page begins at `0x40_0000`.
-Total segment mappings and input image size are each limited to 64 MiB.
+The SDK bounds application mapping spans at 64 MiB.
 The kernel supplies a temporary, non-executable 128 KiB bootstrap stack with
 its exclusive top at `0x3f_f000`, plus one unmapped guard page at each end.
-Its 16-byte-aligned entry SP carries `argc`, `argv`, `envp`, and `auxv` in
-LP64 System V order. INITIAL_STACK_VMAR and the initial-stack geometry entries
-transfer ownership of this temporary reservation to the SDK.
+The kernel entry stack is empty. The userspace loader constructs the
+16-byte-aligned `argc`, `argv`, `envp`, and `auxv` handoff itself. The startup
+message transfers ownership of the temporary reservation to the SDK.
 
 The SDK initializes the heap and creates the final main stack using the same
 allocator as secondary threads. The main image's `PT_GNU_STACK.p_memsz` requests
-the final usable size through `AUXV_MAIN_STACK_SIZE`; absent/zero selects 256 KiB. The kernel validates ELF
-headers (including rejecting duplicate or executable stack headers), but does
-not use this request to size its bootstrap stack. The runtime rounds the final
-size to pages, reserves at least 256 MiB of capacity, and keeps a guard page at
+the final usable size through `HYPER_AUXV_MAIN_STACK_SIZE`; absent/zero selects
+256 KiB. The userspace loader validates ELF stack headers. This request does not
+change the kernel bootstrap stack size. The runtime rounds the final
+size to pages, enlarges tiny requests to hold the entry vector and one page of
+handoff headroom, reserves at least 256 MiB of capacity, and keeps a guard page at
 each end. Placement prefers the top of the application range; this is SDK
 policy, not a fixed-address app ABI. Only the initial usable extent is mapped.
 
 Before any constructors or app entry execute, the runtime copies arguments,
 environment strings, auxiliary entries and handle records out of bootstrap
 storage, switches SP through an architecture-specific non-returning handoff,
-and unmaps/destroys the bootstrap reservation from the final stack. No old C
+and releases the bootstrap image and stack reservation from the final stack.
+It then acknowledges startup to the parent before executing constructors. No old C
 frame is resumed. The dynamic loader makes this handoff through the relocated
 shared runtime before constructors; static CRT uses the same implementation.
 The application startup view omits the consumed bootstrap-stack handle and
 reports final-stack geometry. Main and worker stacks share creation, explicit
 downward growth and retirement; there is no fixed SDK worker stack arena.
-The root capability permits duplication; the runtime retains a MAP-only
-process-lifetime duplicate independent of the application's startup handle.
-TLS starts at zero. Before application entry, the SDK CRT reserves an initial heap VMAR of about
-one eighth of the application address range, using `0xe0000000` as a low-end
-hint after the loader's `[0x20000000, 0xe0000000)` library range. The returned
+The root capability permits duplication; the heap and stack allocators each
+retain a MAP-only process-lifetime duplicate independent of the application's
+startup handle. The thread pointer starts at zero; runtime attachment installs
+the SDK's per-thread state before application entry. The runtime reserves an
+initial heap VMAR of about one eighth of the application address limit, using
+`0xe0000000` as a low-end hint after the loader's `[0x20000000, 0xe0000000)`
+library range. The returned
 base is authoritative. Backing is mapped only as allocations need it; overflow
 regions have independent VMARs, so this reservation is not a heap size limit.
 The kernel still owns the root address space and
 resource accounting; allocator policy lives in `lib/hyper`.
 
-Executable bytes are copied into writable unpublished staging memory,
-relocated, then snapshotted into immutable instruction-coherent storage before
-their RX mapping is published. Non-executable segments are installed with
-their final read-only or read/write permissions. The address space, Process,
-TaskGroup, and initial UserThread become visible only after loading succeeds.
+Application bytes reach the child as an immutable executable VMO. The userspace
+loader maps private segment views: complete source pages may be shared, partial
+pages are sanitized, and BSS is zero-filled. Executable pages are
+instruction-coherent before RX publication; relocations target writable private
+data and never require a writable code alias. Kernel Process publication occurs
+once the bootstrap environment is prepared, before application parsing and
+dynamic linking. A loader failure after that point terminates an already
+published child; on a failed startup result the SDK requests stop, then waits
+for termination. Successful readiness precedes constructors and
+`main`, so it does not promise that application initialization will succeed.
+
+See the [loader address layout](../../lib/userspace-loader/README.md#address-layout)
+for the current mapping windows and their policy boundaries.
 
 ## Bootstrap capabilities
 
@@ -157,14 +169,16 @@ The root VMAR and executable File-to-VMO path are delegated with narrowly
 typed rights for runtime linking; writable and executable VMO variants retain
 disjoint authority ceilings.
 
-The Kernel loads only `/init`; it neither interprets the service manifest nor
+The kernel selects `/init` as the first application's executable and starts it
+through the userspace loader; it neither interprets the service manifest nor
 preloads system services. Init reads `/etc/hyper/services.json` through its root
 `Directory`, validates the complete dependency and capability graph, and then uses the
 one-shot `ProcessBuilder` object to construct each child. A builder owns every
 staged startup capability immediately after successful insertion. Starting a
 sealed builder publishes the child, atomically replaces the consumed builder
-authority with a supervisor Process handle in the parent, and only then makes
-the initial child Thread runnable. Init retains `REQUEST_STOP` on every
+authority with a supervisor Process handle and result channel in the parent, and only then makes
+the initial child Thread runnable. The SDK waits for loader completion and
+stops/reaps failed children before reporting a committed launch error. Init retains `REQUEST_STOP` on every
 supervisor and requests termination of all already-started children if graph
 launch or later critical supervision fails.
 
@@ -246,7 +260,8 @@ rejected during preflight before any child is started.
 ## Validation boundary
 
 Host tests validate archive indexing, path rejection, ELF permissions, layout,
-entry points, and supported relocation decoding. Kernel QEMU tests run
+and bootstrap entry points. SDK host tests exercise application ELF admission,
+startup stack encoding, and supported relocation decoding. Kernel QEMU tests run
 standalone mechanism tests and then retire the bootstrap execution. The `test-native` contract separately builds the
 Native applications through the assembled SDK, constructs the production
 initramfs, and verifies that init loads the manifest, starts the session and

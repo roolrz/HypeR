@@ -71,12 +71,11 @@ pub use memory::{
 pub use startup::{AuxiliaryEntry, RawStartup, startup_find_handle};
 pub use system::{abi_query, clock_get_monotonic, clock_get_realtime, system_config};
 pub use task::{
-    process_builder_abort, process_builder_add_argument, process_builder_add_environment,
-    process_builder_add_handle, process_builder_create, process_builder_seal,
-    process_builder_set_affinity, process_builder_set_name, process_builder_start, process_exit,
-    process_get_current_id, process_get_info, process_request_stop, resource_domain_create,
-    task_group_create, thread_create, thread_exit, thread_request_stop, thread_sleep, thread_start,
-    thread_yield,
+    process_builder_abort, process_builder_add_handle, process_builder_create,
+    process_builder_seal, process_builder_set_affinity, process_builder_set_data,
+    process_builder_set_name, process_builder_start, process_exit, process_get_current_id,
+    process_get_info, process_request_stop, resource_domain_create, task_group_create,
+    thread_create, thread_exit, thread_request_stop, thread_sleep, thread_start, thread_yield,
 };
 pub use vm::{
     guest_memory_create, pending_virtual_machine_abort, pending_virtual_machine_assign_device,
