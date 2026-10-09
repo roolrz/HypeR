@@ -78,6 +78,27 @@ test-vm-smoke: image app-fetch $(NEWC_PACK)
 		"$(QEMU)" "$(KERNEL_IMAGE)" "$(APP_OUTPUT)/vm-smoke.cpio" \
 		"$(APP_OUTPUT)/vm-smoke-$(QEMU_CPUS).log"
 
+.PHONY: test-filesystem-failure
+# A media-independent real process/VMO/RPC test; no backend fault modes are
+# compiled or installed in the normal system image.
+test-filesystem-failure: image app-fetch $(NEWC_PACK)
+	$(MAKE) -o app-fetch app APP_OUTPUT="$(APP_OUTPUT)/filesystem-failure-apps" \
+		APP_FEATURES=hyper-fs-backend/failure-test APP_EXTRA_BINS=hyper-fs-failure
+	python3 -B scripts/pack-native-initramfs.py \
+		--packer "$(NEWC_PACK)" --strip "$(LLVM_STRIP)" \
+		--output "$(APP_OUTPUT)/filesystem-failure.cpio" \
+		--library-dir "$(APP_OUTPUT)/filesystem-failure-apps/lib" \
+		--library-dir "$(SDK_OUTPUT)/lib" --library-dir "$(SDK_OUTPUT)/lib64" \
+		0755 init "$(APP_OUTPUT)/filesystem-failure-apps/fs-failure" \
+		symlink lib lib64 \
+		0755 lib64/ld-hyper-$(NATIVE_ARCH).so "$(NATIVE_LOADER)" \
+		0755 lib64/userspace-loader-hyper-$(NATIVE_ARCH) "$(NATIVE_USERSPACE_LOADER)" \
+		0755 $(NATIVE_LIBRARY_DIRECTORY)/libhyper.so "$(NATIVE_RUNTIME_LIBRARY)"
+	$(NATIVE_QEMU_ENV) python3 -B tests/qemu/verify-filesystem-failure.py \
+		--qemu "$(QEMU)" --image "$(KERNEL_IMAGE)" \
+		--initramfs "$(APP_OUTPUT)/filesystem-failure.cpio" \
+		--log "$(APP_OUTPUT)/filesystem-failure.log"
+
 # Cross-VM fixture consumes the external appliance without patching its rootfs.
 test-io-vm: image app-fetch fit-pack $(NEWC_PACK)
 	@test "$(ARCH)" = aarch64 || { echo "I/O VM acceptance requires aarch64" >&2; exit 2; }

@@ -30,7 +30,7 @@ mod vmo;
 #[cfg(test)]
 pub(crate) use transaction::retry_stale;
 #[cfg(not(test))]
-pub(crate) use vmo::ExclusiveHardwareWriteLease;
+pub(crate) use vmo::{ExclusiveHardwareWriteLease, WritableMappingLease};
 
 pub(crate) use address_space::{
     AddressSpaceError, MappingChange, MappingSnapshot, MappingToken, PreparedMappingChange,

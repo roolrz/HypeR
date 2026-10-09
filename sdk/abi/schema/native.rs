@@ -1022,6 +1022,22 @@ const DIRECTORY_ENTRY_RECORD_SIZE: u16 = 24 + DIRECTORY_ENTRY_NAME_CAPACITY as u
 
 pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
+        name: "native_block_transfer_bytes",
+        value: 524288,
+    },
+    AbiConstant {
+        name: "native_block_batch_max",
+        value: 4,
+    },
+    AbiConstant {
+        name: "native_block_batch_record_bytes",
+        value: 16,
+    },
+    AbiConstant {
+        name: "native_block_transfer_frame_bytes",
+        value: 524352,
+    },
+    AbiConstant {
         name: "object_detail_empty",
         value: 0,
     },
@@ -8795,7 +8811,12 @@ pub const SYSCALLS: &[Syscall] = &[
             handle: Some(ProducedHandle {
                 object: ProducedObject::Kind("native_block"),
                 rights: ProducedRights::Fixed(
-                    RIGHT_WRITE | RIGHT_MAP | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_WAIT,
+                    RIGHT_READ
+                        | RIGHT_WRITE
+                        | RIGHT_MAP
+                        | RIGHT_TRANSFER
+                        | RIGHT_INSPECT
+                        | RIGHT_WAIT,
                 ),
             }),
         }],
@@ -8824,11 +8845,18 @@ pub const SYSCALLS: &[Syscall] = &[
             },
             scalar_argument("readonly", ValueKind::U32),
         ],
-        results: &[ResultValue {
-            name: "sectors",
-            kind: ValueKind::U64,
-            handle: None,
-        }],
+        results: &[
+            ResultValue {
+                name: "sectors",
+                kind: ValueKind::U64,
+                handle: None,
+            },
+            ResultValue {
+                name: "readonly",
+                kind: ValueKind::U32,
+                handle: None,
+            },
+        ],
         blocking: BlockingClass::MayBlock,
         cancellation: CancellationClass::Explicit,
         restart: RestartClass::Never,
@@ -8839,15 +8867,25 @@ pub const SYSCALLS: &[Syscall] = &[
     },
     Syscall {
         number: 137,
-        name: "native_block_mount",
+        name: "filesystem_mount",
         feature: FeatureGate::Core,
         arguments: &[
             Argument {
-                name: "block",
+                name: "channel",
                 kind: ValueKind::Handle,
                 handle: Some(HandleArgument {
-                    object: ObjectConstraint::Kind("native_block"),
-                    required_rights: RIGHT_MAP,
+                    object: ObjectConstraint::Kind("byte_channel"),
+                    required_rights: RIGHT_READ | RIGHT_WRITE | RIGHT_WAIT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "buffer",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("vmo"),
+                    required_rights: RIGHT_READ | RIGHT_WRITE | RIGHT_MAP,
                     disposition: HandleDisposition::Borrow,
                 }),
                 memory: None,
@@ -9352,6 +9390,49 @@ pub const SYSCALLS: &[Syscall] = &[
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
         audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 496,
+        name: "native_block_transfer",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "block",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("native_block"),
+                    required_rights: 0,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("operation", ValueKind::U32),
+            scalar_argument("first_sector", ValueKind::U64),
+            Argument {
+                name: "buffer",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::ReadWrite,
+                    length: MemoryLength::Bytes {
+                        argument: "length",
+                        maximum_bytes: 524352,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("length", ValueKind::ByteCount),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::Explicit,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
         flags: FlagPolicy::None,
         failure_results: &[],
     },

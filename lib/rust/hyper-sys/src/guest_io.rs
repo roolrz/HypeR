@@ -169,21 +169,46 @@ pub unsafe fn native_block_activate(block: u64, readonly: bool) -> CallResult {
 /// # Safety
 /// Both handles and the readable path must remain valid throughout the call.
 #[inline]
-pub unsafe fn native_block_mount(
-    block: u64,
+pub unsafe fn filesystem_mount(
+    channel: u64,
+    buffer: u64,
     directory: u64,
     path: *const u8,
     length: usize,
 ) -> CallResult {
-    // SAFETY: The caller supplies valid capabilities and a borrowed path range.
+    // SAFETY: Caller retains all capabilities and path bytes for the call.
     unsafe {
         ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_NATIVE_BLOCK_MOUNT,
-            block,
+            abi::HYPER_NATIVE_SYS_FILESYSTEM_MOUNT,
+            channel,
+            buffer,
             directory,
             path as u64,
             length as u64,
             0,
+        )
+    }
+}
+/// Transfers complete sectors, or flushes all earlier writes (operation 2).
+/// # Safety
+/// The buffer must be writable for reads (0), readable for writes (1), and
+/// absent for flush (2). Its whole extent and block capability remain valid.
+pub unsafe fn native_block_transfer(
+    block: u64,
+    operation: u32,
+    first: u64,
+    buffer: *mut u8,
+    length: usize,
+) -> CallResult {
+    // SAFETY: Caller supplies the operation-specific borrowed buffer.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_NATIVE_BLOCK_TRANSFER,
+            block,
+            u64::from(operation),
+            first,
+            buffer as u64,
+            length as u64,
             0,
         )
     }

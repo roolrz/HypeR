@@ -32,6 +32,7 @@ mod load;
 mod maintenance;
 mod memory;
 mod read;
+pub(crate) mod read_ahead;
 mod state;
 mod storage;
 
@@ -46,6 +47,7 @@ pub(crate) use load::{LoadReservation, Refill};
 #[cfg(not(test))]
 pub(crate) use maintenance::AdmissionPause;
 pub(crate) use maintenance::{CacheUsage, Maintenance, ReclaimCursor, ReclaimScan};
+pub(crate) use read::read_observed;
 pub(crate) use read::{FilePage, ReadError, read};
 
 /// Initial live-payload allowance: loaders, resident pages, and evicted pins.
@@ -180,6 +182,18 @@ pub(crate) struct FileDataCache<Page> {
 }
 
 impl<Page> FileDataCache<Page> {
+    /// Speculation is optional even when a demand read could grow the cache.
+    #[cfg(not(test))]
+    pub(crate) fn prefetch_allowed(&self) -> bool {
+        self.admission.load(Ordering::Acquire)
+            && memory::admission_allowed()
+            && self.state.with(|control| {
+                control.admission_pauses == 0
+                    && !control.maintenance_pending
+                    && control.table.is_some()
+            })
+    }
+
     #[cfg(not(test))]
     pub(crate) fn try_new_system() -> Result<Self, CacheError> {
         match Self::try_new(SYSTEM_PAGE_CAPACITY) {

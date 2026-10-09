@@ -20,6 +20,7 @@ pub mod channel;
 pub mod console;
 pub mod device;
 mod error;
+pub mod filesystem;
 pub mod fs;
 pub mod guest_io;
 pub mod handle;

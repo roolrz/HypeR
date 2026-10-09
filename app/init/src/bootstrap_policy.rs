@@ -23,6 +23,7 @@ const SESSION_IMAGE: &str = "/svc/session";
 const SHELL_IMAGE: &str = "/bin/sh";
 const VM_MANAGER_IMAGE: &str = "/svc/vm-manager";
 pub const IO_RUNTIME_IMAGE: &str = "/svc/io-runtime";
+pub const FS_BACKEND_IMAGE: &str = "/svc/fs-backend";
 pub const VM_RUNTIME_IMAGE: &str = "/svc/vm-runtime";
 
 macro_rules! define_bootstrap_authorities {
@@ -80,6 +81,8 @@ define_bootstrap_authorities! {
     IoReadyChannel = 28 => "bootstrap.io-ready-channel",
     IoBrokerServer = 29 => "bootstrap.io-broker-server",
     IoBrokerClient = 30 => "bootstrap.io-broker-client",
+    FilesystemAttach = 31 => "bootstrap.filesystem-attach",
+    FilesystemProvider = 32 => "bootstrap.filesystem-provider",
 }
 
 /// Stateless policy used to validate a manifest before touching live handles.
@@ -164,7 +167,9 @@ impl AuthorityPolicy for BootstrapPolicy {
             }
             BootstrapAuthority::VmProvisioningChannel
             | BootstrapAuthority::IoBrokerServer
-            | BootstrapAuthority::IoBrokerClient => AuthorityDeclaration {
+            | BootstrapAuthority::IoBrokerClient
+            | BootstrapAuthority::FilesystemAttach
+            | BootstrapAuthority::FilesystemProvider => AuthorityDeclaration {
                 key: authority.key(),
                 provider: None,
                 object_kind: CapabilityChannelObject::KIND.as_raw(),
@@ -214,6 +219,14 @@ impl AuthorityPolicy for BootstrapPolicy {
             IO_RUNTIME_IMAGE => find_contract(hyper_service::io::STARTUP_CONTRACTS, name)
                 .or_else(|| find_contract(stdio_contract::APPLICATION_STARTUP_CONTRACTS, name))
                 .or_else(|| find_contract(process_contract::APPLICATION_STARTUP_CONTRACTS, name)),
+            FS_BACKEND_IMAGE => {
+                find_contract(hyper_service::filesystem::MANAGER_STARTUP_CONTRACTS, name)
+                    .or_else(|| find_contract(process_contract::VM_MANAGER_STARTUP_CONTRACTS, name))
+                    .or_else(|| find_contract(stdio_contract::APPLICATION_STARTUP_CONTRACTS, name))
+                    .or_else(|| {
+                        find_contract(process_contract::APPLICATION_STARTUP_CONTRACTS, name)
+                    })
+            }
             // Ordinary apps use standard contracts without an executable allowlist.
             // The manifest must still explicitly request existing authority; this
             // lookup neither creates handles nor grants service-private roles.
@@ -423,25 +436,52 @@ pub fn io_ready_service(
 
 /// Both ends must be explicitly offered once; neither service can invent a peer.
 pub fn io_broker_enabled(plan: &crate::manifest::LaunchPlan<'_>) -> Result<bool, IoReadyPlanError> {
+    paired_authorities(
+        plan,
+        [
+            (
+                BootstrapAuthority::IoBrokerServer,
+                hyper_service::io::BROKER_SERVER.as_raw(),
+            ),
+            (
+                BootstrapAuthority::IoBrokerClient,
+                hyper_service::io::BROKER_CLIENT.as_raw(),
+            ),
+        ],
+    )
+}
+
+/// Storage control and its selected filesystem worker are separate processes;
+/// both bootstrap rendezvous ends must be explicitly granted to distinct services.
+pub fn filesystem_enabled(
+    plan: &crate::manifest::LaunchPlan<'_>,
+) -> Result<bool, IoReadyPlanError> {
+    paired_authorities(
+        plan,
+        [
+            (
+                BootstrapAuthority::FilesystemAttach,
+                hyper_service::filesystem::ATTACH.as_raw(),
+            ),
+            (
+                BootstrapAuthority::FilesystemProvider,
+                hyper_service::filesystem::PROVIDER.as_raw(),
+            ),
+        ],
+    )
+}
+
+fn paired_authorities(
+    plan: &crate::manifest::LaunchPlan<'_>,
+    endpoints: [(BootstrapAuthority, u32); 2],
+) -> Result<bool, IoReadyPlanError> {
     let mut ends = [None, None];
     for service in 0..plan.service_count() {
         for index in 0..crate::manifest::MAX_CAPABILITIES_PER_SERVICE {
             let Some(grant) = plan.capability_grant(service, index) else {
                 continue;
             };
-            for (end, (source, purpose)) in [
-                (
-                    BootstrapAuthority::IoBrokerServer,
-                    hyper_service::io::BROKER_SERVER.as_raw(),
-                ),
-                (
-                    BootstrapAuthority::IoBrokerClient,
-                    hyper_service::io::BROKER_CLIENT.as_raw(),
-                ),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            for (end, (source, purpose)) in endpoints.into_iter().enumerate() {
                 if grant.authority() != source.key() && grant.purpose() != purpose {
                     continue;
                 }

@@ -45,9 +45,9 @@ pub use fs::{
     file_set_metadata, file_sync, file_unlock, file_write_at,
 };
 pub use guest_io::{
-    guest_mailbox_create, guest_mailbox_receive, guest_mailbox_send, guest_mapping_create,
-    guest_mapping_release, guest_notification_control, guest_notification_create,
-    native_block_activate, native_block_create, native_block_mount,
+    filesystem_mount, guest_mailbox_create, guest_mailbox_receive, guest_mailbox_send,
+    guest_mapping_create, guest_mapping_release, guest_notification_control,
+    guest_notification_create, native_block_activate, native_block_create, native_block_transfer,
 };
 pub use handle::{
     handle_close, handle_duplicate, handle_get_info, handle_replace, object_get_basic_info,

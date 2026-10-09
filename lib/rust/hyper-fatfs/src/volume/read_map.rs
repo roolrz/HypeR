@@ -106,7 +106,7 @@ impl Map {
 
     pub(super) fn prepare<D: BlockDevice>(
         &mut self,
-        fs: &fatfs::FileSystem<Disk<D>, crate::fs::fat_time::Clock>,
+        fs: &fatfs::FileSystem<Disk<D>, crate::fat_time::Clock>,
         path: &str,
         sectors: u64,
     ) -> Result<(), Error> {

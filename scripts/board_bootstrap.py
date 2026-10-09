@@ -38,6 +38,7 @@ def linux_overlay(board, original):
 def services(board, root):
     manifest = json.loads((root / 'app/init/config/services-with-vms.json').read_bytes())
     manifest['virtual-machines']['config'] = '/data/vms.json'
+    manifest['services'].append(filesystem_service())
     for service in manifest['services']:
         if service['name'] == 'vm-manager':
             service['capabilities'].append({
@@ -45,9 +46,10 @@ def services(board, root):
                 'operation': 'move', 'rights': ['wait', 'write']})
         if service['name'] != 'io-runtime':
             continue
-        for capability in service['capabilities']:
-            if capability['purpose'] == 'process.root-directory':
-                capability['rights'] = ['read', 'write', 'execute', 'inspect', 'duplicate']
+        service['after'].append('fs-backend')
+        service['capabilities'].append({
+            'source': 'bootstrap.filesystem-provider', 'purpose': 'filesystem.provider',
+            'operation': 'move', 'rights': ['wait', 'write']})
         service['capabilities'].append({
             'source': 'bootstrap.io-ready-channel', 'purpose': 'io.ready',
             'operation': 'move', 'rights': ['wait', 'write']})
@@ -55,6 +57,33 @@ def services(board, root):
             'source': 'bootstrap.io-broker-server', 'purpose': 'io.broker-server',
             'operation': 'move', 'rights': ['wait', 'read']})
     return manifest
+
+
+def filesystem_service():
+    """A format-independent manager delegates each volume to an isolated worker."""
+    def capability(source, purpose, rights, operation='duplicate'):
+        return {'source': 'bootstrap.' + source, 'purpose': purpose,
+                'operation': operation, 'rights': rights}
+
+    return {
+        'name': 'fs-backend', 'image': '/svc/fs-backend',
+        'critical': False, 'restart': 'never', 'after': ['console-output'],
+        'capabilities': [
+            capability('filesystem-attach', 'filesystem.attach', ['wait', 'read'], 'move'),
+            capability('service-output-channel', 'stdio.output',
+                       ['wait', 'write', 'duplicate', 'transfer']),
+            capability('service-output-channel', 'stdio.error',
+                       ['wait', 'write', 'duplicate', 'transfer']),
+            capability('root-directory', 'process.root-directory',
+                       ['read', 'write', 'execute', 'inspect', 'duplicate', 'transfer']),
+            capability('task-factory', 'process.task-factory',
+                       ['create-process', 'create-task-group']),
+            capability('resource-domain', 'process.resource-domain',
+                       ['create-resource-domain']),
+            capability('dynamic-library-directory', 'process.child-library-directory',
+                       ['read', 'execute', 'duplicate', 'transfer']),
+        ],
+    }
 
 
 def stage(board, root, output):

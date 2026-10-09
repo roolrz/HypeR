@@ -10,8 +10,9 @@
 //! owner must hold a sleepable mutex across each method, never a spin lock.
 
 use super::block::{BlockDevice, Error as BlockError, SECTOR_SIZE};
-use crate::mm::FallibleArc;
-use crate::sync::SpinLock;
+use core::cell::RefCell;
+use core::ptr::NonNull;
+
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use fatfs::{Read, Seek, SeekFrom, Write};
@@ -65,7 +66,7 @@ impl fatfs::IoError for BlockError {
 }
 
 struct DeviceSlot<D> {
-    device: SpinLock<Option<D>>,
+    device: RefCell<Option<D>>,
     enabled: AtomicBool,
     remaining: AtomicU64,
     failed: AtomicU8,
@@ -79,9 +80,14 @@ impl<D: BlockDevice> DeviceSlot<D> {
     ) -> Result<R, BlockError> {
         self.charge()?;
         // Only transfer ownership under the lock. The callback may block.
-        let mut device = self.device.with(Option::take).ok_or(BlockError::Io)?;
+        let mut device = self
+            .device
+            .try_borrow_mut()
+            .map_err(|_| BlockError::Io)?
+            .take()
+            .ok_or(BlockError::Io)?;
         let result = operation(&mut device);
-        self.device.with(|slot| *slot = Some(device));
+        *self.device.try_borrow_mut().map_err(|_| BlockError::Io)? = Some(device);
         if let Err(error) = result.as_ref() {
             self.fail(*error);
         }
@@ -132,8 +138,19 @@ impl<D: BlockDevice> DeviceSlot<D> {
     }
 }
 
+// The volume owns this stable allocation, and drops its FileSystem before the
+// device. Disk never escapes the volume; all operations require &mut FatVolume.
+struct DevicePointer<D>(NonNull<DeviceSlot<D>>);
+impl<D> core::ops::Deref for DevicePointer<D> {
+    type Target = DeviceSlot<D>;
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: FatVolume pins the Box until after FileSystem/ Disk destruction.
+        unsafe { self.0.as_ref() }
+    }
+}
+
 struct Disk<D> {
-    owner: FallibleArc<DeviceSlot<D>>,
+    owner: DevicePointer<D>,
     offset: u64,
     cache: Box<sector_cache::Cache>,
     writes: Box<write_buffer::Buffer>,
@@ -253,9 +270,9 @@ pub struct Entry {
     pub directory: bool,
     pub read_only: bool,
     pub size: u64,
-    pub created: Option<crate::time::Timestamp>,
-    pub accessed: Option<crate::time::Timestamp>,
-    pub modified: Option<crate::time::Timestamp>,
+    pub created: Option<crate::Timestamp>,
+    pub accessed: Option<crate::Timestamp>,
+    pub modified: Option<crate::Timestamp>,
 }
 impl Entry {
     pub const fn empty() -> Self {
@@ -277,7 +294,7 @@ impl Entry {
 
 pub struct FatVolume<D: BlockDevice> {
     fs: Option<fatfs::FileSystem<Disk<D>, super::fat_time::Clock>>,
-    device: FallibleArc<DeviceSlot<D>>,
+    device: Box<DeviceSlot<D>>,
     budget: u64,
     read_maps: read_map::Cache,
 }
@@ -292,7 +309,7 @@ impl<D: BlockDevice> FatVolume<D> {
             .ok_or(Error::InvalidInput)
     }
     pub const fn allocation_bytes() -> usize {
-        FallibleArc::<DeviceSlot<D>>::allocation_size()
+        core::mem::size_of::<DeviceSlot<D>>()
             + SECTOR_SIZE
             + read_map::Cache::allocation_bytes()
             + sector_cache::Cache::allocation_bytes()
@@ -303,7 +320,7 @@ impl<D: BlockDevice> FatVolume<D> {
     }
     pub fn mount_with_clock(
         mut device: D,
-        now: fn() -> Option<crate::time::Timestamp>,
+        now: fn() -> Option<crate::Timestamp>,
     ) -> Result<Self, Error> {
         let clock = super::fat_time::Clock(now);
         let sectors = device.sector_count();
@@ -313,14 +330,15 @@ impl<D: BlockDevice> FatVolume<D> {
         }
         // Reuse the partial-sector write buffer for boot validation, keeping
         // sector arrays out of the mount call chain while device I/O blocks.
-        let mut sector = crate::mm::try_box([0; SECTOR_SIZE]).map_err(|_| Error::Allocation)?;
+        let mut sector =
+            crate::allocation::try_box([0; SECTOR_SIZE]).map_err(|_| Error::Allocation)?;
         device
             .read_sectors(0, sector.as_mut())
             .map_err(Error::Block)?;
         validate_boot_sector(sector.as_ref(), sectors)?;
         super::fat_validate::validate(&mut device, sector.as_ref())?;
-        let owner = FallibleArc::try_new(DeviceSlot {
-            device: SpinLock::new(Some(device)),
+        let owner = crate::allocation::try_box(DeviceSlot {
+            device: RefCell::new(Some(device)),
             enabled: AtomicBool::new(true),
             remaining: AtomicU64::new(4096),
             failed: AtomicU8::new(0),
@@ -328,9 +346,13 @@ impl<D: BlockDevice> FatVolume<D> {
             readonly,
         })
         .map_err(|_| Error::Allocation)?;
+        // Complete fallible allocations before moving the self-referential
+        // owners into Self. A failed struct-field initializer would otherwise
+        // drop already evaluated fields in reverse order (device before fs).
+        let read_maps = read_map::Cache::new()?;
         let fs = fatfs::FileSystem::new(
             Disk {
-                owner: owner.clone(),
+                owner: DevicePointer(NonNull::from(owner.as_ref())),
                 offset: 0,
                 cache: sector_cache::Cache::new()?,
                 writes: write_buffer::Buffer::new()?,
@@ -347,7 +369,7 @@ impl<D: BlockDevice> FatVolume<D> {
             fs: Some(fs),
             device: owner,
             budget,
-            read_maps: read_map::Cache::new()?,
+            read_maps,
         })
     }
     pub fn is_read_only(&self) -> bool {
@@ -412,7 +434,8 @@ impl<D: BlockDevice> FatVolume<D> {
         self.entry_into(directory, index, &mut result)
             .map(|found| found.then_some(result))
     }
-    /// Fill caller-owned storage; large name buffers never cross return slots.
+    /// Fill caller-owned storage with the indexed child, excluding `.` and
+    /// `..`. Large name buffers never cross return slots.
     pub fn entry_into(
         &mut self,
         directory: &str,
@@ -451,10 +474,15 @@ impl<D: BlockDevice> FatVolume<D> {
         readonly: bool,
     ) -> Result<bool, Error> {
         let mut iterator = dir.iter();
-        let mut position = 0;
+        let mut position = 0_usize;
         while let Some(found) = iterator
             .visit_next(|entry| -> Result<bool, Error> {
-                if index.is_some_and(|wanted| position != wanted) {
+                if matches!(entry.short_file_name_as_bytes(), b"." | b"..") {
+                    return Ok(false);
+                }
+                let current = position;
+                position = position.checked_add(1).ok_or(Error::Corrupt)?;
+                if index.is_some_and(|wanted| current != wanted) {
                     return Ok(false);
                 }
                 result.name_len = 0;
@@ -513,7 +541,6 @@ impl<D: BlockDevice> FatVolume<D> {
             if found? {
                 return Ok(true);
             }
-            position += 1;
         }
         Ok(false)
     }
@@ -551,7 +578,7 @@ impl<D: BlockDevice> FatVolume<D> {
         }
         let index = self.read_maps.select(path);
         let mut map = self.read_maps.take(index)?;
-        let device = self.device.clone();
+        let device = DevicePointer(NonNull::from(self.device.as_ref()));
         let result = self.run(|fs| {
             if !map.matches(path) {
                 map.prepare(fs, path, device.sectors)?;
@@ -721,8 +748,8 @@ impl<D: BlockDevice> FatVolume<D> {
     pub fn set_times(
         &mut self,
         path: &str,
-        accessed: Option<crate::time::Timestamp>,
-        modified: Option<crate::time::Timestamp>,
+        accessed: Option<crate::Timestamp>,
+        modified: Option<crate::Timestamp>,
     ) -> Result<(), Error> {
         validate_path(path)?;
         self.writable()?;
@@ -826,6 +853,8 @@ impl<D: BlockDevice> FatVolume<D> {
 impl<D: BlockDevice> Drop for FatVolume<D> {
     fn drop(&mut self) {
         self.device.enabled.store(false, Ordering::Relaxed);
+        // Retire every raw DevicePointer before its unique Box owner.
+        drop(self.fs.take());
     }
 }
 fn validate_path(path: &str) -> Result<(), Error> {

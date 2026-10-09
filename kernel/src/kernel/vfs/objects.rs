@@ -233,13 +233,13 @@ impl DirectoryObject {
         Self::try_new(namespace, root, sponsor)
     }
 
-    pub(crate) fn mount_block(
+    pub(super) fn mount_remote(
         &self,
         path: &str,
-        device: crate::kernel::block::MountedDevice,
+        device: super::remote::Transport,
         sponsor: &ResourceDomain,
     ) -> Result<(), Error> {
-        let filesystem = super::instance::FilesystemInstance::try_from_block(device, sponsor)?;
+        let filesystem = super::instance::FilesystemInstance::try_from_remote(device, sponsor)?;
         self.mount_filesystem(path, filesystem, sponsor)
     }
 
@@ -809,6 +809,10 @@ pub(crate) struct FileObject {
     admitted_rights: Rights,
     lock_owner: super::locks::LockOwner,
     cache: FallibleArc<FileDataCache<CachePage>>,
+    read_ahead: hyper::sync::InterruptSpinLock<
+        crate::kernel::io_cache::read_ahead::SequentialReader,
+        crate::hal::irq::LocalMask,
+    >,
     _object_charge: CommittedCharge,
 }
 
@@ -876,6 +880,9 @@ impl FileObject {
             admitted_rights,
             lock_owner,
             cache,
+            read_ahead: hyper::sync::InterruptSpinLock::new(
+                crate::kernel::io_cache::read_ahead::SequentialReader::new(),
+            ),
             _object_charge: reserve_object_charge::<Self>(sponsor)?,
         })
     }
@@ -952,11 +959,31 @@ impl FileObject {
     }
 
     pub(crate) fn read(&self, offset: u64, destination: &mut [u8]) -> Result<usize, Error> {
-        self.location
-            .mount()
-            .filesystem()
-            .read_file(self.location.node(), &self.cache, offset, destination)
-            .map_err(Error::from)
+        let filesystem = self.location.mount().filesystem_owner();
+        let (bytes, observation) = filesystem
+            .read_file_observed(self.location.node(), &self.cache, offset, destination)
+            .map_err(Error::from)?;
+        if let Some(observation) = observation {
+            let range = self.read_ahead.with(|reader| {
+                reader.observe(
+                    observation.identity,
+                    observation.length,
+                    offset,
+                    bytes,
+                    observation.had_miss,
+                )
+            });
+            if let Some(range) = range {
+                super::read_ahead::submit(
+                    filesystem,
+                    self.location.node(),
+                    &self.cache,
+                    observation.identity,
+                    range,
+                );
+            }
+        }
+        Ok(bytes)
     }
 
     pub(crate) fn readable_snapshot(

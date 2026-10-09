@@ -53,3 +53,11 @@ version = "0.0.0"
 dependencies = [
  "hyper-abi",
 ]
+
+[[patch.unused]]
+name = "hyper-fatfs"
+version = "0.0.0"
+
+[[patch.unused]]
+name = "hyper-filesystem"
+version = "0.0.0"

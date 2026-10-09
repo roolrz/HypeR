@@ -1,11 +1,17 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::require_ok;
-use hyper::fs::block::{
+#![allow(clippy::panic)]
+fn require_ok<T, E: core::fmt::Debug>(result: Result<T, E>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => panic!("unexpected error: {error:?}"),
+    }
+}
+use hyper_fatfs::block::{
     BlockDevice, Error as BlockError, SECTOR_SIZE, WriteRequest, validate_range,
 };
-use hyper::fs::fat::{Error, FatVolume};
+use hyper_fatfs::{Error, FatVolume};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -514,7 +520,7 @@ fn fat_fragmented_reads_and_writes_remain_correct_beyond_mapping_cache_limit() {
 
 #[test]
 fn fat_file_timestamps_use_utc_and_survive_remount() {
-    use hyper::time::Timestamp;
+    use hyper_fatfs::Timestamp;
     let disk = Disk::fresh();
     let mut fs = require_ok(FatVolume::mount_with_clock(disk.clone(), || {
         Timestamp::new(1709251201, 120_000_000)
@@ -666,7 +672,7 @@ fn fat_rejects_cyclic_root_and_out_of_bounds_directory_cluster() {
     let disk = Disk::fresh();
     {
         let mut state = require_ok(disk.0.lock());
-        let fat = crate::require_some(state.sectors.get_mut(&32));
+        let fat = require_ok(state.sectors.get_mut(&32).ok_or("missing FAT sector"));
         fat[8..12].copy_from_slice(&2u32.to_le_bytes());
     }
     assert!(matches!(FatVolume::mount(disk), Err(Error::Corrupt)));
@@ -1107,7 +1113,7 @@ fn fat_inplace_lfn_parser_preserves_malformed_sequence_behavior() {
                 "deleted" => root[32] = 0xe5,
                 "end" => root[64] = 0,
                 "unicode" => root[33..35].copy_from_slice(&0xd800u16.to_le_bytes()),
-                _ => unreachable!(),
+                _ => panic!("unexpected test defect"),
             }
         }
         let mut fs = require_ok(FatVolume::mount(disk.clone()));
@@ -1172,4 +1178,23 @@ fn fat_restarted_lfn_chain_cannot_retain_an_older_long_suffix() {
     let mut data = [0; 3];
     assert_eq!(require_ok(fs.read_at("new-name.txt", 0, &mut data)), 3);
     assert_eq!(&data, b"new");
+}
+
+#[test]
+fn directory_children_exclude_fat_dot_entries() {
+    let mut fs = require_ok(FatVolume::mount(Disk::fresh()));
+    require_ok(fs.create("parent", true));
+    assert!(require_ok(fs.entry("parent", 0)).is_none());
+    require_ok(fs.create("parent/child.txt", false));
+    require_ok(fs.create("parent/nested", true));
+    assert_eq!(
+        require_ok(require_ok(fs.entry("parent", 0)).ok_or("first child")).name(),
+        "child.txt"
+    );
+    assert_eq!(
+        require_ok(require_ok(fs.entry("parent", 1)).ok_or("second child")).name(),
+        "nested"
+    );
+    assert!(require_ok(fs.entry("parent", 2)).is_none());
+    assert!(require_ok(fs.entry("parent/nested", 0)).is_none());
 }

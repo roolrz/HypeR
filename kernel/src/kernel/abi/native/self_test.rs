@@ -97,6 +97,11 @@ pub(crate) enum SelfTestError {
 #[cfg(feature = "kernel-self-test")]
 pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     super::handlers::run_wire_self_test().map_err(|_| SelfTestError::RecordEncoding)?;
+    if super::wire::parse_object_kind(hyper::abi::native::HYPER_NATIVE_OBJECT_NATIVE_BLOCK)
+        != Ok(crate::kernel::object::ObjectKind::NATIVE_BLOCK)
+    {
+        return Err(SelfTestError::ProcessBuilderValidation);
+    }
     use core::cell::Cell;
 
     struct RejectingServices {

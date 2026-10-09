@@ -27,6 +27,7 @@ remains with its executable.
 | `hyper-tool-args` | `handle`, `ps`, `top`, `free` | Parse complete generation-bearing IDs and sampling intervals; combine process-ID and name selectors. Shared argument types live here; command-specific clap declarations remain in each tool. |
 | `hyper-vm-policy` | `init`, `vmm`, VM manager and runtimes | VM resource limits, fleet configuration/control records, affinity policy and image validation. |
 | `hyper-vm-support` | VM and I/O runtimes | Guest-image copying, virtual-device state, backend-control protocols and I/O guest construction. Process supervision remains in the services. |
+| `hyper-fs-service` | Filesystem format workers | Common ordered filesystem request dispatch, shared-buffer lifetime, mount publication and parent-liveness handling; media semantics live in the format adapter. |
 | `hyper-rust-std` | The other Rust shared libraries | Own one copy of Rust std and its dependencies so independent DSOs can be linked into the same process. It uses the installed SDK's std port. |
 
 `make app` builds the libraries and installs their `.so` artifacts under
@@ -41,6 +42,9 @@ resides directly at `/lib64/ld-hyper-<arch>.so`.
 Applications have actual ELF `DT_NEEDED` entries;
 the existing Native interpreter resolves these names through its Directory
 capability. Libraries acquire no capabilities or service authority of their own.
+
+The small filesystem worker library is an rlib; it supplies generic per-driver
+dispatch machinery.
 
 The clap delivery crate re-exports the unmodified upstream API and shares the
 same std owner. Each policy/support implementation crate remains an rlib.

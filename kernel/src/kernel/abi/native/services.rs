@@ -308,14 +308,26 @@ pub(in crate::kernel) trait GuestIoServices: UserMemoryServices {
         &self,
         _block: HandleValue,
         _readonly: bool,
-    ) -> Result<u64, crate::kernel::block::service::ActivationError> {
+    ) -> Result<(u64, bool), crate::kernel::block::service::ActivationError> {
         Err(crate::kernel::block::service::ActivationError::Device(
             hyper::fs::block::Error::Unsupported,
         ))
     }
-    fn mount_native_block(
+    fn transfer_native_block(
         &self,
         _block: HandleValue,
+        _operation: u32,
+        _first: u64,
+        _buffer: Option<UserSlice>,
+    ) -> Result<(), crate::kernel::block::service::TransferError> {
+        Err(crate::kernel::block::service::TransferError::Status(
+            hyper::abi::native::HYPER_NATIVE_STATUS_NOT_SUPPORTED,
+        ))
+    }
+    fn mount_filesystem(
+        &self,
+        _channel: HandleValue,
+        _buffer: HandleValue,
         _directory: HandleValue,
         _path: UserSlice,
     ) -> Result<(), crate::kernel::vfs::VfsServiceError> {

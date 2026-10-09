@@ -84,6 +84,7 @@ case "${1:-}" in
         make -o image -o native-initramfs test-apps ARCH=aarch64
         make -o image -o app test-fleet-config ARCH=aarch64
         make -o image -o app test-storage-failure ARCH=aarch64
+        make -o image test-filesystem-failure ARCH=aarch64
         make -o image -o native-initramfs test-runtime-crash ARCH=aarch64
         cp target/app/aarch64/console.log target/app/aarch64/native-gicv3-console.log
         cp target/app/aarch64/runtime-crash.log target/app/aarch64/native-gicv3-runtime-crash.log

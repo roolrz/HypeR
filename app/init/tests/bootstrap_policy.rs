@@ -61,6 +61,8 @@ fn common_contracts_do_not_expose_private_service_roles_or_weaken_required_right
     for purpose in [
         "console.system",
         "io.device-authority",
+        "filesystem.attach",
+        "filesystem.provider",
         "vm.provisioning",
         "vm.creation-authority",
         "session.client-input",
@@ -92,6 +94,30 @@ fn common_contracts_do_not_expose_private_service_roles_or_weaken_required_right
             Some(expected)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn filesystem_requires_both_distinct_explicit_owners() -> Result<(), String> {
+    const MANIFEST: &str = r#"{"format":"hyper.service-manifest","services":[
+      {"name":"filesystem","image":"/svc/fs-backend","critical":false,"restart":"never","after":[],"capabilities":[
+        {"source":"bootstrap.filesystem-attach","purpose":"filesystem.attach","operation":"move","rights":["wait","read"]}]},
+      {"name":"storage","image":"/svc/io-runtime","critical":false,"restart":"never","after":[],"capabilities":[
+        {"source":"bootstrap.filesystem-provider","purpose":"filesystem.provider","operation":"move","rights":["wait","write"]}]}
+    ]}"#;
+    let manifest = manifest::parse(MANIFEST).map_err(|e| format!("{e:?}"))?;
+    let plan = manifest::validate(&manifest, &BootstrapPolicy).map_err(|e| format!("{e:?}"))?;
+    assert_eq!(super::filesystem_enabled(&plan), Ok(true));
+    let missing_peer = MANIFEST.replace(
+        r#"{"source":"bootstrap.filesystem-provider","purpose":"filesystem.provider","operation":"move","rights":["wait","write"]}"#,
+        "",
+    );
+    let manifest = manifest::parse(&missing_peer).map_err(|e| format!("{e:?}"))?;
+    let plan = manifest::validate(&manifest, &BootstrapPolicy).map_err(|e| format!("{e:?}"))?;
+    assert_eq!(
+        super::filesystem_enabled(&plan),
+        Err(super::IoReadyPlanError::InvalidGrant)
+    );
     Ok(())
 }
 

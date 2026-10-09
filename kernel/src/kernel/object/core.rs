@@ -875,6 +875,12 @@ impl<T: KernelObject> KernelRef<T, Scheduler> {
 }
 
 impl<T: KernelObject> KernelRef<T, OperationPin> {
+    /// Filesystem RPC retains transport identity, not userspace authority.
+    /// Final client/server handle closure must still retire the channel.
+    pub(crate) fn into_filesystem_transport(self) -> KernelRef<T, KernelService> {
+        KernelRef::from_owner(self.owner.into_class(ReferenceKind::KernelService))
+    }
+
     /// Commits a validated operation reference into persistent VM-device
     /// ownership after the corresponding userspace handle is consumed.
     ///

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capability-bound setup and exclusive filesystem mount admission.
+//! Capability-bound block setup and bounded exclusive volume transfers.
 
 use super::*;
 use crate::kernel::accounting::{ResourceAmount, ResourceKind};
@@ -60,7 +60,6 @@ pub(crate) fn create(
             indices: [0; wire::REQUEST_QUEUES],
             tag: 0,
             readonly: false,
-            mounted: false,
             capability_alive: true,
         }),
         available: SignalState::new(),
@@ -116,7 +115,7 @@ pub(crate) fn activate(
     process: &Process,
     handle: HandleValue,
     readonly: bool,
-) -> Result<u64, ActivationError> {
+) -> Result<(u64, bool), ActivationError> {
     let block = process
         .resolve_handle::<NativeBlock>(handle, Rights::WRITE)
         .map_err(ActivationError::Capability)?;
@@ -124,26 +123,97 @@ pub(crate) fn activate(
         .object()
         .device
         .activate(readonly)
+        .map(|sectors| (sectors, readonly))
         .map_err(ActivationError::Device)
 }
 
-pub(crate) fn claim_mount(
+/// Raw volume access is capability scoped. `NativeBlock` cannot be duplicated;
+/// the I/O owner transfers its sole active handle to the filesystem service.
+pub(crate) fn transfer(
     process: &Process,
     handle: HandleValue,
-) -> Result<MountedDevice, ServiceError> {
-    let block = process.resolve_handle::<NativeBlock>(handle, Rights::MAP)?;
-    let device = &block.object().device;
-    device.state.with(|state| {
-        if state.sectors == 0 || state.failed || !state.capability_alive {
-            return Err(ServiceError::BadState);
+    operation: u32,
+    first: u64,
+    buffer: Option<crate::kernel::mm::user_space::UserSlice>,
+) -> Result<(), TransferError> {
+    use hyper::abi::native::*;
+    if operation > 3 {
+        return Err(TransferError::Status(HYPER_NATIVE_STATUS_INVALID_ARGUMENT));
+    }
+    let rights = if operation == 0 {
+        Rights::READ
+    } else {
+        Rights::WRITE
+    };
+    let block = process
+        .resolve_handle::<NativeBlock>(handle, rights)
+        .map_err(TransferError::Capability)?;
+    let mut device = BlockAccess {
+        device: block.object().device.clone(),
+    };
+    if operation == 2 {
+        return device.flush().map_err(TransferError::Device);
+    }
+    let length = buffer.map_or(0, |buffer| buffer.length() as usize);
+    let maximum = if operation == 3 {
+        HYPER_NATIVE_NATIVE_BLOCK_TRANSFER_FRAME_BYTES
+    } else {
+        HYPER_NATIVE_NATIVE_BLOCK_TRANSFER_BYTES
+    };
+    if length as u64 > maximum || (operation != 3 && !length.is_multiple_of(SECTOR_SIZE)) {
+        return Err(TransferError::Status(HYPER_NATIVE_STATUS_INVALID_ARGUMENT));
+    }
+    if operation == 3 {
+        if first == 0
+            || first > HYPER_NATIVE_NATIVE_BLOCK_BATCH_MAX
+            || length < first as usize * HYPER_NATIVE_NATIVE_BLOCK_BATCH_RECORD_BYTES as usize
+        {
+            return Err(TransferError::Status(HYPER_NATIVE_STATUS_INVALID_ARGUMENT));
         }
-        if state.mounted {
-            return Err(ServiceError::Busy);
+    } else {
+        check_range(first, length, device.sector_count()).map_err(TransferError::Device)?;
+    }
+    if length == 0 {
+        return Ok(());
+    }
+    let buffer = buffer.ok_or(TransferError::Status(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))?;
+    let _charge = process
+        .resource_domain()
+        .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, length as u64))
+        .map_err(|_| TransferError::Status(HYPER_NATIVE_STATUS_RESOURCE_LIMIT))?
+        .commit();
+    let mut bytes = alloc::vec::Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| TransferError::Status(HYPER_NATIVE_STATUS_NO_MEMORY))?;
+    bytes.resize(length, 0);
+    if operation == 0 {
+        device
+            .read_sectors(first, &mut bytes)
+            .map_err(TransferError::Device)?;
+        process
+            .copy_to_user(buffer, &bytes)
+            .map_err(TransferError::Capability)
+    } else {
+        process
+            .copy_from_user(buffer, &mut bytes)
+            .map_err(TransferError::Capability)?;
+        if operation == 1 {
+            device
+                .write_sectors(first, &bytes)
+                .map_err(TransferError::Device)
+        } else {
+            let batch =
+                super::transfer::decode_write_batch(&bytes, first as usize, device.sector_count())
+                    .map_err(TransferError::Device)?;
+            device
+                .write_batch(batch.requests())
+                .map_err(TransferError::Device)
         }
-        state.mounted = true;
-        Ok(())
-    })?;
-    Ok(MountedDevice {
-        device: device.clone(),
-    })
+    }
+}
+pub(crate) enum TransferError {
+    Capability(crate::kernel::process::ProcessError),
+    Device(Error),
+    Status(i64),
 }

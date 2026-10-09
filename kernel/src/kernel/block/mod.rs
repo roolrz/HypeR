@@ -6,6 +6,7 @@
 
 mod request;
 pub(crate) mod service;
+mod transfer;
 mod wire;
 
 use crate::kernel::accounting::{CommittedCharge, ResourceDomain};
@@ -28,7 +29,6 @@ struct State {
     indices: [u16; wire::REQUEST_QUEUES],
     tag: u64,
     readonly: bool,
-    mounted: bool,
     capability_alive: bool,
 }
 
@@ -193,7 +193,8 @@ impl private::UserExportable for NativeBlock {}
 impl KernelObject for NativeBlock {
     const KIND: ObjectKind = ObjectKind::NATIVE_BLOCK;
     const TRANSFER_CLASS: TransferClass = TransferClass::RendezvousOnly;
-    const SUPPORTED_RIGHTS: Rights = Rights::WRITE
+    const SUPPORTED_RIGHTS: Rights = Rights::READ
+        .union(Rights::WRITE)
         .union(Rights::MAP)
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)
@@ -202,33 +203,17 @@ impl KernelObject for NativeBlock {
         Some(self.device.notification.closed_signal_source())
     }
     fn on_zero_active_handles(&self, _: &mut ObjectRetirement) {
-        // A mounted filesystem is an independent owner; closing its setup
-        // capability must not disconnect live filesystem requests.
-        let retire = self.device.state.with(|state| {
-            state.capability_alive = false;
-            !state.mounted
-        });
-        if retire {
-            self.device.fail();
-        }
+        self.device
+            .state
+            .with(|state| state.capability_alive = false);
+        self.device.fail();
     }
 }
 
-pub(crate) struct MountedDevice {
+pub(crate) struct BlockAccess {
     device: FallibleArc<Device>,
 }
-impl Drop for MountedDevice {
-    fn drop(&mut self) {
-        let retire = self.device.state.with(|state| {
-            state.mounted = false;
-            !state.capability_alive
-        });
-        if retire {
-            self.device.fail();
-        }
-    }
-}
-impl BlockDevice for MountedDevice {
+impl BlockDevice for BlockAccess {
     fn is_read_only(&self) -> bool {
         self.device.state.with(|state| state.readonly)
     }

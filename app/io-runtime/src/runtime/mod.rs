@@ -69,6 +69,12 @@ fn run(
     if broker.is_some() && readiness.is_none() {
         return Err("I/O broker requires managed storage readiness".into());
     }
+    let filesystem = startup
+        .take_optional(hyper_service::filesystem::PROVIDER)
+        .map_err(show)?;
+    if filesystem.is_some() != readiness.is_some() {
+        return Err("managed storage requires a filesystem provider".into());
+    }
     let authority = startup
         .borrow(startup::DEVICE_ASSIGNMENT_AUTHORITY)
         .map_err(show)?;
@@ -94,9 +100,13 @@ fn run(
     };
     let profile = device::profile_info(physical.as_handle_ref()).map_err(show)?;
     let network = PhysicalNetwork::claim(authority, config.network_device())?;
-    let mut client = readiness
-        .as_ref()
-        .map(|_| storage::NativeStorage::prepare(authority))
+    let mut client = filesystem
+        .map(|provider| {
+            storage::NativeStorage::prepare(
+                authority,
+                hyper_os::capability_channel::CapabilityChannel::from_handle(provider),
+            )
+        })
         .transpose()?;
     let image = Image::load(config.definition())?;
     if image.plan.memory_size() != RAM_BYTES {
@@ -279,7 +289,6 @@ fn run(
         println!("DEVICE-TEST: worker prepared");
         vm::start_vcpu(guest.cpus[0].as_handle_ref()).map_err(show)?;
         supervise(
-            startup,
             &mut guest,
             &mailbox,
             &mut guest_log,
@@ -328,7 +337,6 @@ fn drain(guest: &mut InstalledGuest, guest_log: &mut GuestLog) -> Result<()> {
 /// retains it through failure cleanup. Broker progress shares this loop with
 /// guest console and power events instead of blocking on individual clients.
 fn supervise(
-    startup: &Startup<'_>,
     guest: &mut InstalledGuest,
     mailbox: &Mailbox,
     guest_log: &mut GuestLog,
@@ -363,7 +371,6 @@ fn supervise(
                     ready = true;
                     if let Some(client) = client.as_mut() {
                         client.mount(
-                            startup,
                             guest,
                             mailbox,
                             guest_log,

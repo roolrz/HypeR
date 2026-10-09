@@ -113,6 +113,10 @@ ABI revision: `0`.
 
 | Name | Value |
 | --- | ---: |
+| `native_block_transfer_bytes` | `524288` |
+| `native_block_batch_max` | `4` |
+| `native_block_batch_record_bytes` | `16` |
+| `native_block_transfer_frame_bytes` | `524352` |
 | `object_detail_empty` | `0` |
 | `object_detail_thread` | `1` |
 | `object_detail_vmar` | `2` |
@@ -503,9 +507,9 @@ element size before any user-memory access.
 | 132 | `guest_mailbox_receive` | `mailbox: handle`, `bytes: user_address`, `capacity: byte_count` | `bytes: byte_count` | `mailbox: Borrow, kind=guest_mailbox, rights=0x10` | `bytes: Write, len=capacity bytes, max-bytes=256; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 133 | `guest_notification_create` | `frontend: handle`, `backend: handle`, `frontend_base: u64`, `backend_base: u64`, `frontend_irq: u32`, `backend_irq: u32` | `guest_notification: handle` | `frontend: Borrow, kind=virtual_machine, rights=0x20`, `backend: Borrow, kind=virtual_machine, rights=0x20`, `guest_notification: produce, kind=guest_notification, fixed=0x2e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 134 | `guest_notification_control` | `notification: handle`, `operation: u32` | `epoch: u32` | `notification: Borrow, kind=guest_notification, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
-| 135 | `native_block_create` | `memory: handle`, `backend: handle`, `guest_base: u64`, `notification_base: u64`, `notification_irq: u32` | `block: handle` | `memory: Borrow, kind=guest_memory, rights=0x40`, `backend: Borrow, kind=virtual_machine, rights=0x20`, `block: produce, kind=native_block, fixed=0x6e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
-| 136 | `native_block_activate` | `block: handle`, `readonly: u32` | `sectors: u64` | `block: Borrow, kind=native_block, rights=0x20` | — | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Capability` |
-| 137 | `native_block_mount` | `block: handle`, `directory: handle`, `path: user_address`, `path_length: byte_count` | — | `block: Borrow, kind=native_block, rights=0x40`, `directory: Borrow, kind=directory, rights=0xa0` | `path: Read, len=path_length bytes, max-bytes=4096; order=0` | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 135 | `native_block_create` | `memory: handle`, `backend: handle`, `guest_base: u64`, `notification_base: u64`, `notification_irq: u32` | `block: handle` | `memory: Borrow, kind=guest_memory, rights=0x40`, `backend: Borrow, kind=virtual_machine, rights=0x20`, `block: produce, kind=native_block, fixed=0x7e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 136 | `native_block_activate` | `block: handle`, `readonly: u32` | `sectors: u64`, `readonly: u32` | `block: Borrow, kind=native_block, rights=0x20` | — | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 137 | `filesystem_mount` | `channel: handle`, `buffer: handle`, `directory: handle`, `path: user_address`, `path_length: byte_count` | — | `channel: Borrow, kind=byte_channel, rights=0x34`, `buffer: Borrow, kind=vmo, rights=0x70`, `directory: Borrow, kind=directory, rights=0xa0` | `path: Read, len=path_length bytes, max-bytes=4096; order=0` | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 138 | `guest_mapping_create` | `backend: handle`, `memory: handle`, `frontend_base: u64` | `mapping: handle`, `token: u64` | `backend: Borrow, kind=virtual_machine, rights=0x20`, `memory: Borrow, kind=guest_memory, rights=0x40`, `mapping: produce, kind=guest_mapping, fixed=0x2a` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 139 | `guest_mapping_release` | `mapping: handle` | — | `mapping: Borrow, kind=guest_mapping, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 140 | `device_claim_matching` | `authority: handle`, `profile: u32`, `identity_kind: u32`, `identity: user_address`, `length: byte_count` | `physical_device: handle` | `authority: Borrow, kind=device_assignment_authority, rights=0x8`, `physical_device: produce, kind=physical_device, fixed=0x2b` | `identity: Read, len=length bytes, max-bytes=512; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
@@ -519,6 +523,7 @@ element size before any user-memory access.
 | 148 | `virtual_cpu_set_affinity` | `virtual_cpu: handle`, `affinity_words: user_address`, `word_count: element_count` | — | `virtual_cpu: Borrow, kind=virtual_cpu, rights=0x20` | `affinity_words: Read, len=word_count elements, max-elements=4, element-size=8; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 149 | `system_config` | `key: u64` | `value: u64` | — | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Abi` |
 | 150 | `object_inspector_read_details` | `inspector: handle`, `process_koid: u64`, `target: u64`, `cursor: u64`, `record: user_address`, `record_size: byte_count` | `supported_size: byte_count` | `inspector: Borrow, kind=object_inspector, rights=0x200000008` | `record: Write, len=record_size bytes, max-bytes=4096, record=object_details; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 496 | `native_block_transfer` | `block: handle`, `operation: u32`, `first_sector: u64`, `buffer: user_address`, `length: byte_count` | — | `block: Borrow, kind=native_block, rights=0x0` | `buffer: ReadWrite, len=length bytes, max-bytes=524352; order=0` | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Capability` |
 
 ## Public records
 

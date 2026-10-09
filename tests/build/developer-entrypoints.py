@@ -140,7 +140,7 @@ class EntrypointTests(unittest.TestCase):
             shared = root / '.vscode/rust-analyzer.toml'
             shared.parent.mkdir()
             shutil.copyfile(ROOT / '.vscode/rust-analyzer.toml', shared)
-            crates = ('abi', 'os', 'rt', 'service', 'sys', 'vm-image')
+            crates = ('abi', 'os', 'rt', 'service', 'sys', 'vm-image', 'filesystem', 'fatfs')
             for name in crates:
                 paths = [root / ('sdk/abi' if name == 'abi' else f'lib/rust/hyper-{name}'),
                          root / f'installed/hyper-{name}']

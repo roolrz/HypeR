@@ -159,6 +159,17 @@ impl ByteChannel {
         Pair::prepare_write(&self.pair, self.side, message)
     }
 
+    pub(crate) fn is_closed(&self) -> bool {
+        matches!(
+            self.peek(),
+            Err(ByteChannelError::EndpointClosed | ByteChannelError::PeerClosed)
+        ) || self
+            .pair
+            .signal_state(self.side)
+            .observe(Self::PEER_CLOSED)
+            .is_some()
+    }
+
     pub(crate) fn peek(&self) -> Result<ByteMessageInfo, ByteChannelError> {
         self.pair.peek(self.side)
     }

@@ -34,11 +34,13 @@ through an independently authorized vhost-scsi target. Client zero owns only
 the configuration volume; other clients cannot request that target.
 
 HypeR's Native block initiator uses standard virtio-scsi split queues and shared
-pages. The kernel mounts the configuration volume as a real FAT filesystem at
-`/data` beneath the initramfs root. File reads access that volume; they do not
-populate a second ramfs copy. The block transport can sleep, and the filesystem
-holds a sleepable mutex rather than an IRQ-disabling lock while waiting for I/O.
-See [FAT semantics and durability](../kernel/docs/fat.md).
+pages. `io-runtime` moves its activated configuration-volume capability to
+`fs-backend`, which detects the format and starts the separate `fs-fat` worker.
+The worker publishes the mount at `/data` beneath the initramfs root. File reads
+access the volume through the generic kernel VFS and cache; they do not populate
+a second ramfs copy. Cache misses and mutations use bounded shared-memory RPC
+directly to the worker. See [filesystem services](filesystem-services.md) and
+[FAT semantics and durability](fat.md).
 
 ## Bootstrap and VM services
 

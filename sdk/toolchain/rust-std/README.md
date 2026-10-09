@@ -169,7 +169,7 @@ acknowledge in-memory changes without restart persistence. Board deployments
 also mount FAT at `/data` through the Native block frontend and I/O VM; sync
 flushes that backend, with durability dependent on device completion and flush
 semantics. FAT has additional limits on links, modes, unlink and rename;
-see [FAT semantics](../../../kernel/docs/fat.md). The std surface does not
+see [FAT semantics](../../../docs/fat.md). The std surface does not
 make unsupported backend operations available.
 Recursive deletion uses pinned directory capabilities and conditional removal,
 so replacing an entry with a symlink cannot redirect traversal into its target.

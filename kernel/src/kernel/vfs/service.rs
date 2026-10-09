@@ -21,7 +21,6 @@ const BULK_TRANSFER_BYTES: usize = 512 * 1024;
 
 #[derive(Debug)]
 pub(crate) enum ServiceError {
-    Block(crate::kernel::vm::service::Error),
     FileLock(super::locks::LockError),
     FileSystem(VfsError),
     InvalidInput,
@@ -588,21 +587,20 @@ fn prepare_file_handle(
     }
 }
 
-pub(crate) fn mount_block(
+pub(crate) fn mount_remote(
     process: &Process,
-    block: HandleValue,
+    channel: HandleValue,
+    buffer: HandleValue,
     directory: HandleValue,
     path: UserSlice,
 ) -> Result<(), ServiceError> {
     let path = copy_path(process, path)?;
-    let directory = process.resolve_handle::<DirectoryObject>(
-        directory,
-        Rights::READ.union(Rights::WRITE).union(Rights::EXECUTE),
-    )?;
-    let device =
-        crate::kernel::block::service::claim_mount(process, block).map_err(ServiceError::Block)?;
+    let directory = process
+        .resolve_handle::<DirectoryObject>(directory, Rights::WRITE.union(Rights::EXECUTE))?;
+    let device = super::remote::Transport::prepare(process, channel, buffer)
+        .map_err(|error| ServiceError::FileSystem(VfsError::Backend(error)))?;
     directory
         .object()
-        .mount_block(&path, device, &process.resource_domain())?;
+        .mount_remote(&path, device, &process.resource_domain())?;
     Ok(())
 }

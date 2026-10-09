@@ -8,6 +8,7 @@ resolver = "3"
 members = [
     "*",
     "../lib/clap",
+    "../lib/fs-service",
     "../lib/tool-args",
     "../lib/tool-args/shared",
     "../lib/rust-std",
@@ -31,6 +32,9 @@ hyper-rust-std = { path = "../lib/rust-std" }
 hyper-tool-args = { path = "../lib/tool-args" }
 hyper-tool-args-shared = { path = "../lib/tool-args/shared" }
 hyper-os = "=0.0.0"
+hyper-filesystem = "=0.0.0"
+hyper-fatfs = "=0.0.0"
+hyper-fs-service = { path = "../lib/fs-service" }
 hyper-rt = { version = "=0.0.0", features = ["std"] }
 hyper-service = "=0.0.0"
 hyper-vm-image = "=0.0.0"

@@ -3,7 +3,7 @@
 
 //! FAT dates use UTC on `HypeR`. Validate media values before calendar arithmetic.
 
-use crate::time::Timestamp;
+use crate::Timestamp;
 use fatfs::{Date, DateTime, Time};
 
 fn month_days(year: u16, month: u16) -> Option<u16> {

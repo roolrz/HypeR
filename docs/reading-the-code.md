@@ -311,13 +311,16 @@ flowchart TB
     app["Native file operation"] --> vfs["Kernel VFS<br/>Resolve path and check rights"]
     subgraph kernel["HypeR kernel"]
         vfs --> ramfs["ramfs<br/>In-memory file data"]
-        vfs --> fat["/data · FAT filesystem"]
-        fat --> block["Native block initiator"]
+        vfs --> remote["Generic filesystem service adapter"]
+        block["Native block initiator"]
     end
+    remote -->|Cache miss / mutation RPC| fat["Native fs-fat worker"]
+    fat -->|Sector transfer| block
     block -->|Shared virtio-scsi queues| io["Linux I/O VM<br/>Storage backend"]
     io --> disk[("Assigned storage")]
     class app app
-    class vfs,ramfs,fat,block core
+    class vfs,ramfs,remote,block core
+    class fat app
     class io,disk machine
     classDef app fill:#eff6ff,stroke:#2563eb,color:#172554
     classDef core fill:#f0fdfa,stroke:#0f766e,color:#134e4a
@@ -326,20 +329,23 @@ flowchart TB
 
 For ramfs, read [the VFS adapter](../kernel/src/kernel/vfs/ramfs.rs) and
 [ramfs implementation](../kernel/src/fs/ramfs.rs).
-For `/data`, read [the FAT adapter](../kernel/src/kernel/vfs/fat.rs),
+For `/data`, read [the remote filesystem adapter](../kernel/src/kernel/vfs/remote.rs),
+[common service protocol](../lib/rust/hyper-filesystem/src/protocol.rs),
+[FAT media engine](../lib/rust/hyper-fatfs/src/volume.rs),
 [block interface](../kernel/src/fs/block.rs),
 [Native block owner](../kernel/src/kernel/block/mod.rs),
 [request lifecycle](../kernel/src/kernel/block/request.rs) and
 [queue wire format](../kernel/src/kernel/block/wire.rs).
 
 [Native storage](../app/io-runtime/src/runtime/storage.rs) negotiates the
-configuration-volume client and its dedicated shared pool;
-[I/O runtime](../app/io-runtime/src/runtime/mod.rs) mounts it and publishes readiness.
-Once established, individual filesystem requests use the kernel block queues
-and notifications directly. io-runtime is not a userspace relay for each read
-or write. VFS and FAT remain in HypeR's kernel; the Linux backend supplies block
-storage, not pathname lookup. Consult [FAT semantics](../kernel/docs/fat.md)
-for differences from ramfs.
+configuration-volume client and moves its capability to
+[fs-backend](../app/fs-backend/src/main.rs). That manager detects the format,
+launches the separate FAT worker and remains outside the data path. Kernel VFS
+and cache hits need no worker round trip; misses and mutations go directly to
+the worker through [filesystem RPC](filesystem-services.md). Neither io-runtime
+nor fs-backend relays individual file operations. The Linux I/O VM supplies
+block storage, not pathname lookup. Consult [FAT semantics](fat.md) for
+differences from ramfs.
 
 **Following a write:** separate acceptance by the file operation, completion of
 the block request and persistence guarantees. Inspect the backend's sync/flush

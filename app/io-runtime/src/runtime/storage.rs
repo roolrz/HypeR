@@ -7,6 +7,7 @@
 use super::{MAILBOX_MMIO, Result, check_deadline, deadline, pump_guest, show};
 use hyper_io_runtime::guest_log::GuestLog;
 use hyper_os::block::{self, NativeBlock};
+use hyper_os::capability_channel::CapabilityChannel;
 use hyper_os::device::{self, DmaExtent};
 use hyper_os::guest_io::Mailbox;
 use hyper_os::handle::{
@@ -14,7 +15,6 @@ use hyper_os::handle::{
     HandleRef, OwnedHandle, VirtualMachineObject,
 };
 use hyper_os::memory::WritableVmo;
-use hyper_os::startup::{self, Startup};
 use hyper_os::vm;
 use hyper_os::wait::{self, ObjectSignals, WaitItem};
 use hyper_vm_image::guest_fdt::io::{DmaRange, IoClient, MmioDevice, SharedMemory};
@@ -27,15 +27,19 @@ const _: () = assert!(QUEUES == block::QUEUE_COUNT);
 const SHARED_BASE: u64 = RAM_BASE + RAM_BYTES;
 const NOTIFICATION_MMIO: u64 = 0x0a02_0000;
 
+mod filesystem;
+
 pub(super) struct NativeStorage {
     _memory: WritableVmo,
     grant: OwnedHandle<GuestMemoryObject>,
     dma: DmaExtent,
     block: Option<NativeBlock>,
+    filesystem: Option<CapabilityChannel>,
 }
 impl NativeStorage {
     pub(super) fn prepare(
         authority: HandleRef<'_, DeviceAssignmentAuthorityObject>,
+        filesystem: CapabilityChannel,
     ) -> Result<Self> {
         let memory = WritableVmo::create_contiguous(block::MEMORY_BYTES).map_err(show)?;
         let dma = device::dma_extent(authority, memory.as_handle_ref(), 0, block::MEMORY_BYTES)
@@ -46,6 +50,7 @@ impl NativeStorage {
             grant,
             dma,
             block: None,
+            filesystem: Some(filesystem),
         })
     }
     pub(super) fn description(&self) -> IoClient {
@@ -100,7 +105,6 @@ impl NativeStorage {
     }
     pub(super) fn mount(
         &mut self,
-        startup: &Startup<'_>,
         guest: &mut InstalledGuest,
         mailbox: &Mailbox,
         guest_log: &mut GuestLog,
@@ -152,22 +156,25 @@ impl NativeStorage {
         )?;
         let block = self.block.take().ok_or("Native initiator missing")?;
         println!("HypeR io-runtime: configuration queues active");
-        let root = startup.borrow(startup::ROOT_DIRECTORY).map_err(show)?;
+        let filesystem = self
+            .filesystem
+            .take()
+            .ok_or("filesystem provider missing")?;
         let (sender, receiver) = hyper_os::channel::create_pair().map_err(show)?;
         // Only the worker enters potentially blocking filesystem syscalls.
         // The owner keeps processing console and guest power events. Scope
         // exit joins before backing/grants can be dropped on any error path.
-        let mounted = std::thread::scope(|scope| -> Result<NativeBlock> {
+        std::thread::scope(|scope| -> Result<()> {
             let worker = std::thread::Builder::new()
                 .spawn_scoped(scope, move || {
                     let result = (|| {
                         println!("HypeR io-runtime: discovering configuration device");
-                        let sectors = block.activate(false).map_err(show)?;
+                        let volume = block.activate(false).map_err(show)?;
+                        let sectors = volume.sectors;
                         println!("HypeR io-runtime: configuration device: {sectors} sectors");
-                        std::fs::create_dir_all("/data").map_err(show)?;
-                        block.mount(root, "data").map_err(show)?;
+                        filesystem::attach(filesystem, block, volume)?;
                         println!("HypeR io-runtime: configuration volume: {sectors} sectors");
-                        Ok(block)
+                        Ok(())
                     })();
                     // The result remains owned by the join handle. This channel is
                     // only a wakeup, so closure also prompts the owner on failure.
@@ -185,7 +192,6 @@ impl NativeStorage {
             pending?;
             result
         })?;
-        self.block = Some(mounted);
         Ok(())
     }
 }

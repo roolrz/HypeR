@@ -94,19 +94,19 @@ publication.
 ## File-data cache
 
 The common VFS layer owns file-content coherence. Ramfs nodes embed one
-`FileContent`; cacheable FAT nodes share a `FileRecord` which owns it. Independent
+`FileContent`; cacheable remote nodes share a `FileRecord` which owns it. Independent
 opens and aliases therefore use the same content gate and identity. Its
 sleeping gate protects a non-repeating content revision and optional known
 length. Cache entries are keyed by filesystem identity, node incarnation,
 content revision and page index. A path or raw reusable inode number is never
 a cache key. A clean page also retains an opaque content-owner pin; the portable
-cache has no dependency on VFS types. This preserves FAT identity across the
+cache has no dependency on VFS types. This preserves remote file identity across the
 last close and a later open while pages remain, including opens by another
 process. Page reclamation releases these pins outside the cache lock. The record
 contains only its identity, content state and quota charge; advisory locks and
 mount pins remain on the active node. Cached records do not keep unlink busy.
 After every record owner disappears, reopening requires a fresh incarnation.
-FAT bindings use individually charged storage, released when the binding is
+Remote bindings use individually charged storage, released when the binding is
 removed. If retained content exhausts a mount sponsor or ancestor quota,
 unpublished preparation can request a finite domain-scoped cache sweep and
 binding cleanup. Cache admission remains paused through that retry; neither
@@ -203,7 +203,7 @@ and backend errors are never hidden as cache misses.
 Backends provide raw range I/O, metadata, stable node identity and a cheap read
 admission check. Cached data and cached length still honor a failed or closed
 backend once that state is latched; the check does not probe the media on a
-cache hit. FAT uses this common reader; it owns no file-page cache algorithm.
+cache hit. Remote filesystems use this common reader; it owns no file-page cache algorithm.
 Writes continue through the existing synchronous backend path and explicit
 `file_sync` durability contract. Dirty-page writeback, external coherence,
 direct I/O and shared writable mappings require separate protocols. Destructors
@@ -258,12 +258,13 @@ while sharing the common file-content coordination contract. Cached writable
 backends use the same revision and mutation protocol; a clean read cache does
 not require dirty-page writeback. The backend seam
 in `instance.rs` separates node leases, owned metadata, data operations and
-executable snapshots from path policy. A userspace filesystem adapter can add
-its own lease variant and request lifetime/cancellation protocol there; block
-transport stays below the filesystem adapter. A userspace filesystem server
-protocol is not implemented. The current block-backed path mounts the
-kernel [FAT32 adapter](fat.md) over a NativeBlock service supplied by the
-trusted Linux I/O VM; see the [I/O VM contract](../../docs/io-vm.md).
+executable snapshots from path policy. The generic userspace adapter owns canonical path identities and ordered
+request lifetime/cancellation there; block transport stays below the Native
+filesystem worker. [Filesystem services](../../docs/filesystem-services.md)
+describes the bounded shared-buffer protocol, failure retirement and sequential
+readahead. FAT parsing runs in `/svc/fs-fat`, selected on demand by the
+`/svc/fs-backend` manager. The trusted Linux I/O VM remains the physical block
+backend; see the [I/O VM contract](../../docs/io-vm.md).
 
 The Native surface includes atomic open/create/create-new/truncate, file
 write/append/resize, directory creation, rename with replacement, regular-file

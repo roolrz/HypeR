@@ -74,7 +74,7 @@ Interactive serial writes use a 128-byte specialization; full 4096-byte writes
 retain their complete buffer, one usercopy and one publication, preserving
 failure and partial-write behavior without allocating per input event.
 
-FAT directory parsing fills a caller-owned entry and borrows its long-name
+The userspace FAT worker directory parser fills a caller-owned entry and borrows its long-name
 buffer. A mounted volume owns one persistent sector-cache allocation in place
 of its former outer volume allocation, reducing mount return-value copies
 without adding allocations or I/O. ELF segments retain their validated ELF

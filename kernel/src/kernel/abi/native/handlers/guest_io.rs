@@ -14,7 +14,9 @@ use crate::kernel::abi::native::wire::{
 use crate::kernel::abi::native::{Arguments, GuestIoServices};
 use crate::kernel::mm::user_space::{UserAddress, UserSlice};
 use crate::kernel::vm::service::Error;
-use hyper::abi::native::HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+use hyper::abi::native::{
+    HYPER_NATIVE_NATIVE_BLOCK_TRANSFER_FRAME_BYTES, HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+};
 
 #[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_guest_mailbox_create(
@@ -183,30 +185,67 @@ pub(in crate::kernel::abi::native) fn sys_native_block_activate(
             })
     })();
     DeferredAction::Return(match result {
-        Ok(sectors) => success([sectors, 0]),
+        Ok((sectors, readonly)) => success([sectors, u64::from(readonly)]),
         Err(error) => failure(error),
     })
 }
 
 #[inline(never)]
-pub(in crate::kernel::abi::native) fn sys_native_block_mount(
+pub(in crate::kernel::abi::native) fn sys_filesystem_mount(
     services: &impl GuestIoServices,
     arguments: &Arguments,
 ) -> DeferredAction {
     let result = (|| {
-        require_zero(&arguments[4..])?;
-        if arguments[3] == 0 || arguments[3] > 4096 {
+        require_zero(&arguments[5..])?;
+        if arguments[4] == 0 || arguments[4] > 4096 {
             return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
         }
-        let path = UserSlice::new(UserAddress::new(arguments[2]), arguments[3])
+        let path = UserSlice::new(UserAddress::new(arguments[3]), arguments[4])
             .map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
         services
-            .mount_native_block(
+            .mount_filesystem(
                 parse_handle(arguments[0])?,
                 parse_handle(arguments[1])?,
+                parse_handle(arguments[2])?,
                 path,
             )
             .map_err(crate::kernel::abi::native::status::status_from_vfs_service_error)
+    })();
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+pub(in crate::kernel::abi::native) fn sys_native_block_transfer(
+    services: &impl GuestIoServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        require_zero(&arguments[5..])?;
+        let operation = parse_u32(arguments[1])?;
+        if operation > 3
+            || arguments[4] > HYPER_NATIVE_NATIVE_BLOCK_TRANSFER_FRAME_BYTES
+            || (operation == 2 && (arguments[2] != 0 || arguments[3] != 0 || arguments[4] != 0))
+        {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        let buffer = optional_user_slice(arguments[3], arguments[4])?;
+        services
+            .transfer_native_block(parse_handle(arguments[0])?, operation, arguments[2], buffer)
+            .map_err(|error| {
+                use crate::kernel::block::service::TransferError;
+                use hyper::{abi::native::*, fs::block::Error};
+                match error {
+                    TransferError::Capability(error) => status_from_process_error(error),
+                    TransferError::Status(status) => status,
+                    TransferError::Device(error) => match error {
+                        Error::InvalidRange => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+                        Error::ReadOnly => HYPER_NATIVE_STATUS_READ_ONLY,
+                        Error::Unsupported => HYPER_NATIVE_STATUS_NOT_SUPPORTED,
+                        Error::Exhausted => HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
+                        _ => HYPER_NATIVE_STATUS_IO_ERROR,
+                    },
+                }
+            })
     })();
     DeferredAction::Return(status_only(result))
 }

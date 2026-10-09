@@ -155,7 +155,7 @@ app/
     tests/            Unit tests and acceptance-only config/ manifests
   session/
   shell/
-  io-runtime/ vm-manager/ vm-runtime/ vm-smoke/ vmm/
+  io-runtime/ fs-backend/ fs-fat/ vm-manager/ vm-runtime/ vm-smoke/ vmm/
 lib/                  Shared application libraries, in the app Cargo workspace
   clap/               Common command-line parser DSO
   tool-args/          Argument parsing and process selection for system tools
@@ -203,8 +203,10 @@ manifest and board configuration inputs.
 | `/svc/console-input` | [console-input](console-input/) | Read the physical console, normalize input newlines and forward bytes to the session through a channel. Holds only the input direction of the physical console. |
 | `/svc/console-output` | [console-output](console-output/) | Drain the shared output channel to the physical console. Holds only the output direction and applies backpressure through the bounded channel. |
 | `/svc/session` | [session](session/) | Own the virtual console, relay foreground input/output, launch the shell and restart it after exit or failure. The console transport survives each shell instance. |
-| `/svc/io-runtime` | [io-runtime](io-runtime/) | Load the board-configured Linux I/O VM, manage its assigned physical devices and backend connections, mount the Native configuration volume at `/data` and report storage readiness. Broker guest block/network connections and retire their backend resources. Included in I/O deployments. |
+| `/svc/io-runtime` | [io-runtime](io-runtime/) | Load the board-configured Linux I/O VM, manage its assigned physical devices and backend connections, transfer the Native configuration volume to its filesystem manager and forward mount readiness. Broker guest block/network connections and retire their backend resources. Included in I/O deployments. |
 | `/svc/vm-manager` | [vm-manager](vm-manager/) | Own named VM definitions and lifecycle policy, handle `vmm` requests, launch and supervise per-VM runtimes, and expose the I/O VM's read-only observation entry. |
+| `/svc/fs-backend` | [fs-backend](fs-backend/) | Detect the configuration-volume filesystem, start its confined format worker and monitor its lifetime. The manager is outside the file I/O path. Included in board I/O deployments. |
+| `/svc/fs-fat` | [fs-fat](fs-fat/) | Validate and serve FAT32 media. Uses the common filesystem service library for shared-buffer RPC, mounting and parent failure; the kernel retains VFS, file locks and caching. Started on demand by fs-backend. |
 | `/svc/vm-runtime` | [vm-runtime](vm-runtime/) | Construct and run one managed guest: load its image, configure vCPUs and virtual devices, connect I/O backends, serve its console and control requests, and retire resources on termination. Started by the VM manager for each VM start. |
 
 The resident Linux I/O VM runs physical device drivers. `io-runtime` is the

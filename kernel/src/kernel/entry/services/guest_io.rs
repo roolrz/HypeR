@@ -43,16 +43,26 @@ impl crate::kernel::abi::native::GuestIoServices for DeferredProcessServices<'_>
         &self,
         block: HandleValue,
         readonly: bool,
-    ) -> Result<u64, crate::kernel::block::service::ActivationError> {
+    ) -> Result<(u64, bool), crate::kernel::block::service::ActivationError> {
         crate::kernel::block::service::activate(self.process, block, readonly)
     }
-    fn mount_native_block(
+    fn transfer_native_block(
         &self,
         block: HandleValue,
+        operation: u32,
+        first: u64,
+        buffer: Option<UserSlice>,
+    ) -> Result<(), crate::kernel::block::service::TransferError> {
+        crate::kernel::block::service::transfer(self.process, block, operation, first, buffer)
+    }
+    fn mount_filesystem(
+        &self,
+        channel: HandleValue,
+        buffer: HandleValue,
         directory: HandleValue,
         path: UserSlice,
     ) -> Result<(), crate::kernel::vfs::VfsServiceError> {
-        crate::kernel::vfs::service::mount_block(self.process, block, directory, path)
+        crate::kernel::vfs::service::mount_remote(self.process, channel, buffer, directory, path)
     }
 
     fn create_guest_mailbox(

@@ -5,17 +5,19 @@ SPDX-License-Identifier: Apache-2.0
 
 # FAT32 block volumes
 
-The kernel mounts an exclusively owned logical block volume, not a copy of its
-contents in ramfs. `fs::block::BlockDevice` describes 512-byte sector transfers
-and a durable flush. Operations may sleep. The kernel VFS adapter holds a
-sleepable volume mutex; no spin lock remains held during device I/O.
+The Native `/svc/fs-fat` worker mounts an exclusively owned logical block volume,
+not a copy of its contents in ramfs. `hyper_fatfs::block::BlockDevice` describes
+512-byte sector transfers and a durable flush. The kernel retains generic VFS
+and cache coordination; FAT media parsing runs in the worker. See
+[filesystem services](filesystem-services.md) for process startup, authority,
+transport and failure semantics.
 
 FAT parsing and mutations use the MIT-licensed `rafalh/rust-fatfs` revision
 `2aefc2a027ce94ed0671752814dac203f0450e11`, vendored in
 `third_party/rust-fatfs`. Its provenance document records the local correctness
 and bounded-stack fixes; the original MIT copyright and license are retained.
 Its no-std, no-alloc configuration provides long filenames. HypeR keeps the
-library behind `fs::fat::FatVolume`; upstream files and directories do not
+library behind `hyper_fatfs::FatVolume`; upstream files and directories do not
 escape the adapter.
 
 ## Media admission
@@ -23,9 +25,10 @@ escape the adapter.
 Before upstream parsing, HypeR validates the BPB geometry and arithmetic bounds,
 FAT successor ranges, directory references, reachable chain lengths, cycles and
 crosslinks. A temporary two-bit-per-cluster allocation records ownership; it is
-released after mount. The mount sponsor reserves an upper bound for this
-scratch before scanning. Persistent filesystem state, directory registry capacity,
-node leases and retained paths are separately charged to their storage owners.
+released after mount. The worker
+allocates this bounded scratch from its resource domain. Kernel namespace
+bindings, node leases and retained paths are separately charged to the mount
+sponsor.
 File contents are not cached or copied by this scan.
 The directory graph admits at most 65,536 directories. An operation also has a
 finite I/O/seek budget so a corrupt chain cannot cause an unbounded traversal.
@@ -48,8 +51,8 @@ metadata. Device errors may have committed part of an operation.
 Writes complete before the volume operation returns. Within an operation, eight
 128 KiB heap windows coalesce cluster-sized data writes and repeated FAT sector
 updates. Dirty-sector bitmaps retain only modified sectors; contiguous dirty
-runs become block requests. Up to four disjoint requests can be submitted
-together, with independent queue storage retained until completion. Eviction,
+runs become block requests. Up to four disjoint requests are submitted together through the Native bounded
+write-batch operation, preserving independent queue storage until completion. Eviction,
 upstream stream flushes and the operation boundary drain pending writes. A
 recoverable error such as no space also drains completed metadata rollback.
 An uncertain device error poisons the volume without retrying a partial batch.
@@ -58,8 +61,8 @@ Pending sectors are the authoritative read view until drained. Four 4 KiB
 read-through windows batch nearby metadata fields and keep directory and FAT
 lookups from displacing each other on every read; bulk file data bypasses them.
 Writes update overlapping read windows, and failed writes invalidate them.
-All fixed buffer storage, including the 1 MiB write buffer, is charged to the
-mount sponsor. Ordinary writes do not claim stable-storage durability. `sync`
+Fixed media buffers, including the 1 MiB write buffer, reside in the
+worker and consume its process memory quota. Ordinary writes do not claim stable-storage durability. `sync`
 explicitly commits upstream FSInfo and directory metadata, drains the adapter,
 issues the block device's durable flush, and retains the mounted metadata view.
 
@@ -78,10 +81,10 @@ directly and combine adjacent data sectors instead of reopening and walking the
 FAT chain for every transfer. Each map also owns four 4 KiB read-through windows
 for partial-sector file reads, avoiding repeated device requests while parsing
 image headers. Aligned bulk reads bypass these windows. All of this fixed
-storage is charged to the mount sponsor. Highly fragmented files
+storage resides in the worker resource domain. Highly fragmented files
 fall back to ordinary FAT reads without allocating an unbounded extent table.
 All potentially mutating operations invalidate maps and their windows before touching media,
-including operations that subsequently fail. The volume mutex serializes map
+including operations that subsequently fail. The sole worker serializes map
 construction, use and invalidation. An initial map build takes the size from
 the open file's directory entry and traverses its chain once; it does not first
 seek through the chain to EOF. This cost is amortized across subsequent reads
@@ -113,8 +116,9 @@ unused long-name buffer into subsequent disk operations.
 
 Parent resolution and directory scanning use separate stack frames. Metadata
 inspection also completes before mutation starts, so its filename scratch is
-not retained across the later blocking operation. Compiler frame reports and
-QEMU stack watermarks check the combined path; a local frame limit alone is not
+not retained across the later blocking operation. The FAT engine uses the userspace worker stack; compiler frame reports still
+check bounded local frames, while QEMU kernel stack watermarks cover the VFS and
+IPC path; a local frame limit alone is not
 a whole-call-chain bound. Watermarks measure modified bytes, not untouched stack
 reservations. Audit builds therefore complement static review and are not used
 for performance measurements.
@@ -122,8 +126,8 @@ for performance measurements.
 ## VFS semantics
 
 Regular-file read caching belongs to the common VFS layer, described in
-[VFS file-data cache](vfs.md#file-data-cache). The FAT adapter supplies raw
-positioned reads, file length, and a cheap check for a closed or failed volume.
+[VFS file-data cache](../kernel/docs/vfs.md#file-data-cache). The generic remote adapter supplies positioned reads and metadata over RPC;
+its local endpoint-health check detects a closed or failed volume without RPC.
 The shared file record owns the common content gate and revision; all writes,
 resizes and truncating opens pass through that gate before entering FAT.
 Alternate names therefore share cached contents and mutation ordering. Cached
@@ -170,7 +174,7 @@ bits. These operations report unsupported; modes are synthesized from the FAT
 read-only attribute (`0777`, or `0555` when read-only). A requested creation mode
 such as `0600` does not provide persistent Unix permission isolation on FAT;
 Native handle rights still constrain each granted capability independently.
-File creation and updates use the kernel clock, with UTC
+File creation and updates use the Native realtime clock, with UTC
 as the FAT time convention. File access times have day precision, modification
 times have two-second precision, and creation times have ten-millisecond
 precision. Explicit timestamps outside 1980–2107 are rejected; invalid dates

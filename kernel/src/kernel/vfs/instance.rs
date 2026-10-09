@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use hyper::fs::ramfs::{Error as RamFsError, RamFs};
 use hyper::fs::{MAX_NAME_BYTES, Name, NodeAttributes};
-use hyper::mm::{AllocationError, FallibleArc};
+use hyper::mm::{AllocationError, FallibleArc, WeakFallibleArc};
 use hyper::time::Timestamp;
 
 use crate::kernel::accounting::{
@@ -18,7 +18,7 @@ use crate::kernel::io_cache::{self, FileDataCache, FileIdentity, NodeIdentity, R
 
 use super::ExecutableSnapshot;
 use super::file_data::FileContent;
-use super::file_record::CachePage;
+use super::file_record::{CachePage, FileRecord};
 use super::scratch::{ScratchBudget, ScratchString, ScratchVec};
 
 static NEXT_FILESYSTEM_ID: AtomicU64 = AtomicU64::new(1);
@@ -62,7 +62,7 @@ pub(crate) enum Error {
     InvalidInput,
     Busy,
     Unsupported,
-    Fat(hyper::fs::fat::Error),
+    Remote(hyper_filesystem::protocol::Error),
 }
 
 impl From<AllocationError> for Error {
@@ -91,13 +91,12 @@ pub(super) struct Creation<'a> {
 
 /// Closed adapter set for filesystems mounted by this kernel revision.
 ///
-/// Keeping the adapter closed avoids freezing a broad object-safe trait before
-/// a second backend establishes the genuinely shared contract. VFS policy
-/// calls only these narrow methods, so a direct or IPC-backed adapter can be
-/// added without changing namespace or capability objects.
+/// Ramfs owns resident boot/runtime data; remote mounts use the format-neutral
+/// service contract. Adding a userspace filesystem does not add a kernel
+/// adapter variant or change namespace/capability objects.
 enum Backend {
     RamFs(super::ramfs::Ramfs),
-    Fat(FallibleArc<super::fat::Fatfs<crate::kernel::block::MountedDevice>>),
+    Remote(FallibleArc<super::remote::RemoteFs>),
 }
 
 /// Whether reads benefit from copying backend data into clean page cache.
@@ -122,34 +121,72 @@ pub(crate) struct FilesystemInstance {
 #[derive(Clone)]
 pub(crate) struct NodeLease(NodeBackend);
 
+/// Speculation retains content identity, never an active namespace lease.
+pub(super) struct ReadAheadFile {
+    node: WeakFallibleArc<super::remote::Node>,
+    content: WeakFallibleArc<FileRecord>,
+}
+
+impl ReadAheadFile {
+    pub(super) fn new(node: &FallibleArc<super::remote::Node>) -> Self {
+        Self {
+            node: node.downgrade(),
+            content: node.record.downgrade(),
+        }
+    }
+
+    pub(super) fn content_if_open(&self) -> Option<FallibleArc<FileRecord>> {
+        // Liveness is only an admission hint. Closing the last file while a
+        // prediction runs must still permit unlink; resolving the incarnation
+        // under the backend mutex excludes stale-path I/O after removal.
+        self.node
+            .is_alive()
+            .then(|| self.content.upgrade())
+            .flatten()
+    }
+}
+
+pub(super) struct ReadObservation {
+    pub(super) identity: FileIdentity,
+    pub(super) length: u64,
+    pub(super) had_miss: bool,
+}
+
 #[derive(Clone)]
 enum NodeBackend {
     RamFs(FallibleArc<super::ramfs::Node>),
-    Fat(FallibleArc<super::fat::Node>),
+    Remote(FallibleArc<super::remote::Node>),
 }
 impl NodeLease {
+    pub(super) fn downgrade_cacheable(&self) -> Option<ReadAheadFile> {
+        match &self.0 {
+            NodeBackend::RamFs(_) => None,
+            NodeBackend::Remote(node) => Some(ReadAheadFile::new(node)),
+        }
+    }
+
     fn from_ramfs(node: FallibleArc<super::ramfs::Node>) -> Self {
         Self(NodeBackend::RamFs(node))
     }
-    fn from_fat(node: FallibleArc<super::fat::Node>) -> Self {
-        Self(NodeBackend::Fat(node))
+    fn from_remote(node: FallibleArc<super::remote::Node>) -> Self {
+        Self(NodeBackend::Remote(node))
     }
     pub(crate) fn get(&self) -> u64 {
         match &self.0 {
             NodeBackend::RamFs(node) => node.id(),
-            NodeBackend::Fat(node) => node.id(),
+            NodeBackend::Remote(node) => node.id(),
         }
     }
     pub(super) fn locks(&self) -> &super::locks::FileLocks {
         match &self.0 {
             NodeBackend::RamFs(node) => &node.locks,
-            NodeBackend::Fat(node) => &node.locks,
+            NodeBackend::Remote(node) => &node.locks,
         }
     }
     fn content(&self) -> &FileContent {
         match &self.0 {
             NodeBackend::RamFs(node) => &node.content,
-            NodeBackend::Fat(node) => &node.record.content,
+            NodeBackend::Remote(node) => &node.record.content,
         }
     }
     fn ramfs(&self) -> Result<&FallibleArc<super::ramfs::Node>, Error> {
@@ -158,9 +195,9 @@ impl NodeLease {
             _ => Err(Error::InvalidBackendResult),
         }
     }
-    fn fat(&self) -> Result<&FallibleArc<super::fat::Node>, Error> {
+    fn remote(&self) -> Result<&FallibleArc<super::remote::Node>, Error> {
         match &self.0 {
-            NodeBackend::Fat(node) => Ok(node),
+            NodeBackend::Remote(node) => Ok(node),
             _ => Err(Error::InvalidBackendResult),
         }
     }
@@ -168,7 +205,7 @@ impl NodeLease {
 
 pub(super) enum MountPin {
     RamFs { _pin: super::ramfs::MountPin },
-    Fat { _pin: super::fat::MountPin },
+    Remote { _pin: super::remote::MountPin },
 }
 
 #[derive(Clone, Copy)]
@@ -199,16 +236,16 @@ impl FilesystemInstance {
         .map_err(Error::from)
     }
 
-    pub(super) fn try_from_block(
-        device: crate::kernel::block::MountedDevice,
+    pub(super) fn try_from_remote(
+        device: super::remote::Transport,
         sponsor: &ResourceDomain,
     ) -> Result<FallibleArc<Self>, Error> {
         let charge = allocation_charge::<Self>(sponsor)?;
-        let filesystem = super::fat::Fatfs::mount(device, sponsor.clone())?;
+        let filesystem = super::remote::RemoteFs::mount(device, sponsor.clone())?;
         FallibleArc::try_new(Self {
             _charge: Some(charge),
             id: FilesystemId(allocate_identifier(&NEXT_FILESYSTEM_ID)?),
-            backend: Backend::Fat(FallibleArc::try_new(filesystem)?),
+            backend: Backend::Remote(FallibleArc::try_new(filesystem)?),
         })
         .map_err(Error::from)
     }
@@ -217,9 +254,9 @@ impl FilesystemInstance {
             Backend::RamFs(fs) => fs
                 .pin_mount(node.ramfs()?)
                 .map(|pin| MountPin::RamFs { _pin: pin }),
-            Backend::Fat(fs) => fs
-                .pin_mount(node.fat()?)
-                .map(|pin| MountPin::Fat { _pin: pin }),
+            Backend::Remote(fs) => fs
+                .pin_mount(node.remote()?)
+                .map(|pin| MountPin::Remote { _pin: pin }),
         }
     }
 
@@ -230,12 +267,12 @@ impl FilesystemInstance {
     pub(super) fn reclaim_file_records(&self, limit: usize) -> (usize, usize) {
         match &self.backend {
             Backend::RamFs(_) => (0, 0),
-            Backend::Fat(fs) => fs.reclaim_records(limit),
+            Backend::Remote(fs) => fs.reclaim_records(limit),
         }
     }
 
     pub(super) fn reclaim_idle_records(&self, domain: Option<ResourceDomainId>) {
-        if let Backend::Fat(fs) = &self.backend {
+        if let Backend::Remote(fs) = &self.backend {
             fs.reclaim_idle_records(domain);
         }
     }
@@ -250,21 +287,21 @@ impl FilesystemInstance {
     const fn read_cache_policy(&self) -> ReadCachePolicy {
         match &self.backend {
             Backend::RamFs(_) => ReadCachePolicy::Direct,
-            Backend::Fat(_) => ReadCachePolicy::PageCache,
+            Backend::Remote(_) => ReadCachePolicy::PageCache,
         }
     }
 
     pub(crate) fn root(&self) -> NodeLease {
         match &self.backend {
             Backend::RamFs(ramfs) => NodeLease::from_ramfs(ramfs.root()),
-            Backend::Fat(fs) => NodeLease::from_fat(fs.root()),
+            Backend::Remote(fs) => NodeLease::from_remote(fs.root()),
         }
     }
 
     pub(crate) fn attributes(&self, node: &NodeLease) -> Result<NodeAttributes, Error> {
         match &self.backend {
             Backend::RamFs(_) => node.ramfs()?.attributes(),
-            Backend::Fat(fs) => fs.attributes(node.fat()?),
+            Backend::Remote(fs) => fs.attributes(node.remote()?),
         }
     }
 
@@ -277,9 +314,9 @@ impl FilesystemInstance {
             Backend::RamFs(fs) => fs
                 .lookup(directory.ramfs()?, name)
                 .map(|node| node.map(NodeLease::from_ramfs)),
-            Backend::Fat(fs) => fs
-                .lookup(directory.fat()?, name)
-                .map(|node| node.map(NodeLease::from_fat)),
+            Backend::Remote(fs) => fs
+                .lookup(directory.remote()?, name)
+                .map(|node| node.map(NodeLease::from_remote)),
         }
     }
 
@@ -288,7 +325,7 @@ impl FilesystemInstance {
     fn read_status(&self) -> Result<(), Error> {
         match &self.backend {
             Backend::RamFs(_) => Ok(()),
-            Backend::Fat(fs) => fs.read_status(),
+            Backend::Remote(fs) => fs.read_status(),
         }
     }
 
@@ -304,17 +341,19 @@ impl FilesystemInstance {
     /// revision through lookup, backend reads and copying. The caller must copy
     /// to userspace only after this call releases the gate. Cache admission is
     /// opportunistic; inability to retain a page does not fail a backend read.
-    pub(super) fn read_file(
+    pub(super) fn read_file_observed(
         &self,
         node: &NodeLease,
         cache: &FileDataCache<CachePage>,
         offset: u64,
         destination: &mut [u8],
-    ) -> Result<usize, Error> {
+    ) -> Result<(usize, Option<ReadObservation>), Error> {
         let mut content = node.content().lock()?;
         self.read_status()?;
         match self.read_cache_policy() {
-            ReadCachePolicy::Direct => self.read_backend_at(node, offset, destination),
+            ReadCachePolicy::Direct => self
+                .read_backend_at(node, offset, destination)
+                .map(|bytes| (bytes, None)),
             ReadCachePolicy::PageCache => {
                 let length =
                     content.length(|| self.attributes(node).map(|attributes| attributes.size()))?;
@@ -325,22 +364,84 @@ impl FilesystemInstance {
                 );
                 // The guard covers both cache publication and the copy into
                 // kernel scratch. Callers release it before user-page access.
-                io_cache::read(
+                let (bytes, had_miss) = io_cache::read_observed(
                     cache,
                     identity,
-                    &node.fat()?.record,
+                    &node.remote()?.record,
                     length,
                     offset,
                     destination,
                     |offset, output| self.read_backend_at(node, offset, output),
                 )
-                .map_err(|error| match error {
-                    ReadError::Backend(error) => error,
-                    ReadError::InvalidBackendResult => Error::InvalidBackendResult,
-                    ReadError::ArithmeticOverflow => Error::InvalidInput,
-                })
+                .map_err(read_error)?;
+                Ok((
+                    bytes,
+                    Some(ReadObservation {
+                        identity,
+                        length,
+                        had_miss,
+                    }),
+                ))
             }
         }
+    }
+
+    /// Weak queue owners may retain allocation headers after the last strong
+    /// owner drops its ordinary charge. Keep a conservative independent charge
+    /// until the prediction and all of its weak references are gone.
+    pub(super) fn reserve_read_ahead_metadata(&self) -> Result<CommittedCharge, Error> {
+        let Backend::Remote(fs) = &self.backend else {
+            return Err(Error::Unsupported);
+        };
+        let bytes = FallibleArc::<Self>::allocation_size()
+            .checked_add(FallibleArc::<super::remote::Node>::allocation_size())
+            .and_then(|bytes| bytes.checked_add(FallibleArc::<FileRecord>::allocation_size()))
+            .and_then(|bytes| {
+                bytes.checked_add(FallibleArc::<FileDataCache<CachePage>>::allocation_size())
+            })
+            .ok_or(Error::Allocation)?;
+        fs.reserve_read_ahead_metadata(bytes)
+    }
+
+    /// Opportunistic fill for a previously observed content incarnation. It
+    /// never waits for a busy content/volume gate and never predicts more work.
+    pub(super) fn prefetch_file(
+        &self,
+        record: &FallibleArc<FileRecord>,
+        cache: &FileDataCache<CachePage>,
+        expected: FileIdentity,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> Result<(), Error> {
+        let Backend::Remote(fs) = &self.backend else {
+            return Ok(());
+        };
+        let Some(content) = record.content.try_lock()? else {
+            return Ok(());
+        };
+        let identity = FileIdentity::new(
+            self.cache_generation(),
+            NodeIdentity::new(NonZeroU64::new(record.id()).ok_or(Error::NotRegularFile)?),
+            content.revision(),
+        );
+        if identity != expected || !cache.prefetch_allowed() {
+            return Ok(());
+        }
+        let Some(length) = content.known_length() else {
+            return Ok(());
+        };
+        self.read_status()?;
+        io_cache::read(
+            cache,
+            identity,
+            record,
+            length,
+            offset,
+            destination,
+            |at, bytes| fs.try_read(record, at, bytes)?.ok_or(Error::Busy),
+        )
+        .map_err(read_error)?;
+        Ok(())
     }
 
     /// Raw regular-file reads are private to the content coordinator. A
@@ -353,7 +454,7 @@ impl FilesystemInstance {
     ) -> Result<usize, Error> {
         match &self.backend {
             Backend::RamFs(fs) => fs.read(node.ramfs()?, offset, destination, false),
-            Backend::Fat(fs) => fs.read(node.fat()?, offset, destination, false),
+            Backend::Remote(fs) => fs.read(node.remote()?, offset, destination, false),
         }
     }
 
@@ -364,7 +465,7 @@ impl FilesystemInstance {
     ) -> Result<usize, Error> {
         match &self.backend {
             Backend::RamFs(fs) => fs.read(node.ramfs()?, 0, destination, true),
-            Backend::Fat(fs) => fs.read(node.fat()?, 0, destination, true),
+            Backend::Remote(fs) => fs.read(node.remote()?, 0, destination, true),
         }
     }
 
@@ -375,7 +476,7 @@ impl FilesystemInstance {
     ) -> Result<Option<DirectoryEntry>, Error> {
         match &self.backend {
             Backend::RamFs(fs) => fs.entry(node.ramfs()?, cookie),
-            Backend::Fat(fs) => fs.entry(node.fat()?, cookie),
+            Backend::Remote(fs) => fs.entry(node.remote()?, cookie),
         }
     }
 
@@ -393,7 +494,7 @@ impl FilesystemInstance {
         self.read_status()?;
         match &self.backend {
             Backend::RamFs(fs) => fs.executable(node.ramfs()?, sponsor),
-            Backend::Fat(fs) => fs.executable(node.fat()?, sponsor),
+            Backend::Remote(fs) => fs.executable(node.remote()?, sponsor),
         }
     }
 
@@ -413,7 +514,7 @@ impl FilesystemInstance {
         content.begin_mutation()?;
         match &self.backend {
             Backend::RamFs(fs) => fs.write(node.ramfs()?, offset, input),
-            Backend::Fat(fs) => fs.write(node.fat()?, offset, input),
+            Backend::Remote(fs) => fs.write(node.remote()?, offset, input),
         }
     }
 
@@ -422,7 +523,7 @@ impl FilesystemInstance {
         content.begin_mutation()?;
         match &self.backend {
             Backend::RamFs(fs) => fs.resize(node.ramfs()?, length),
-            Backend::Fat(fs) => fs.resize(node.fat()?, length),
+            Backend::Remote(fs) => fs.resize(node.remote()?, length),
         }?;
         content.set_length(length);
         Ok(())
@@ -431,13 +532,13 @@ impl FilesystemInstance {
     pub(super) fn epoch(&self) -> u64 {
         match &self.backend {
             Backend::RamFs(fs) => fs.epoch(),
-            Backend::Fat(fs) => fs.epoch(),
+            Backend::Remote(fs) => fs.epoch(),
         }
     }
     pub(super) fn wait_for_namespace(&self) -> Result<(), Error> {
         match &self.backend {
             Backend::RamFs(fs) => fs.wait_for_namespace(),
-            Backend::Fat(fs) => fs.wait_for_namespace(),
+            Backend::Remote(fs) => fs.wait_for_namespace(),
         }
     }
     pub(super) fn ancestry(
@@ -453,9 +554,9 @@ impl FilesystemInstance {
                     result.push((NodeLease::from_ramfs(node), name))?;
                 }
             }
-            Backend::Fat(fs) => {
-                for (node, name) in fs.ancestry(root.fat()?, start.fat()?, budget)? {
-                    result.push((NodeLease::from_fat(node), name))?;
+            Backend::Remote(fs) => {
+                for (node, name) in fs.ancestry(root.remote()?, start.remote()?, budget)? {
+                    result.push((NodeLease::from_remote(node), name))?;
                 }
             }
         }
@@ -467,7 +568,7 @@ impl FilesystemInstance {
     ) -> Result<(NodeAttributes, NodeMetadata), Error> {
         match &self.backend {
             Backend::RamFs(_) => node.ramfs()?.metadata(),
-            Backend::Fat(fs) => fs.metadata(node.fat()?),
+            Backend::Remote(fs) => fs.metadata(node.remote()?),
         }
     }
     pub(super) fn set_metadata(
@@ -477,7 +578,7 @@ impl FilesystemInstance {
     ) -> Result<(), Error> {
         match &self.backend {
             Backend::RamFs(_) => node.ramfs()?.set_metadata(update),
-            Backend::Fat(fs) => fs.set_metadata(node.fat()?, update),
+            Backend::Remote(fs) => fs.set_metadata(node.remote()?, update),
         }
     }
     pub(super) fn create_at<R, E: From<Error>>(
@@ -496,12 +597,14 @@ impl FilesystemInstance {
                     publish(NodeLease::from_ramfs(node), attributes)
                 })
             }
-            Backend::Fat(fs) => fs.create(directory.fat()?, name, creation, Some(epoch), |node| {
-                publish(
-                    NodeLease::from_fat(node),
-                    NodeAttributes::new(kind, 0o777, 0),
-                )
-            }),
+            Backend::Remote(fs) => {
+                fs.create(directory.remote()?, name, creation, Some(epoch), |node| {
+                    publish(
+                        NodeLease::from_remote(node),
+                        NodeAttributes::new(kind, 0o777, 0),
+                    )
+                })
+            }
         }
     }
     pub(super) fn open_existing<R, E: From<Error>>(
@@ -519,7 +622,7 @@ impl FilesystemInstance {
         // Actual handle publication follows a successful backend operation.
         let prepared = match &self.backend {
             Backend::RamFs(fs) => fs.open_existing(node.ramfs()?, truncate, publish),
-            Backend::Fat(fs) => fs.open_existing(node.fat()?, truncate, publish),
+            Backend::Remote(fs) => fs.open_existing(node.remote()?, truncate, publish),
         }?;
         if truncate {
             content.set_length(0);
@@ -536,7 +639,9 @@ impl FilesystemInstance {
     ) -> Result<(), Error> {
         match &self.backend {
             Backend::RamFs(fs) => fs.remove(directory.ramfs()?, name, kind, expected, Some(epoch)),
-            Backend::Fat(fs) => fs.remove(directory.fat()?, name, kind, expected, Some(epoch)),
+            Backend::Remote(fs) => {
+                fs.remove(directory.remote()?, name, kind, expected, Some(epoch))
+            }
         }
     }
     pub(super) fn link(
@@ -548,7 +653,7 @@ impl FilesystemInstance {
     ) -> Result<(), Error> {
         match &self.backend {
             Backend::RamFs(fs) => fs.link(node.ramfs()?, directory.ramfs()?, name, epoch),
-            Backend::Fat(fs) => fs.link(node.fat()?, directory.fat()?, name, epoch),
+            Backend::Remote(fs) => fs.link(node.remote()?, directory.remote()?, name, epoch),
         }
     }
     pub(super) fn rename(
@@ -563,7 +668,13 @@ impl FilesystemInstance {
             Backend::RamFs(fs) => {
                 fs.rename(source.ramfs()?, name, destination.ramfs()?, new_name, epoch)
             }
-            Backend::Fat(fs) => fs.rename(source.fat()?, name, destination.fat()?, new_name, epoch),
+            Backend::Remote(fs) => fs.rename(
+                source.remote()?,
+                name,
+                destination.remote()?,
+                new_name,
+                epoch,
+            ),
         }
     }
     pub(super) fn sync(&self, node: &NodeLease, scope: u64) -> Result<(), Error> {
@@ -574,7 +685,7 @@ impl FilesystemInstance {
         // backend contract, without claiming survival across reboot.
         match &self.backend {
             Backend::RamFs(_) => Ok(()),
-            Backend::Fat(fs) => fs.sync(node.fat()?, scope),
+            Backend::Remote(fs) => fs.sync(node.remote()?, scope),
         }
     }
 }
@@ -610,6 +721,10 @@ impl Mount {
     }
 
     pub(crate) fn filesystem(&self) -> &FilesystemInstance {
+        &self.filesystem
+    }
+
+    pub(super) fn filesystem_owner(&self) -> &FallibleArc<FilesystemInstance> {
         &self.filesystem
     }
 
@@ -715,6 +830,14 @@ fn allocate_identifier(source: &AtomicU64) -> Result<u64, Error> {
             Ok(_) => return Ok(current),
             Err(observed) => current = observed,
         }
+    }
+}
+
+fn read_error(error: ReadError<Error>) -> Error {
+    match error {
+        ReadError::Backend(error) => error,
+        ReadError::InvalidBackendResult => Error::InvalidBackendResult,
+        ReadError::ArithmeticOverflow => Error::InvalidInput,
     }
 }
 

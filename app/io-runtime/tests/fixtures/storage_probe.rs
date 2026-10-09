@@ -197,7 +197,7 @@ fn cache_transitions() -> io::Result<()> {
 
 fn remove_closed_file(path: &str) -> io::Result<()> {
     // Closing handles retires their authority synchronously, but FileObject
-    // destruction runs on the kernel reaper. FAT rejects live node leases
+    // destruction runs on the kernel reaper. VFS rejects live node leases
     // until then. Cached pages must not keep that lease alive indefinitely.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

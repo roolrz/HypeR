@@ -39,6 +39,8 @@ pub(super) struct AuthorityInventory {
     pub(super) io_broker_server: Option<OwnedHandle<CapabilityChannelObject>>,
     pub(super) io_broker_client: Option<OwnedHandle<CapabilityChannelObject>>,
     pub(super) io_ready_channel: Option<OwnedHandle<ByteChannelObject>>,
+    pub(super) filesystem_attach: Option<OwnedHandle<CapabilityChannelObject>>,
+    pub(super) filesystem_provider: Option<OwnedHandle<CapabilityChannelObject>>,
 }
 
 /// VM authority and transport are prepared together only for a configured fleet.
@@ -164,13 +166,18 @@ impl AuthorityInventory {
                 return self.move_channel_into_builder(authority, builder, purpose, rights);
             }
             (
-                BootstrapAuthority::IoBrokerServer | BootstrapAuthority::IoBrokerClient,
+                authority @ (BootstrapAuthority::IoBrokerServer
+                | BootstrapAuthority::IoBrokerClient
+                | BootstrapAuthority::FilesystemAttach
+                | BootstrapAuthority::FilesystemProvider),
                 CapabilityOperation::Move,
             ) if kind == CapabilityChannelObject::KIND.as_raw() => {
-                let slot = if authority == BootstrapAuthority::IoBrokerServer {
-                    &mut self.io_broker_server
-                } else {
-                    &mut self.io_broker_client
+                let slot = match authority {
+                    BootstrapAuthority::IoBrokerServer => &mut self.io_broker_server,
+                    BootstrapAuthority::IoBrokerClient => &mut self.io_broker_client,
+                    BootstrapAuthority::FilesystemAttach => &mut self.filesystem_attach,
+                    BootstrapAuthority::FilesystemProvider => &mut self.filesystem_provider,
+                    _ => return Err(LaunchError::UnsupportedAuthority),
                 };
                 let handle = slot.take().ok_or(LaunchError::UnsupportedAuthority)?;
                 return builder

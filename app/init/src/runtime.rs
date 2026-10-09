@@ -156,6 +156,8 @@ impl Runtime {
             io_ready_channel: None,
             io_broker_server: None,
             io_broker_client: None,
+            filesystem_attach: None,
+            filesystem_provider: None,
         };
         Ok(Self {
             launcher: ServiceLauncher { authorities },
@@ -250,6 +252,14 @@ impl Runtime {
         plan: &LaunchPlan<'_>,
     ) -> Result<Infallible, LaunchError> {
         Self::preflight(manifest)?;
+        if hyper_init::bootstrap_policy::filesystem_enabled(plan)
+            .map_err(|_| LaunchError::InvalidPlan)?
+        {
+            let (manager, provider) =
+                CapabilityChannel::create().map_err(|_| LaunchError::OperatingSystem)?;
+            self.launcher.authorities.filesystem_attach = Some(manager.into_handle());
+            self.launcher.authorities.filesystem_provider = Some(provider.into_handle());
+        }
         if hyper_init::bootstrap_policy::io_broker_enabled(plan)
             .map_err(|_| LaunchError::InvalidPlan)?
         {
@@ -311,6 +321,8 @@ impl Runtime {
                     // not leave an unused readiness or broker peer alive.
                     self.launcher.authorities.io_ready_channel.take();
                     self.launcher.authorities.io_broker_server.take();
+                    self.launcher.authorities.filesystem_attach.take();
+                    self.launcher.authorities.filesystem_provider.take();
                 }
             }
             drop(ready_reader);

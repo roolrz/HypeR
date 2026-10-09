@@ -12,7 +12,6 @@
 //! Kernel-owned VFS namespace, capability objects, and file-data policy.
 
 mod executable;
-mod fat;
 mod file_data;
 mod file_record;
 pub(crate) mod instance;
@@ -23,7 +22,9 @@ mod mounts;
 pub(crate) mod namespace_test;
 mod objects;
 mod ramfs;
+pub(crate) mod read_ahead;
 mod read_contract;
+pub(super) mod remote;
 mod resolve;
 mod resolve_state;
 mod rights_contract;

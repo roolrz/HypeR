@@ -24,10 +24,10 @@ Host Extensions).
 
 ```mermaid
 flowchart TB
-    Apps("Native userspace<br/>Applications · VM management · I/O services")
+    Apps("Native userspace<br/>Applications · VM management · I/O services · Filesystems")
     Guests("Guest VMs")
 
-    Kernel["HypeR kernel<br/>Scheduling · Memory · Capabilities · Virtualization<br/>VFS · FAT · Native block frontend for /data"]
+    Kernel["HypeR kernel<br/>Scheduling · Memory · Capabilities · Virtualization<br/>VFS · Page cache · Native block frontend for /data"]
     IO["Independent trusted Linux I/O VM<br/>vhost-scsi / LIO · vhost-net / TAP · Physical drivers"]
     Disk[("Physical storage")]
     Net[("Network uplink")]

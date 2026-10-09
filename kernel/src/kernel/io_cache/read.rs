@@ -53,6 +53,24 @@ pub(crate) enum ReadError<E> {
     ArithmeticOverflow,
 }
 
+/// Report backend use to sequential prediction without a second cache probe.
+pub(crate) fn read_observed<E, Owner: Clone>(
+    cache: &FileDataCache<FilePage<Owner>>,
+    file: FileIdentity,
+    owner: &Owner,
+    file_len: u64,
+    offset: u64,
+    output: &mut [u8],
+    mut read_at: impl FnMut(u64, &mut [u8]) -> Result<usize, E>,
+) -> Result<(usize, bool), ReadError<E>> {
+    let mut had_miss = false;
+    let count = read(cache, file, owner, file_len, offset, output, |at, bytes| {
+        had_miss = true;
+        read_at(at, bytes)
+    })?;
+    Ok((count, had_miss))
+}
+
 /// The caller retains its file-content lock through this call, including cache
 /// lookup and copying. `file`, `file_len`, and every backend read must describe
 /// that same content revision. The caller checks backend health before entry;

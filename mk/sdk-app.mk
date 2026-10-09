@@ -41,7 +41,7 @@ sdk-check: sdk
 		--workspace --target "$(NATIVE_FREESTANDING_TARGET)" --lib -- -D warnings
 	CARGO_TARGET_DIR="$(CURDIR)/target/sdk-rust-host" $(CARGO) clippy \
 		--manifest-path "$(SDK_RUST_SOURCE)/Cargo.toml" \
-		--target "$(HOST_TARGET)" -p hyper-os -p hyper-service -p hyper-sys -p hyper-vm-image \
+		--target "$(HOST_TARGET)" -p hyper-os -p hyper-service -p hyper-sys -p hyper-vm-image -p hyper-filesystem -p hyper-fatfs \
 		--all-targets -- -D warnings
 	$(CARGO) fmt --manifest-path "tools/fit-pack/Cargo.toml" -- --check
 	CARGO_TARGET_DIR="$(FIT_PACK_TARGET)" $(CARGO) clippy \
@@ -68,7 +68,7 @@ sdk-test:
 		--target "$(HOST_TARGET)" --all-features
 	CARGO_TARGET_DIR="$(CURDIR)/target/sdk-rust-tests" $(CARGO) test \
 		--manifest-path "$(SDK_RUST_SOURCE)/Cargo.toml" \
-		--target "$(HOST_TARGET)" -p hyper-os -p hyper-service -p hyper-sys -p hyper-vm-image
+		--target "$(HOST_TARGET)" -p hyper-os -p hyper-service -p hyper-sys -p hyper-vm-image -p hyper-filesystem -p hyper-fatfs
 	CARGO_TARGET_DIR="$(FIT_PACK_TARGET)" $(CARGO) test \
 		--manifest-path "tools/fit-pack/Cargo.toml" --target "$(HOST_TARGET)"
 	cmake -S "$(SDK_LIB_SOURCE)/tests/unit" -B "$(SDK_LIB_TEST_OUTPUT)" \
@@ -129,6 +129,8 @@ app-test:
 		--target "$(HOST_TARGET)" --locked $(APP_TEST_ARGS) \
 		--config "patch.crates-io.hyper-abi.path = '$(SDK_ABI_SOURCE)'" \
 		--config "patch.crates-io.hyper-os.path = '$(SDK_RUST_SOURCE)/hyper-os'" \
+		--config "patch.crates-io.hyper-filesystem.path = '$(SDK_RUST_SOURCE)/hyper-filesystem'" \
+		--config "patch.crates-io.hyper-fatfs.path = '$(SDK_RUST_SOURCE)/hyper-fatfs'" \
 		--config "patch.crates-io.hyper-rt.path = '$(SDK_RUST_SOURCE)/hyper-rt'" \
 		--config "patch.crates-io.hyper-service.path = '$(SDK_RUST_SOURCE)/hyper-service'" \
 		--config "patch.crates-io.hyper-vm-image.path = '$(SDK_RUST_SOURCE)/hyper-vm-image'" \
@@ -140,6 +142,8 @@ app-sdk-test: app-fetch
 		--target "$(HOST_TARGET)" --locked --offline \
 		--config "patch.crates-io.hyper-abi.path = '$(SDK_OUTPUT)/share/hyper/abi'" \
 		--config "patch.crates-io.hyper-os.path = '$(SDK_OUTPUT)/share/hyper/rust/hyper-os'" \
+		--config "patch.crates-io.hyper-filesystem.path = '$(SDK_OUTPUT)/share/hyper/rust/hyper-filesystem'" \
+		--config "patch.crates-io.hyper-fatfs.path = '$(SDK_OUTPUT)/share/hyper/rust/hyper-fatfs'" \
 		--config "patch.crates-io.hyper-rt.path = '$(SDK_OUTPUT)/share/hyper/rust/hyper-rt'" \
 		--config "patch.crates-io.hyper-service.path = '$(SDK_OUTPUT)/share/hyper/rust/hyper-service'" \
 		--config "patch.crates-io.hyper-vm-image.path = '$(SDK_OUTPUT)/share/hyper/rust/hyper-vm-image'" \

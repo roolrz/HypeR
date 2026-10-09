@@ -20,6 +20,7 @@ pub const STARTUP_CONTRACTS: &[StartupContract] = &[
     vm::MANAGER_CREATION_AUTHORITY_CONTRACT,
     READY_CONTRACT,
     BROKER_SERVER_CONTRACT,
+    crate::filesystem::PROVIDER_CONTRACT,
     StartupContract::exact(
         DEVICE_AUTHORITY_NAME,
         startup::DEVICE_ASSIGNMENT_AUTHORITY,

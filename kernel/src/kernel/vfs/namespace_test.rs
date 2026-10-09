@@ -5,8 +5,6 @@
 
 #[path = "../../../tests/kernel/vfs_namespace/content.rs"]
 mod content;
-#[path = "../../../tests/kernel/vfs_namespace/fat_identity.rs"]
-mod fat_identity;
 
 static EMPTY_ARCHIVE: &[u8] = b"07070100000001000000000000000000000000000000010000000000000000000000000000000000000000000000000000000b00000000TRAILER!!!\0\0\0\0";
 
@@ -42,7 +40,7 @@ fn check(condition: bool, label: &'static str) -> Result<(), TestError> {
 pub(crate) fn run() -> Result<(), TestError> {
     let domain =
         ResourceDomain::try_new_root(ResourceLimits::UNLIMITED).map_err(Error::Resource)?;
-    fat_identity::run(&domain)?;
+    super::remote::test_record_storage(&domain)?;
     let scratch = ScratchBudget::new(&domain);
     let archive = RamFs::from_newc(EMPTY_ARCHIVE)
         .map_err(|error| Error::Backend(super::instance::Error::RamFs(error)))?;

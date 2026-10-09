@@ -24,7 +24,8 @@ pub(crate) type CachePage = crate::kernel::io_cache::FilePage<FallibleArc<FileRe
 /// cache locks, while its caller holds unrelated kernel locks. Keep destruction
 /// limited to quiescent scalar/mutex storage, atomic quota release, and ordinary
 /// deallocation. Adding callbacks or other owners requires re-auditing that
-/// contract. Live content guards retain an active node and prevent final drop.
+/// contract. Demand content guards retain an active node; speculative guards
+/// retain this record alone and do not extend namespace-lease lifetime.
 pub(crate) struct FileRecord {
     id: u64,
     pub(super) content: FileContent,

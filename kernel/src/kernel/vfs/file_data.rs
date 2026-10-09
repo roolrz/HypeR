@@ -45,9 +45,22 @@ impl FileContent {
             state: self.state.lock().map_err(Error::Lock)?,
         })
     }
+
+    /// Speculative work must not queue ahead of a demand reader or mutation.
+    pub(super) fn try_lock(&self) -> Result<Option<ContentGuard<'_>>, Error> {
+        Ok(self
+            .state
+            .try_lock()
+            .map_err(Error::Lock)?
+            .map(|state| ContentGuard { state }))
+    }
 }
 
 impl ContentGuard<'_> {
+    pub(super) fn known_length(&self) -> Option<u64> {
+        self.state.known_length
+    }
+
     pub(super) fn revision(&self) -> ContentRevision {
         ContentRevision::new(self.state.revision)
     }

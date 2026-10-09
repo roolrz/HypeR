@@ -535,7 +535,6 @@ pub(super) fn status_from_console_service_error(error: ConsoleServiceError) -> H
 
 pub(super) fn status_from_vfs_service_error(error: VfsServiceError) -> HyperNativeStatus {
     match error {
-        VfsServiceError::Block(error) => status_from_vm_service_error(error),
         VfsServiceError::FileLock(error) => {
             use crate::kernel::vfs::locks::LockError;
             match error {
@@ -560,18 +559,14 @@ pub(super) const fn status_from_vfs_error(error: VfsError) -> HyperNativeStatus 
     match error {
         VfsError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
         VfsError::AllocationSize => HYPER_NATIVE_STATUS_INTERNAL,
-        VfsError::Backend(crate::kernel::vfs::instance::Error::Fat(error)) => {
-            use hyper::fs::{block::Error as BlockError, fat::Error as FatError};
+        VfsError::Backend(crate::kernel::vfs::instance::Error::Remote(error)) => {
+            use hyper_filesystem::protocol::Error as BackendError;
             match error {
-                FatError::NoSpace => hyper::abi::native::HYPER_NATIVE_STATUS_NO_SPACE,
-                FatError::Block(BlockError::ReadOnly) => {
-                    hyper::abi::native::HYPER_NATIVE_STATUS_READ_ONLY
-                }
-                FatError::Unsupported | FatError::Block(BlockError::Unsupported) => {
-                    HYPER_NATIVE_STATUS_NOT_SUPPORTED
-                }
-                FatError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
-                FatError::Block(BlockError::Exhausted) => HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
+                BackendError::NoSpace => hyper::abi::native::HYPER_NATIVE_STATUS_NO_SPACE,
+                BackendError::ReadOnly => hyper::abi::native::HYPER_NATIVE_STATUS_READ_ONLY,
+                BackendError::Unsupported => HYPER_NATIVE_STATUS_NOT_SUPPORTED,
+                BackendError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
+                BackendError::ResourceLimit => HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
                 _ => hyper::abi::native::HYPER_NATIVE_STATUS_IO_ERROR,
             }
         }

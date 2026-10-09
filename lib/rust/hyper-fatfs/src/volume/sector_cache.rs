@@ -30,7 +30,7 @@ impl Cache {
             .try_reserve_exact(WINDOWS * WINDOW_BYTES)
             .map_err(|_| Error::Allocation)?;
         bytes.resize(WINDOWS * WINDOW_BYTES, 0);
-        crate::mm::try_box(Self {
+        crate::allocation::try_box(Self {
             bytes,
             first: [None; WINDOWS],
             next: 0,

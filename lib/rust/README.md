@@ -18,6 +18,8 @@ them with the Rust toolchain selected for the application.
 | `hyper-os` | Safe capability-oriented operating-system interfaces |
 | `hyper-rt` | Rust application entry, process-heap allocator, panic termination, and exit status |
 | `hyper-service` | Shared typed startup contracts for Native system services |
+| `hyper-filesystem` | Bounded filesystem service wire protocol, metadata types and format hints |
+| `hyper-fatfs` | Userspace FAT32 engine and bounded media admission; uses the vendored MIT FAT implementation |
 | `hyper-vm-image` | Bounded FIT parsing and guest boot metadata for Native VMMs |
 
 Unsafe machine interactions are confined to `hyper-sys`. Application code

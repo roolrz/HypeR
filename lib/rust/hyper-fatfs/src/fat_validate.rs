@@ -6,7 +6,7 @@
 //! proof as well as FAT's ordinary cache coherency contract.
 
 use super::block::{BlockDevice, SECTOR_SIZE};
-use super::fat::Error;
+use super::volume::Error;
 use alloc::vec::Vec;
 
 pub(super) fn validate<D: BlockDevice>(

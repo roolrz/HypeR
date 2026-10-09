@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Disk-backed FAT namespace adapter. All media access is serialized by one
+//! Userspace filesystem namespace adapter. All backend access is serialized by one
 //! sleepable volume mutex. Live leases prevent unlink; rename updates every
 //! retained descendant path before releasing the namespace transaction.
 
@@ -17,15 +17,16 @@ use crate::kernel::mm::user_space::{DomainAccount, KernelPageBackend, SnapshotVm
 use crate::kernel::sync::Mutex;
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
-use hyper::fs::block::{BlockDevice, Error as BlockError};
-use hyper::fs::fat::{Entry, Error as FatError, FatVolume};
+use hyper_filesystem::protocol::{Entry, Error as BackendError};
+mod transport;
 use hyper::fs::{MAX_NAME_BYTES, MAX_PATH_BYTES, Name, NodeAttributes, NodeKind};
 use hyper::mm::{FallibleArc, WeakFallibleArc};
+pub(super) use transport::Transport;
 
 mod records;
 use records::{PreparedRecord, Records};
 #[cfg(feature = "kernel-self-test")]
-#[path = "../../../tests/kernel/fat_records.rs"]
+#[path = "../../../tests/kernel/vfs_records.rs"]
 mod records_test;
 #[cfg(feature = "kernel-self-test")]
 pub(super) use records_test::run as test_record_storage;
@@ -54,17 +55,18 @@ struct Record {
     content: WeakFallibleArc<FileRecord>,
     _charge: CommittedCharge,
 }
-struct State<D: BlockDevice> {
-    volume: FatVolume<D>,
+struct State {
+    volume: Transport,
     metadata: Box<Entry>,
     records: Records,
     next_id: u64,
 }
-pub(super) struct Fatfs<D: BlockDevice> {
-    state: Mutex<State<D>>,
+pub(super) struct RemoteFs {
+    state: Mutex<State>,
     root: FallibleArc<Node>,
     domain: ResourceDomain,
     epoch: AtomicU64,
+    health: FallibleArc<transport::Health>,
     _charge: CommittedCharge,
 }
 struct Mutation<'a>(&'a AtomicU64, u64);
@@ -73,24 +75,16 @@ impl Drop for Mutation<'_> {
         self.0.store(self.1, Ordering::Release);
     }
 }
-impl<D: BlockDevice> Fatfs<D> {
+impl RemoteFs {
     #[inline(never)]
-    pub(super) fn mount(device: D, domain: ResourceDomain) -> Result<Self, Error> {
-        let scratch = charge(
-            &domain,
-            FatVolume::<D>::mount_scratch_bound(device.sector_count()).map_err(map)?,
-        )?;
+    pub(super) fn mount(volume: Transport, domain: ResourceDomain) -> Result<Self, Error> {
         let persistent = charge(
             &domain,
-            FallibleArc::<Self>::allocation_size()
-                .checked_add(FatVolume::<D>::allocation_bytes())
-                .and_then(|bytes| bytes.checked_add(core::mem::size_of::<Entry>()))
-                .ok_or(Error::Allocation)?,
+            FallibleArc::<Self>::allocation_size() + core::mem::size_of::<Entry>(),
         )?;
         let metadata = metadata_scratch()?;
-        let volume = mount_volume(device)?;
-        drop(scratch);
         let root = node(FileRecord::try_new(0, &domain)?, &domain)?;
+        let health = volume.health.clone();
         let mut state = State {
             volume,
             metadata,
@@ -109,6 +103,7 @@ impl<D: BlockDevice> Fatfs<D> {
             root,
             domain,
             epoch: AtomicU64::new(0),
+            health,
             _charge: persistent,
         })
     }
@@ -129,12 +124,14 @@ impl<D: BlockDevice> Fatfs<D> {
         self.root.clone()
     }
     pub(super) fn read_status(&self) -> Result<(), Error> {
-        self.state
-            .lock()
-            .map_err(Error::Lock)?
-            .volume
-            .read_status()
-            .map_err(map)
+        self.health.check().map_err(map)
+    }
+    pub(super) fn reserve_read_ahead_metadata(
+        &self,
+        bytes: usize,
+    ) -> Result<CommittedCharge, Error> {
+        // Speculation must not initiate quota reclaim or wait for volume state.
+        charge(&self.domain, bytes)
     }
     pub(super) fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
@@ -226,9 +223,9 @@ impl<D: BlockDevice> Fatfs<D> {
             attributes,
             NodeMetadata {
                 mode: attributes.mode(),
-                accessed: entry.accessed,
-                modified: entry.modified,
-                created: entry.created,
+                accessed: entry.accessed.and_then(to_kernel_time),
+                modified: entry.modified.and_then(to_kernel_time),
+                created: entry.created.and_then(to_kernel_time),
                 changed: None,
             },
         ))
@@ -250,7 +247,11 @@ impl<D: BlockDevice> Fatfs<D> {
         }
         state
             .volume
-            .set_times(&path, update.accessed, update.modified)
+            .set_times(
+                &path,
+                update.accessed.map(to_service_time),
+                update.modified.map(to_service_time),
+            )
             .map_err(map)
     }
     #[inline(never)]
@@ -284,27 +285,22 @@ impl<D: BlockDevice> Fatfs<D> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
         let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(directory)?;
-        let mut index = usize::try_from(cookie).map_err(|_| Error::InvalidDirectoryCookie)?;
-        loop {
-            let Some(entry) = state.entry(&path, index)? else {
-                return Ok(None);
-            };
-            index = index.checked_add(1).ok_or(Error::InvalidDirectoryCookie)?;
-            if matches!(entry.name(), "." | "..") {
-                continue;
-            }
-            if entry.name_len > MAX_NAME_BYTES {
-                return Err(Error::InvalidBackendResult);
-            }
-            let mut name = [0; MAX_NAME_BYTES];
-            name[..entry.name_len].copy_from_slice(&entry.name[..entry.name_len]);
-            return Ok(Some(EntrySnapshot {
-                name,
-                length: entry.name_len,
-                attributes: attributes(entry),
-                next_cookie: index as u64,
-            }));
+        let index = usize::try_from(cookie).map_err(|_| Error::InvalidDirectoryCookie)?;
+        let Some(entry) = state.entry(&path, index)? else {
+            return Ok(None);
+        };
+        let next_cookie = cookie.checked_add(1).ok_or(Error::InvalidDirectoryCookie)?;
+        if entry.name_len == 0 || entry.name_len > MAX_NAME_BYTES {
+            return Err(Error::InvalidBackendResult);
         }
+        let mut name = [0; MAX_NAME_BYTES];
+        name[..entry.name_len].copy_from_slice(&entry.name[..entry.name_len]);
+        Ok(Some(EntrySnapshot {
+            name,
+            length: entry.name_len,
+            attributes: attributes(entry),
+            next_cookie,
+        }))
     }
     #[inline(never)]
     pub(super) fn read(
@@ -320,12 +316,29 @@ impl<D: BlockDevice> Fatfs<D> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
         let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
-        if state.is_directory(&path)? {
-            return Err(Error::IsDirectory);
-        }
         state
             .volume
             .read_at(&path, offset, destination)
+            .map_err(map)
+    }
+    /// Background read admission never queues behind an active filesystem RPC.
+    pub(super) fn try_read(
+        &self,
+        record: &FileRecord,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> Result<Option<usize>, Error> {
+        let Some(mut state) = self.state.try_lock().map_err(Error::Lock)? else {
+            return Ok(None);
+        };
+        // Speculation must not start quota reclaim while owning content and
+        // volume gates; demand preparation retains the bounded reclaim retry.
+        let _paths = charge(&self.domain, MAX_PATH_BYTES)?;
+        let path = state.path_for_id(record.id())?;
+        state
+            .volume
+            .read_at(&path, offset, destination)
+            .map(Some)
             .map_err(map)
     }
     #[inline(never)]
@@ -339,13 +352,18 @@ impl<D: BlockDevice> Fatfs<D> {
         let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         let entry = state.stat(&path)?;
-        if entry.directory {
+        if entry.directory() {
             return Err(Error::IsDirectory);
         }
-        if entry.read_only {
-            return Err(Error::Fat(FatError::Block(BlockError::ReadOnly)));
+        if entry.read_only() {
+            return Err(Error::Remote(BackendError::ReadOnly));
         }
         let offset = offset.unwrap_or(entry.size);
+        // A userspace worker controls stat results. Validate the entire write
+        // before publication, including append positions supplied by that worker.
+        offset
+            .checked_add(input.len() as u64)
+            .ok_or(Error::InvalidInput)?;
         let written = state.volume.write_at(&path, offset, input).map_err(map)?;
         Ok((written, offset + written as u64))
     }
@@ -355,11 +373,11 @@ impl<D: BlockDevice> Fatfs<D> {
         let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         let entry = state.stat(&path)?;
-        if entry.directory {
+        if entry.directory() {
             return Err(Error::IsDirectory);
         }
-        if entry.read_only {
-            return Err(Error::Fat(FatError::Block(BlockError::ReadOnly)));
+        if entry.read_only() {
+            return Err(Error::Remote(BackendError::ReadOnly));
         }
         state.volume.resize(&path, length).map_err(map)
     }
@@ -385,7 +403,7 @@ impl<D: BlockDevice> Fatfs<D> {
         let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         let entry = state.stat(&path)?;
-        if entry.directory {
+        if entry.directory() {
             return Ok(None);
         }
         let size = usize::try_from(entry.size).map_err(|_| Error::InvalidSize)?;
@@ -461,15 +479,15 @@ impl<D: BlockDevice> Fatfs<D> {
         let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         let entry = state.stat(&path)?;
-        if entry.directory {
+        if entry.directory() {
             return Err(Error::NotRegularFile.into());
         }
-        let read_only = entry.read_only;
+        let read_only = entry.read_only();
         let attributes = attributes(entry);
         let prepared = publish(attributes)?;
         if truncate {
             if read_only {
-                return Err(Error::Fat(FatError::Block(BlockError::ReadOnly)).into());
+                return Err(Error::Remote(BackendError::ReadOnly).into());
             }
             state.volume.resize(&path, 0).map_err(map)?;
         }
@@ -492,13 +510,13 @@ impl<D: BlockDevice> Fatfs<D> {
         let candidate = child(&parent, name.name)?;
         let entry = state.stat(&candidate)?;
         let path = join(&parent, entry.name())?;
-        if name.directory_required && !entry.directory {
+        if name.directory_required && !entry.directory() {
             return Err(Error::NotDirectory);
         }
-        if kind == NodeKind::Directory && !entry.directory {
+        if kind == NodeKind::Directory && !entry.directory() {
             return Err(Error::NotDirectory);
         }
-        if kind != NodeKind::Directory && entry.directory {
+        if kind != NodeKind::Directory && entry.directory() {
             return Err(Error::IsDirectory);
         }
         if state.records.iter().any(|record| {
@@ -542,12 +560,8 @@ impl<D: BlockDevice> Fatfs<D> {
         let candidate = child(&parent, name.name)?;
         let entry = state.stat(&candidate)?;
         let old = join(&parent, entry.name())?;
-        let directory = entry.directory;
-        let same_name = entry
-            .name()
-            .chars()
-            .flat_map(char::to_uppercase)
-            .eq(new_name.name.as_str().chars().flat_map(char::to_uppercase));
+        let directory = entry.directory();
+        let original_name = copy(entry.name())?;
         let destination_path = state.path(destination)?;
         if !state.is_directory(&destination_path)? {
             return Err(Error::NotDirectory);
@@ -556,9 +570,12 @@ impl<D: BlockDevice> Fatfs<D> {
         if (name.directory_required || new_name.directory_required) && !directory {
             return Err(Error::NotDirectory);
         }
-        // Upstream treats a same-entry case-only rename as a no-op and keeps
-        // its on-disk spelling. Preserve that spelling in the lease registry,
+        // A backend may resolve aliases (for example case-folded names) to
+        // the same canonical entry. Preserve that spelling in the registry,
         // otherwise the next canonical lookup creates a second lock identity.
+        let same_name = state
+            .stat(&new)
+            .is_ok_and(|entry| entry.name() == original_name);
         if parent == destination_path && same_name {
             return Ok(());
         }
@@ -612,7 +629,7 @@ impl<D: BlockDevice> Fatfs<D> {
             }
         }
         if replacements.next().is_some() {
-            hyper::debug::invariant_failure("FAT rename binding order changed");
+            hyper::debug::invariant_failure("filesystem rename binding order changed");
         }
         Ok(())
     }
@@ -647,7 +664,7 @@ impl<D: BlockDevice> Fatfs<D> {
         Ok(output)
     }
 }
-impl<D: BlockDevice> State<D> {
+impl State {
     fn reclaim_retry<T>(
         &mut self,
         mut operation: impl FnMut(&mut Self) -> Result<T, Error>,
@@ -728,15 +745,18 @@ impl<D: BlockDevice> State<D> {
         }
     }
     fn is_directory(&mut self, path: &str) -> Result<bool, Error> {
-        Ok(self.stat(path)?.directory)
+        Ok(self.stat(path)?.directory())
     }
 
     fn path(&self, node: &Node) -> Result<String, Error> {
+        self.path_for_id(node.id())
+    }
+    fn path_for_id(&self, id: u64) -> Result<String, Error> {
         copy(
             &self
                 .records
                 .iter()
-                .find(|record| record.id == node.id())
+                .find(|record| record.id == id)
                 .ok_or(Error::Missing)?
                 .path,
         )
@@ -836,24 +856,24 @@ fn within(path: &str, parent: &str) -> bool {
 }
 fn attributes(entry: &Entry) -> NodeAttributes {
     NodeAttributes::new(
-        if entry.directory {
+        if entry.directory() {
             NodeKind::Directory
         } else {
             NodeKind::File
         },
-        if entry.read_only { 0o555 } else { 0o777 },
+        entry.mode,
         entry.size,
     )
 }
-fn map(error: FatError) -> Error {
+fn map(error: BackendError) -> Error {
     match error {
-        FatError::Allocation => Error::Allocation,
-        FatError::Missing => Error::Missing,
-        FatError::Exists => Error::AlreadyExists,
-        FatError::NotEmpty => Error::NotEmpty,
-        FatError::InvalidInput => Error::InvalidInput,
-        FatError::Unsupported => Error::Unsupported,
-        other => Error::Fat(other),
+        BackendError::Allocation => Error::Allocation,
+        BackendError::Missing => Error::Missing,
+        BackendError::Exists => Error::AlreadyExists,
+        BackendError::NotEmpty => Error::NotEmpty,
+        BackendError::InvalidInput => Error::InvalidInput,
+        BackendError::Unsupported => Error::Unsupported,
+        other => Error::Remote(other),
     }
 }
 
@@ -887,9 +907,13 @@ fn metadata_scratch() -> Result<Box<Entry>, Error> {
     hyper::mm::try_box(Entry::empty()).map_err(|_| Error::Allocation)
 }
 
-// Complete volume parsing before constructing the namespace owner, keeping
-// admission scratch out of the later namespace-construction call chain.
-#[inline(never)]
-fn mount_volume<D: BlockDevice>(device: D) -> Result<FatVolume<D>, Error> {
-    FatVolume::mount_with_clock(device, crate::kernel::time::realtime).map_err(map)
+fn to_kernel_time(value: hyper_filesystem::Timestamp) -> Option<hyper::time::Timestamp> {
+    hyper::time::Timestamp::new(value.seconds(), value.nanoseconds())
+}
+fn to_service_time(value: hyper::time::Timestamp) -> hyper_filesystem::Timestamp {
+    // Both timestamp types validate the same nanosecond range.
+    match hyper_filesystem::Timestamp::new(value.seconds(), value.nanoseconds()) {
+        Some(value) => value,
+        None => hyper::debug::invariant_failure("invalid validated timestamp"),
+    }
 }

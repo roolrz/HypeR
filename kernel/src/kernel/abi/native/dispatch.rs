@@ -378,8 +378,11 @@ pub(in crate::kernel) fn dispatch_deferred(
         abi::HYPER_NATIVE_SYS_NATIVE_BLOCK_ACTIVATE => {
             handlers::sys_native_block_activate(services, invocation.arguments())
         }
-        abi::HYPER_NATIVE_SYS_NATIVE_BLOCK_MOUNT => {
-            handlers::sys_native_block_mount(services, invocation.arguments())
+        abi::HYPER_NATIVE_SYS_NATIVE_BLOCK_TRANSFER => {
+            handlers::sys_native_block_transfer(services, invocation.arguments())
+        }
+        abi::HYPER_NATIVE_SYS_FILESYSTEM_MOUNT => {
+            handlers::sys_filesystem_mount(services, invocation.arguments())
         }
         abi::HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CONTROL => {
             handlers::sys_guest_notification_control(services, invocation.arguments())

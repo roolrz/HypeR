@@ -6,7 +6,7 @@
 //! the authoritative read view until their device transfer completes.
 
 use super::{BlockDevice, BlockError, DeviceSlot, Error, SECTOR_SIZE};
-use crate::fs::block::WriteRequest;
+use crate::block::WriteRequest;
 use alloc::{boxed::Box, vec::Vec};
 
 const WINDOWS: usize = 8;
@@ -55,7 +55,7 @@ impl Buffer {
             .try_reserve_exact(WINDOWS * WINDOW_BYTES)
             .map_err(|_| Error::Allocation)?;
         bytes.resize(WINDOWS * WINDOW_BYTES, 0);
-        crate::mm::try_box(Self {
+        crate::allocation::try_box(Self {
             bytes,
             windows: [Window::EMPTY; WINDOWS],
             next: 0,
