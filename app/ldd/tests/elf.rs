@@ -7,7 +7,7 @@ use std::io::Cursor;
 
 #[test]
 fn reads_program_headers_without_sections_or_whole_string_table() -> io::Result<()> {
-    let path = "/lib/aarch64-hyper-hyper/ld-hyper-aarch64.so";
+    let path = "/lib64/ld-hyper-aarch64.so";
     let bytes = elf(&["libone.so", "libtwo.so"], None, Some(path), 183);
     let image = read(Cursor::new(bytes))?;
     assert_eq!(image.interpreter.as_deref(), Some(path));

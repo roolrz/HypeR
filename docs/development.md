@@ -120,8 +120,8 @@ For AArch64, the runtime filesystem layout is:
 
 ```text
 /lib -> lib64
+/lib64/ld-hyper-aarch64.so
 /lib64/aarch64-hyper-hyper/
-    ld-hyper-aarch64.so
     libhyper.so
     libhyper_rust_std.so
     libhyper_tool_args_shared.so
@@ -130,13 +130,14 @@ For AArch64, the runtime filesystem layout is:
 ```
 
 RISC-V uses `riscv64-hyper-hyper` and `ld-hyper-riscv64.so`. ELF `PT_INTERP`
-names `/lib/<arch>-hyper-hyper/ld-hyper-<arch>.so`. The initial process receives
+names `/lib64/ld-hyper-<arch>.so`. The initial process receives
 the architecture subdirectory as its dynamic-library Directory capability and
 passes it to children; the loader opens exact `DT_NEEDED` names relative to that
 handle, with no fallback to another architecture or an ambient search path.
 This runtime directory name does not change the Rust `<arch>-unknown-hyper`
 compiler target. Architecture-specific SDK and application build staging areas
-retain their own `lib/` artifact directories; deployment selects the runtime paths.
+retain their own `lib/` artifact directories for link libraries; the SDK stages
+the interpreter in `lib64/`. Deployment selects the runtime library paths.
 
 Before publication, packaging validates the selected ELF dependency graphs,
 architectures, SONAMEs and dynamic symbols. It copies ELF files before stripping
@@ -231,9 +232,9 @@ exact coverage and supported runtime expectations.
 | `kernel/src/platform/` | Firmware parsing and immutable platform description |
 | `kernel/src/mm/`, `kernel/src/sync/`, `kernel/src/time/` | Reusable allocation, synchronization, and timing mechanisms |
 | `sdk/abi/` | Native ABI schema, generated Rust definitions, C header, and reference |
-| `sdk/lib/` | Freestanding Native C runtime and architecture syscall veneers |
-| `sdk/loader/` | Native userspace ELF interpreter, relocation, and runtime loading |
-| `sdk/rust/` | Safe `no_std` Native OS binding, raw syscalls, and Rust runtime entry |
+| `lib/hyper/` | Freestanding Native C runtime and architecture syscall veneers |
+| `lib/loader/` | Native userspace ELF interpreter, relocation, and runtime loading |
+| `lib/rust/` | Safe `no_std` Native OS binding, raw syscalls, and Rust runtime entry |
 | `sdk/toolchain/` | Clang/Cargo drivers, linker contract, and transactional SDK assembly |
 | `app/` | Native system applications built only against the assembled SDK |
 | `kernel/tests/` | Kernel host tests, self-tests, image verification, and QEMU acceptance |

@@ -251,7 +251,7 @@ fn exposes_the_runtime_linker_contract_for_dynamic_processes() {
     initialize_header(&mut bytes, 3, 0x400, 5);
     write_program_header(&mut bytes, 0, 1, 5, 0, 0, 0x1000, 0x1000, 0x1000);
     write_program_header(&mut bytes, 1, 1, 6, 0x1000, 0x1000, 0x1000, 0x1000, 0x1000);
-    let interpreter = b"/lib/aarch64-hyper-hyper/ld-hyper-aarch64.so\0";
+    let interpreter = b"/lib64/ld-hyper-aarch64.so\0";
     write_program_header(
         &mut bytes,
         2,
@@ -286,10 +286,7 @@ fn exposes_the_runtime_linker_contract_for_dynamic_processes() {
     let allocation = crate::require_ok(Image::process_allocation_plan(&bytes));
     let image = crate::require_ok(Image::parse_process_with_plan(&bytes, allocation));
     assert_eq!(image.kind(), ImageKind::PositionIndependent);
-    assert_eq!(
-        image.interpreter(),
-        Some("/lib/aarch64-hyper-hyper/ld-hyper-aarch64.so")
-    );
+    assert_eq!(image.interpreter(), Some("/lib64/ld-hyper-aarch64.so"));
     assert_eq!(image.program_header_address(), ELF_HEADER_SIZE as u64);
     assert_eq!(image.program_header_count(), 5);
     assert_eq!(image.relocations().len(), 0);

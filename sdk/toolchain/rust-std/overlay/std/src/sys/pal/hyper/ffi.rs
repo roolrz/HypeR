@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-// Must match sdk/lib/include/hyper/std.h and thread.h. No Rust-private layouts.
+// Must match lib/hyper/include/hyper/std.h and thread.h. No Rust-private layouts.
 #[link(name = "hyper-std", kind = "static")]
 unsafe extern "C" {
     pub fn __hyper_std_argument(index: usize) -> *const u8;

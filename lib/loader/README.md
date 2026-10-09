@@ -6,9 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 # HypeR runtime linker
 
 This component provides the Native ELF interpreter installed as
-`/lib/aarch64-hyper-hyper/ld-hyper-aarch64.so` or
-`/lib/riscv64-hyper-hyper/ld-hyper-riscv64.so`. `/lib` is a relative symlink to
-`lib64`; the interpreter and libraries reside in that architecture's subdirectory.
+`/lib64/ld-hyper-aarch64.so` or
+`/lib64/ld-hyper-riscv64.so`. The interpreter resides directly in `/lib64/`;
+libraries reside in `/lib64/<arch>-hyper-hyper/`. `/lib` is a relative symlink
+to `lib64`.
 The kernel maps only the main image and this interpreter.
 Dependency policy, symbol lookup, relocation, constructors,
 RELRO, and runtime loading remain userspace responsibilities.
