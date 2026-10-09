@@ -24,6 +24,13 @@ target_compile_features(hyper_userspace_loader PRIVATE c_std_17)
 target_compile_options(hyper_userspace_loader PRIVATE
     $<$<COMPILE_LANGUAGE:C>:-ffreestanding;-fno-builtin;-fPIE;-fno-stack-protector;-fvisibility=hidden;-Wall;-Wextra;-Werror>
 )
+if(HYPER_ARCH STREQUAL "riscv64")
+    # LLVM 18 places small constant pools in writable .sdata. Keep constants
+    # read-only so the bootstrap can share its image without writable state.
+    target_compile_options(hyper_userspace_loader PRIVATE
+        $<$<COMPILE_LANGUAGE:C>:-msmall-data-limit=0>
+    )
+endif()
 target_include_directories(hyper_userspace_loader PRIVATE
     ${HYPER_SYSROOT}/include
 )
