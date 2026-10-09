@@ -247,11 +247,26 @@ storage endpoint or LIO target. The shared Ethernet segment does not provide
 anti-spoofing or per-VM network isolation policy.
 
 The guest device uses modern virtio-mmio, RX queue 0 and TX queue 1, with at most
-128 descriptors per queue. It offers `VIRTIO_F_VERSION_1` and `VIRTIO_NET_F_MAC`;
-MTU is 1500. Offloads, mergeable RX buffers, a control virtqueue and multiqueue
-are not offered. Modern virtio uses a 12-byte packet header even without
-mergeable RX buffers. The Linux backend consumes/supplies that header and the
-TAP carries ordinary Ethernet frames.
+128 descriptors per queue, with MTU 1500. It offers `VIRTIO_F_VERSION_1` and
+`VIRTIO_NET_F_MAC`. Guest TX checksum completion (`VIRTIO_NET_F_CSUM`) and TCP
+segmentation (`VIRTIO_NET_F_HOST_TSO4/HOST_TSO6`) are offered only when the
+backend's NETWORK_HELLO advertises them; TSO additionally requires CSUM in the
+guest's negotiated features. RX offloads, mergeable RX buffers, a control
+virtqueue and multiqueue are not offered.
+
+Modern virtio uses a 12-byte packet header even without mergeable RX buffers.
+An offload-capable backend preserves that header through vhost-net to an
+`IFF_VNET_HDR` TAP, with a 12-byte little-endian header. TAP converts guest TX
+metadata into Linux checksum/GSO state; the uplink can complete it in hardware
+or Linux can fall back to software. `VHOST_NET_F_VIRTIO_NET_HDR` stays clear in
+this mode. TAP's `TUNSETOFFLOAD` flags remain zero: those describe packets sent
+*to* the guest, whose receive path still requires ordinary MTU-sized frames.
+
+The pinned QEMU and Pi 5 appliances support these optional TX offloads. Ordinary
+builds import their immutable upstream OCI digests from `scripts/io-vm.lock.json`;
+no local appliance override is required. The pinned Linux build also orders vhost
+work-node reuse before concurrent requeue, preventing pending work from being
+lost. Older backends and guests may still negotiate VERSION_1 and MAC alone.
 
 Each client has one memory owner, binding identity and control transaction
 sequence. Storage and network have independent queue epochs and can reset
@@ -533,8 +548,13 @@ jobs on pull requests and main pushes. Its local suite is
 The suite imports the committed appliance pin unless `IO_VM_REFERENCE` selects
 another immutable generation. The Make target also accepts `IO_VM_PACKAGE`.
 
-The test serves a random 256 KiB + 137 byte payload on localhost and verifies
-its SHA-256 inside each guest. CI needs no public HTTP endpoint. A direct
+The test serves a random 256 KiB + 137 byte payload on localhost, verifies its
+SHA-256 inside each guest, then uploads it and checks the server's independently
+computed SHA-256 receipt. It repeats both directions after reset and restart.
+`NETWORK_TX_OFFLOAD=enabled` requires CSUM and both HOST_TSO bits in the guest's
+negotiated state; `disabled` verifies fallback with an older appliance selected
+through `IO_VM_REFERENCE`. The default accepts either, while always rejecting
+unsupported RX offloads. CI needs no public HTTP endpoint. A direct
 `verify-network.py run` invocation can add `--external-url http://...` with a
 small public file to also check DNS and outbound HTTP; the external fetch
 checks for a successful, nonempty response, while the local payload provides

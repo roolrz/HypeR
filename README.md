@@ -116,9 +116,10 @@ See [implementation status](docs/status.md) and the [roadmap](docs/roadmap.md).
 
 ## Exploratory Pi 5 I/O measurements
 
-**2026-10-06: an initial performance survey, for reference only.** This was an
-informal development setup, not a controlled benchmark. Each case was run once;
-card identity/state, filesystem and mount settings, available RAM, thermal/clock
+**Initial survey: 2026-10-06; guest TCP update: 2026-10-10. For reference only.**
+This was an informal development setup, not a controlled benchmark. Each table
+entry comes from a single run. Card identity/state, filesystem and mount settings,
+available RAM, thermal/clock
 conditions and network filtering were not fully standardized or recorded. These
 numbers compare complete deployments, not isolated hypervisor overhead, and do
 not establish production readiness or power-loss durability.
@@ -127,8 +128,8 @@ The tests used physical Raspberry Pi 5 hardware and separate SD cards for HypeR
 and native Raspbian. HypeR Native accessed FAT32 at `/data`; Alpine accessed its
 ext4 root disk through virtio-scsi and the Linux I/O VM. Raspbian used its existing
 filesystem. Alpine had two vCPUs and 256 MiB RAM; the I/O VM had one vCPU and
-128 MiB. The HypeR test image was based on `b7022b6` with local test fixtures and
-the digest-pinned Pi 5 appliance from I/O VM source `c8ec02adbb8f`.
+128 MiB. The October 6 HypeR storage image was based on `b7022b6` with local test
+fixtures and the digest-pinned Pi 5 appliance from I/O VM source `c8ec02adbb8f`.
 
 Storage used the same deterministic **1 GiB** workload: 128 KiB sequential
 writes followed by a volume sync. Throughput and total time include the sync;
@@ -154,13 +155,28 @@ Each TCP case used a 2-second warm-up and a 15-second measurement, with one or
 four connections. Values are aggregate receiver-reported decimal Mbit/s.
 Mac-to-Pi connections and their return traffic were permitted by the network
 policy. The peer, network path and filtering are part of these measurements.
+The Alpine values below are from October 10, with negotiated guest TX checksum
+and TCP segmentation offload and the I/O VM vhost work-queue ordering fix.
+Raspbian values remain the October 6 reference; these were not alternating runs
+in a controlled environment.
 
 | TCP direction | Connections | Native Raspbian (Mbit/s) | Alpine guest (Mbit/s) | Guest / Raspbian |
 | --- | ---: | ---: | ---: | ---: |
-| Mac -> Pi | 1 | 926.99 | 843.29 | 91.0% |
-| Mac -> Pi | 4 | 926.25 | 817.71 | 88.3% |
-| Pi -> Mac | 1 | 935.89 | 296.69 | 31.7% |
-| Pi -> Mac | 4 | 934.78 | 287.53 | 30.8% |
+| Mac -> Pi | 1 | 926.99 | 846.95 | 91.4% |
+| Mac -> Pi | 4 | 926.25 | 823.75 | 88.9% |
+| Pi -> Mac | 1 | 935.89 | 936.10 | 100.0% |
+| Pi -> Mac | 4 | 934.78 | 936.34 | 100.2% |
+
+Additional single-connection guest TX runs sustained 936.38 Mbit/s for 60 seconds
+and 935.42 Mbit/s for 120 seconds, without zero-throughput intervals. Concurrent
+ping received all 66 and 126 replies respectively. No guest restart was requested
+between these runs, and temporary diagnostic instrumentation was absent.
+
+The October 10 I/O VM was a local clean build of `fc8ecfd444dc`. Its source tree
+matches merged upstream commit `ebd10d57bebac`, now pinned for both QEMU and Pi 5.
+The published CI artifacts are different binaries; these results do not qualify
+their exact digests, and the Pi 5 pin retains `hardware_qualified: false`.
+The network update does not establish a storage performance improvement.
 
 HypeR Native networking is not implemented and was not measured. Storage and
 network tests ran separately; concurrent load and fault tests are still pending.

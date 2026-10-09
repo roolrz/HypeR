@@ -74,6 +74,12 @@ impl Buffer {
     }
 
     pub(super) fn overlay(&self, first: u64, output: &mut [u8]) {
+        // Every volume operation drains its writes before returning. Most bulk
+        // reads therefore have no pending overlay; avoid probing eight empty
+        // windows for each sector in a potentially 512 KiB transfer.
+        if self.windows.iter().all(|window| window.first.is_none()) {
+            return;
+        }
         for (offset, sector) in output.chunks_exact_mut(SECTOR_SIZE).enumerate() {
             if let Some(pending) = self.sector(first + offset as u64) {
                 sector.copy_from_slice(pending);
