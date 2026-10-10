@@ -72,7 +72,7 @@ and can restart it after exit. A shell is not itself a boot-critical service.
 
 For image contents and launch commands, use the
 [getting-started guide](getting-started.md) and
-[application deployment manifest](../app/deployment.json). A runtime failure
+[Native component registry](../mk/components.mk). A runtime failure
 and a stale packaged image are different debugging problems.
 
 ## 2. Creating and starting a VM
@@ -685,7 +685,7 @@ runtime unchanged even when the source file looks correct.
 
 | Question | Follow this path |
 | --- | --- |
-| Which executable is deployed, and where? | [deployment.json](../app/deployment.json) → [deployment tool](../scripts/app-deployment.py) |
+| Which executable is deployed, and where? | [component declarations](../mk/README.md) → [deployment tool](../scripts/app-deployment.py) |
 | Is the service graph valid? | [manifest parsing](../app/init/src/manifest/parse.rs) → [planning](../app/init/src/manifest/plan/mod.rs) |
 | Who supplies a service's capabilities? | [provisioning](../app/init/src/runtime/provision.rs) → [launcher](../app/init/src/runtime/launcher.rs) |
 | What happens when it exits? | [runtime supervisor](../app/init/src/runtime/supervisor.rs) and [supervision policy](../app/init/src/supervision.rs) |

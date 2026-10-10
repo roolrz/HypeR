@@ -97,19 +97,26 @@ acceptance targets.
 
 Feature-specific fixtures also build the complete workspace and stage its
 executables and DSOs together. `APP_FEATURES` selects package-qualified Cargo
-features; `APP_EXTRA_BINS` selects additional acceptance binaries. Use a separate
-`APP_OUTPUT` to keep instrumented applications and libraries out of the ordinary
-deployment. Updating only a runtime binary can leave its Rust generic symbols
-incompatible with previously staged libraries, even when their SONAMEs match.
+features; `APP_EXTRA_BINS` selects additional acceptance binaries. Both select
+an automatic variant subdirectory for the Cargo cache and staged applications.
+An explicit `APP_OUTPUT` can name a fixture's own staging directory. Updating
+only a runtime binary can leave its Rust generic symbols incompatible with
+previously staged libraries, even when their SONAMEs match.
 
-[app/deployment.json](../app/deployment.json) is the shared installation and
-initramfs payload manifest. A binary entry defines its Cargo binary, staged
-filename, archive destination, mode, and image membership. Shared libraries use
-`library` entries in the same manifest and are installed under
-`/lib64/<arch>-hyper-hyper/`. A `symlink` entry creates `/lib -> lib64` in the
-archive. Cargo workspace
-membership remains a build concern; service manifests still own startup and
-capabilities, and board JSON still owns storage and device deployment.
+[Component declarations and templates](../mk/README.md) own installation and
+image membership. Each app or library declares its delivery in `component.mk`;
+[the registry](../mk/components.mk) expands those declarations and checks their
+Cargo targets. `make app-manifest` prints the resulting installation manifest.
+Cargo workspace membership and dependencies remain in Cargo. Service manifests
+still own startup and capabilities, and board JSON owns storage and device
+deployment. The registry also determines which delivery dylibs to exclude from
+host test linking.
+
+Rust libraries are installed as providers under `/lib64/<arch>-hyper-hyper/`.
+Packaging collects their transitive `DT_NEEDED` closure after applying executable
+overrides. Additional standalone fixtures supply `--library-dir` instead of
+manually listing Rust libraries. Runtime-loaded plugins remain explicit entries.
+The `/lib -> lib64` link and SDK bootstrap loaders are declared once as well.
 
 `NATIVE_IMAGE_PROFILE=development` is the default and preserves the existing
 apps and test programs. `NATIVE_IMAGE_PROFILE=system` includes all ordinary apps
@@ -124,6 +131,7 @@ For AArch64, the runtime filesystem layout is:
 /lib64/aarch64-hyper-hyper/
     libhyper.so
     libhyper_rust_std.so
+    libhyper_clap_shared.so
     libhyper_tool_args_shared.so
     libhyper_vm_policy_shared.so
     libhyper_vm_support_shared.so

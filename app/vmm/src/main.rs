@@ -3,6 +3,10 @@
 
 //! Unified VM management and virtual-console client.
 
+// Select the shared parser implementation for Native delivery.
+#[cfg(target_os = "hyper")]
+extern crate hyper_clap_shared as _;
+
 #[cfg(target_os = "hyper")]
 extern crate hyper_vm_policy_shared as hyper_vm_policy;
 

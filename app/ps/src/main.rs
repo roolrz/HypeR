@@ -3,6 +3,10 @@
 
 //! Capability-scoped Native Process and Thread listing.
 
+// Select the shared parser implementation for Native delivery.
+#[cfg(target_os = "hyper")]
+extern crate hyper_clap_shared as _;
+
 use clap::Parser;
 use std::io::Write;
 
