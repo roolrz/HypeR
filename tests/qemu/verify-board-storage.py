@@ -64,6 +64,7 @@ def boot(args, mode):
 
         try:
             if args.require_userspace_device:
+                await_text(rb'HypeR io-runtime: device permission attenuation passed\n')
                 await_text(rb'DEVICE-TEST: worker prepared\n')
             boot = await_text(rb'HypeR io-runtime: configuration volume: [0-9]+ sectors\n')
             if b'HypeR IO VM: ' not in boot:

@@ -108,6 +108,8 @@ type FinalReapQueueLock<T> = InterruptSpinLock<T, TestReapQueueMask>;
 pub(crate) struct ObjectKind(u32);
 
 impl ObjectKind {
+    pub(crate) const BACKEND_MEMORY_LEASE: Self =
+        Self(hyper::abi::native::HYPER_NATIVE_OBJECT_BACKEND_MEMORY_LEASE);
     pub(crate) const DEVICE_ASSIGNMENT_AUTHORITY: Self =
         Self(DEVICE_ASSIGNMENT_AUTHORITY_OBJECT_KIND);
     pub(crate) const PHYSICAL_DEVICE: Self = Self(PHYSICAL_DEVICE_OBJECT_KIND);
@@ -208,7 +210,8 @@ impl ObjectKind {
             | NATIVE_BLOCK_OBJECT_KIND
             | GUEST_NOTIFICATION_OBJECT_KIND
             | GUEST_MEMORY_OBJECT_KIND
-            | WAIT_SET_OBJECT_KIND => Some(Self(raw)),
+            | WAIT_SET_OBJECT_KIND
+            | hyper::abi::native::HYPER_NATIVE_OBJECT_BACKEND_MEMORY_LEASE => Some(Self(raw)),
             _ => None,
         }
     }
@@ -861,6 +864,17 @@ impl ObjectRef {
 /// Heap bytes required by one erased owner and concrete object payload.
 pub(crate) const fn object_allocation_size<T: KernelObject>() -> Option<usize> {
     ObjectRef::allocation_size::<T>()
+}
+
+impl<T: KernelObject> KernelRef<T, KernelService> {
+    /// Creates a service-owned object which can never become a userspace handle.
+    pub(crate) fn try_new_service(payload: T) -> Result<Self, ObjectCreationError> {
+        Ok(Self::from_owner(ObjectRef::try_new(
+            payload,
+            ExportPolicy::KernelOnly,
+            ReferenceKind::KernelService,
+        )?))
+    }
 }
 
 impl<T: KernelObject> KernelRef<T, Scheduler> {

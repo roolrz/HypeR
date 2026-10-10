@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use core::mem::ManuallyDrop;
 pub use domain::{DomainId, Permissions};
 pub use fault::{CommandError, Containment, Event, Failure, FaultKind, FaultOutcome};
-pub use memory::{DmaMemory, Environment};
+pub use memory::{DmaBuffer, DmaMemory, Environment};
 pub use registers::Capabilities;
 use registers::*;
 
@@ -46,19 +46,19 @@ pub enum Error {
     Timeout { register: usize, value: u32 },
 }
 
-struct Resources<M> {
+struct Resources<M, B> {
     streams: M,
     commands: M,
     events: M,
-    domains: Vec<Option<domain::Domain<M>>>,
+    domains: Vec<Option<domain::Domain<M, B>>>,
     bindings: Vec<(u32, DomainId)>,
     quarantined: Vec<u64>,
 }
 
-pub struct Controller<E: Environment> {
+pub struct Controller<E: Environment, B: DmaBuffer = <E as Environment>::Memory> {
     registers: Registers,
     capabilities: Capabilities,
-    resources: ManuallyDrop<Resources<E::Memory>>,
+    resources: ManuallyDrop<Resources<E::Memory, B>>,
     published: bool,
     failure: Option<Failure>,
     producer: u32,
@@ -66,7 +66,7 @@ pub struct Controller<E: Environment> {
     next_serial: u64,
 }
 
-impl<E: Environment> Controller<E> {
+impl<E: Environment, B: DmaBuffer> Controller<E, B> {
     /// Acquire a cold SMMU with all upstream bus masters quiescent.
     ///
     /// # Safety
@@ -347,7 +347,23 @@ impl<E: Environment> Controller<E> {
         &mut self,
         id: DomainId,
         iova: u64,
-        memory: E::Memory,
+        memory: B,
+        permissions: Permissions,
+    ) -> Result<(), Error> {
+        if memory.length() != 4096 {
+            return Err(Error::Address);
+        }
+        self.map_buffer(id, iova, memory, permissions)
+    }
+
+    /// Publishes one retained buffer, possibly noncontiguous in physical RAM.
+    /// Validation/allocation precede leaf publication; one TLBI completion
+    /// covers the whole buffer. Errors after publication retain its owner.
+    pub fn map_buffer(
+        &mut self,
+        id: DomainId,
+        iova: u64,
+        memory: B,
         permissions: Permissions,
     ) -> Result<(), Error> {
         self.check()?;
@@ -362,7 +378,25 @@ impl<E: Environment> Controller<E> {
     /// Remove a mapping and return its allocation only after successful TLBI
     /// completion. On failure the allocation remains pinned in this controller.
     /// Reuse of the IOVA for a new owner additionally requires device quiescence.
-    pub fn unmap_page(&mut self, id: DomainId, iova: u64) -> Result<E::Memory, Error> {
+    pub fn unmap_page(&mut self, id: DomainId, iova: u64) -> Result<B, Error> {
+        self.check()?;
+        let index = self.domain_index(id)?;
+        let mapping = self.resources.domains[index]
+            .as_ref()
+            .ok_or(Error::InvalidDomain)?;
+        let position = mapping
+            .mappings
+            .binary_search_by_key(&iova, |map| map.iova)
+            .map_err(|_| Error::NotMapped)?;
+        if mapping.mappings[position].memory.length() != 4096 {
+            return Err(Error::Address);
+        }
+        self.unmap_buffer(id, iova)
+    }
+
+    /// Revokes the complete buffer at its original IOVA, returning its lease
+    /// only after translation invalidation completes. Partial removal is denied.
+    pub fn unmap_buffer(&mut self, id: DomainId, iova: u64) -> Result<B, Error> {
         self.check()?;
         let index = self.domain_index(id)?;
         let mapping = self.resources.domains[index]
@@ -374,7 +408,7 @@ impl<E: Environment> Controller<E> {
             .as_mut()
             .ok_or(Error::InvalidDomain)?
             .mappings
-            .swap_remove(mapping)
+            .remove(mapping)
             .memory)
     }
 
@@ -493,7 +527,7 @@ impl<E: Environment> Controller<E> {
     }
 }
 
-impl<E: Environment> Drop for Controller<E> {
+impl<E: Environment, B: DmaBuffer> Drop for Controller<E, B> {
     fn drop(&mut self) {
         if !self.published {
             // SAFETY: No physical base was published; hardware cannot reference

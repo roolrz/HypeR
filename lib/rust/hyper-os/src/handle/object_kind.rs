@@ -243,6 +243,12 @@ object_types!(
         "guest-mapping",
         "guest address-space mapping"
     ),
+    (
+        BackendMemoryLeaseObject,
+        HYPER_NATIVE_OBJECT_BACKEND_MEMORY_LEASE,
+        "backend-memory-lease",
+        "kernel-owned backend DMA memory lease"
+    ),
 );
 
 impl ObjectKind {

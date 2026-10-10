@@ -50,7 +50,9 @@ impl KernelObject for DeviceAssignmentAuthority {
     const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
     const SUPPORTED_RIGHTS: Rights = Rights::TRANSFER
         .union(Rights::DUPLICATE)
-        .union(Rights::INSPECT);
+        .union(Rights::INSPECT)
+        .union(Rights::ASSIGN_DEVICE)
+        .union(Rights::MAP_DMA);
 }
 
 #[derive(Clone, Copy)]
@@ -285,7 +287,10 @@ impl KernelObject for PhysicalDevice {
     const SUPPORTED_RIGHTS: Rights = Rights::TRANSFER
         .union(Rights::DUPLICATE)
         .union(Rights::INSPECT)
+        .union(Rights::READ)
         .union(Rights::WRITE)
+        .union(Rights::ASSIGN_DEVICE)
+        .union(Rights::ACK_INTERRUPT)
         .union(Rights::WAIT);
     fn signal_source(&self) -> Option<SignalSource<'_>> {
         Some(SignalSource::new(

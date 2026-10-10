@@ -205,7 +205,9 @@ fn prepare_handles(
                 .map_err(Error::Object)?,
                 Rights::DUPLICATE
                     .union(Rights::TRANSFER)
-                    .union(Rights::INSPECT),
+                    .union(Rights::INSPECT)
+                    .union(Rights::ASSIGN_DEVICE)
+                    .union(Rights::MAP_DMA),
             )?);
     }
     // Prepare the root VMAR last. Its one-per-address-space publication claim

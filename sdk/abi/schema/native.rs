@@ -652,6 +652,11 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
         name: "guest_mapping",
         transfer: TransferClass::RendezvousOnly,
     },
+    ObjectKind {
+        value: 34,
+        name: "backend_memory_lease",
+        transfer: TransferClass::Forbidden,
+    },
 ];
 
 pub const GUEST_MEMORY_RIGHTS: u64 = RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_MAP | RIGHT_INSPECT;
@@ -809,6 +814,8 @@ pub const RIGHT_REQUEST_STOP: u64 = 1 << 11;
 pub const RIGHT_RUN_VCPU: u64 = 1 << 12;
 pub const RIGHT_INJECT_INTERRUPT: u64 = 1 << 13;
 pub const RIGHT_ASSIGN_DEVICE: u64 = 1 << 15;
+pub const RIGHT_MAP_DMA: u64 = 1 << 16;
+pub const RIGHT_ACK_INTERRUPT: u64 = 1 << 17;
 pub const RIGHT_REVOKE: u64 = 1 << 18;
 pub const RIGHT_CREATE_PROCESS: u64 = 1 << RIGHT_CREATE_PROCESS_BIT;
 pub const RIGHT_CREATE_THREAD: u64 = 1 << RIGHT_CREATE_THREAD_BIT;
@@ -8404,7 +8411,7 @@ pub const SYSCALLS: &[Syscall] = &[
                 kind: ValueKind::Handle,
                 handle: Some(HandleArgument {
                     object: ObjectConstraint::Kind("device_assignment_authority"),
-                    required_rights: RIGHT_INSPECT,
+                    required_rights: RIGHT_ASSIGN_DEVICE,
                     disposition: HandleDisposition::Borrow,
                 }),
                 memory: None,
@@ -8417,7 +8424,7 @@ pub const SYSCALLS: &[Syscall] = &[
             handle: Some(ProducedHandle {
                 object: ProducedObject::Kind("physical_device"),
                 rights: ProducedRights::Fixed(
-                    RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_INSPECT | RIGHT_WRITE,
+                    RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_INSPECT | RIGHT_ASSIGN_DEVICE,
                 ),
             }),
         }],
@@ -8480,7 +8487,7 @@ pub const SYSCALLS: &[Syscall] = &[
                 kind: ValueKind::Handle,
                 handle: Some(HandleArgument {
                     object: ObjectConstraint::Kind("device_assignment_authority"),
-                    required_rights: RIGHT_INSPECT,
+                    required_rights: RIGHT_MAP_DMA,
                     disposition: HandleDisposition::Borrow,
                 }),
                 memory: None,
@@ -8543,7 +8550,7 @@ pub const SYSCALLS: &[Syscall] = &[
                 kind: ValueKind::Handle,
                 handle: Some(HandleArgument {
                     object: ObjectConstraint::Kind("physical_device"),
-                    required_rights: RIGHT_WRITE,
+                    required_rights: RIGHT_ASSIGN_DEVICE,
                     disposition: HandleDisposition::Borrow,
                 }),
                 memory: None,
@@ -8971,7 +8978,7 @@ pub const SYSCALLS: &[Syscall] = &[
                 kind: ValueKind::Handle,
                 handle: Some(HandleArgument {
                     object: ObjectConstraint::Kind("device_assignment_authority"),
-                    required_rights: RIGHT_INSPECT,
+                    required_rights: RIGHT_ASSIGN_DEVICE,
                     disposition: HandleDisposition::Borrow,
                 }),
                 memory: None,
@@ -9001,7 +9008,7 @@ pub const SYSCALLS: &[Syscall] = &[
             handle: Some(ProducedHandle {
                 object: ProducedObject::Kind("physical_device"),
                 rights: ProducedRights::Fixed(
-                    RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_INSPECT | RIGHT_WRITE,
+                    RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_INSPECT | RIGHT_ASSIGN_DEVICE,
                 ),
             }),
         }],
@@ -9162,7 +9169,7 @@ pub const SYSCALLS: &[Syscall] = &[
                 kind: ValueKind::Handle,
                 handle: Some(HandleArgument {
                     object: ObjectConstraint::Kind("device_assignment_authority"),
-                    required_rights: RIGHT_INSPECT,
+                    required_rights: RIGHT_ASSIGN_DEVICE,
                     disposition: HandleDisposition::Borrow,
                 }),
                 memory: None,
@@ -9192,7 +9199,14 @@ pub const SYSCALLS: &[Syscall] = &[
             handle: Some(ProducedHandle {
                 object: ProducedObject::Kind("physical_device"),
                 rights: ProducedRights::Fixed(
-                    RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_WAIT,
+                    RIGHT_TRANSFER
+                        | RIGHT_DUPLICATE
+                        | RIGHT_INSPECT
+                        | RIGHT_READ
+                        | RIGHT_WRITE
+                        | RIGHT_WAIT
+                        | RIGHT_ASSIGN_DEVICE
+                        | RIGHT_ACK_INTERRUPT,
                 ),
             }),
         }],
@@ -9214,7 +9228,7 @@ pub const SYSCALLS: &[Syscall] = &[
                 kind: ValueKind::Handle,
                 handle: Some(HandleArgument {
                     object: ObjectConstraint::Kind("physical_device"),
-                    required_rights: RIGHT_WRITE,
+                    required_rights: 0,
                     disposition: HandleDisposition::Borrow,
                 }),
                 memory: None,
@@ -9274,7 +9288,7 @@ pub const SYSCALLS: &[Syscall] = &[
                 kind: ValueKind::Handle,
                 handle: Some(HandleArgument {
                     object: ObjectConstraint::Kind("physical_device"),
-                    required_rights: RIGHT_WRITE,
+                    required_rights: RIGHT_ACK_INTERRUPT,
                     disposition: HandleDisposition::Borrow,
                 }),
                 memory: None,
@@ -9373,6 +9387,7 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 pub const SEMANTIC_RULES: &[&str] = &[
     "object_inspector_read_details requires INSPECT and INSPECT_DETAILS on an ObjectInspector. With process_koid zero, target is a KOID and only system scope is allowed. Otherwise target is a generation-qualified handle in the named, scope-visible process. Inspection takes a diagnostic reference under the lookup lock, releases that lock, and copies object-local metadata only; it does not grant operation authority. Cursor zero starts a query; next_cursor zero finishes it. Empty records may advance a bounded scan without yielding a mapping. Concurrent mutation makes pages weakly consistent. Unsupported object kinds return NOT_SUPPORTED; inaccessible or expired identities return NOT_FOUND. Inspector derivation continues to produce only the original basic rights, never implicitly acquiring INSPECT_DETAILS.",
     "Object-details payload consists of eight little-endian u64 words. All unused words are zero. Record 0 is empty. Thread (1): scheduler TID (zero is a valid bootstrap TID), role (task_thread role values), user lifecycle phase (0 unavailable, 1 prepared, 2 dormant, 3 runnable, 4 stop-requested, 5 detached), TID present (0/1; absent TID word is zero). VMAR (2): base, length, live (0/1). Mapping (3): base, length, current R/W/X bits, maximum R/W/X bits. Channel (4): peer KOID (zero until pair publication), local open (0/1), peer open (0/1), queued messages or receivers, queued bytes, byte-queue counters present (0/1). Device (5): profile, virtio device ID, PCI vendor/device word, host IRQ domain, first host interrupt, interrupt count, lifecycle (1 claimed, 2 attached, 3 active, 4 retired, 5 quarantined), resource count. Device resource (6): resource kind, host physical base, length, guest aperture offset, attributes. Addresses never contain kernel virtual pointers. Device details read metadata without MMIO/config-space probes; host interrupt identities are not guest IRQs.",
+    "Device assignment authority separates INSPECT (firmware discovery), ASSIGN_DEVICE (claims), and MAP_DMA (resident DMA extent disclosure). Claim and claim_matching return TRANSFER|DUPLICATE|INSPECT|ASSIGN_DEVICE; userspace bundles additionally grant READ|WRITE|WAIT|ACK_INTERRUPT. Assigning a physical device requires ASSIGN_DEVICE on that handle and WRITE on the pending VM. device_mmio checks READ for operation zero and WRITE for operation one after validating the operation selector; its unconditional schema rights are empty. MMIO reads may have hardware side effects and still require an active assignment with retained backing. IRQ pending requires WAIT; IRQ completion requires ACK_INTERRUPT. An inspection-only handle cannot claim, assign, access registers, acknowledge interrupts, or disclose VMO physical addresses.",
     "Device firmware inspection reads one immutable boot snapshot. Field PROPERTY_NAMES (5) returns every property name as a NUL-separated list, without granting ownership or exposing mapping capabilities; field PROPERTY (4) reads a named property's original bytes. Other fields report node identity, compatible strings, translated registers and interrupt metadata. Empty output queries the required byte length. The caller supplies a name only for PROPERTY; all other fields require an empty name. Inspection cannot substitute for an atomic device claim.",
     "Physical device profiles identify the admitted transport contract: virtio-mmio SCSI (1), userspace-managed registers (2), virtio-mmio network (3), and an exclusively assigned PCI function (4). Firmware matching combines profile with identity and rejects ambiguous matches. PCI identity kind 3 uses exactly nine lowercase ASCII bytes vvvv:dddd (vendor and device identifiers). Physical MMIO is mediated against exact resource extents; a device handle never grants a host MMIO page mapping. DEVICE_PROFILE_INFO reports the complete guest aperture, resource count, interrupt count, PCI device/vendor word and admitted DMA bus offset. Non-PCI profiles use a 64 KiB aperture and zero PCI identity and DMA offset. Virtio profiles have one interrupt; userspace profiles report zero or one physical interrupt. Non-PCI assignment still reserves one virtual interrupt when no physical interrupt is present. A pending VM admits at most DEVICE_ASSIGNMENT_MAX_DEVICES controllers with disjoint apertures and interrupt ranges; all share its DMA backing lifetime. Partial installation rolls back every controller, and retirement releases pages only after every controller is quiescent.",
     "The PCI-function profile presents one endpoint at guest BDF 00:00.0 through an 8 MiB aperture. Resource kinds PCI_ECAM and PCI_MSI describe a virtual 1 MiB ECAM window and 4 KiB GICv2m frame; PCI_BAR0 through PCI_BAR0+5 describe implemented memory BARs. Resource offsets are relative to the assigned guest aperture; bus_address is the initial virtual PCI address of a BAR. MEMORY_64 and PREFETCHABLE flags apply only to BAR resources; other resources have zero flags and bus_address. PCI configuration and MSI-X are mediated: physical host-bridge, interrupt-controller and DMA-window registers are never guest resources. The interrupt argument selects the first of interrupt_count consecutive GIC SPIs (at most 64); the AArch64 reference GIC has 256 IDs. Linux owns the entire endpoint and its child drivers. DMA bus addresses equal the admitted host physical extent plus dma_bus_offset; this translation is not an IOMMU boundary. Firmware-initialized devices remain fail-closed if link or DMA translation validation fails. Clearing bus mastering alone is not proof of DMA retirement; a PCI assignment without a proven reset/quiescence protocol retains its DMA backing and physical claim on teardown.",

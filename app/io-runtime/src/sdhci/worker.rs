@@ -124,7 +124,14 @@ fn start_mode(
     if guest.cpus.is_empty() || guest.cpus.len() > 8 {
         return Err(Error::Status(Status::NOT_SUPPORTED));
     }
-    let physical = physical.duplicate(physical.info()?.rights)?;
+    // This handle permits register/IRQ service without delegation or assignment.
+    // Workers still share io-runtime's process; this is not thread isolation.
+    let physical = physical.duplicate(
+        hyper_os::handle::Rights::READ
+            .union(hyper_os::handle::Rights::WRITE)
+            .union(hyper_os::handle::Rights::WAIT)
+            .union(hyper_os::handle::Rights::ACK_INTERRUPT),
+    )?;
     // Share the same process-local capabilities. Installed VM/vCPU handles
     // intentionally cannot be duplicated through the Native capability API.
     let machine = MachineGuard(Arc::clone(&guest.machine));

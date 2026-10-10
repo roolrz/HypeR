@@ -3,7 +3,7 @@
 
 //! Owned 39-bit IOVA address spaces using 4 KiB VMSAv8-64 stage-2 tables.
 
-use super::{DmaMemory, Environment, Error, memory};
+use super::{DmaBuffer, DmaMemory, Environment, Error, memory};
 use alloc::vec::Vec;
 
 const ADDRESS_MASK: u64 = 0x0000_ffff_ffff_f000;
@@ -38,13 +38,13 @@ pub(super) struct Mapping<M> {
     pub iova: u64,
     pub memory: M,
 }
-pub(super) struct Domain<M> {
+pub(super) struct Domain<M, B> {
     pub id: DomainId,
     pub tables: Vec<M>,
-    pub mappings: Vec<Mapping<M>>,
+    pub mappings: Vec<Mapping<B>>,
 }
 
-impl<M: DmaMemory> Domain<M> {
+impl<M: DmaMemory, B: DmaBuffer> Domain<M, B> {
     pub(super) fn new<E: Environment<Memory = M>>(id: DomainId, bits: u8) -> Result<Self, Error> {
         let mut tables = Vec::new();
         tables.try_reserve_exact(1).map_err(|_| Error::Allocation)?;
@@ -94,26 +94,64 @@ impl<M: DmaMemory> Domain<M> {
         Ok((table, ((iova >> 12) & 511) as usize))
     }
 
+    /// Validate and allocate all intermediate tables before publishing any leaf.
+    /// Empty tables may remain after failure; they grant no access. One retained
+    /// owner covers the complete mapping, avoiding one reference per RAM page.
     pub(super) fn map<E: Environment<Memory = M>>(
         &mut self,
         iova: u64,
-        page: M,
+        buffer: B,
         permissions: Permissions,
         bits: u8,
     ) -> Result<(), Error> {
-        memory::validate(&page, 0, bits)?;
-        if self.mappings.iter().any(|map| map.iova == iova) {
+        let length = buffer.length();
+        let end = iova.checked_add(length).ok_or(Error::Address)?;
+        if length == 0
+            || !length.is_multiple_of(4096)
+            || !iova.is_multiple_of(4096)
+            || end > 1 << 39
+        {
+            return Err(Error::Address);
+        }
+        let position = self.mappings.partition_point(|map| map.iova < iova);
+        if position > 0
+            && self.mappings[position - 1].iova + self.mappings[position - 1].memory.length() > iova
+            || self
+                .mappings
+                .get(position)
+                .is_some_and(|map| map.iova < end)
+        {
             return Err(Error::AlreadyMapped);
         }
         self.mappings
             .try_reserve(1)
             .map_err(|_| Error::Allocation)?;
-        let (table, index) = self.leaf::<E>(iova, true, bits)?;
-        let entry = page.physical() | permissions.descriptor();
-        // Take ownership before publication; even command failure must retain it.
-        self.mappings.push(Mapping { iova, memory: page });
-        E::synchronize();
-        memory::write(&self.tables[table], index, entry);
+        for offset in (0..length).step_by(4096) {
+            let physical = buffer.physical_page(offset);
+            if !physical.is_multiple_of(4096)
+                || physical
+                    .checked_add(4096)
+                    .is_none_or(|end| end > 1u64 << bits)
+            {
+                return Err(Error::Address);
+            }
+            self.leaf::<E>(iova + offset, true, bits)?;
+        }
+        // No fallible allocation or metadata growth follows this ownership cut.
+        self.mappings.insert(
+            position,
+            Mapping {
+                iova,
+                memory: buffer,
+            },
+        );
+        for offset in (0..length).step_by(4096) {
+            let (table, index) = self.leaf::<E>(iova + offset, false, bits)?;
+            let entry =
+                self.mappings[position].memory.physical_page(offset) | permissions.descriptor();
+            E::synchronize();
+            memory::write(&self.tables[table], index, entry);
+        }
         Ok(())
     }
 
@@ -124,11 +162,12 @@ impl<M: DmaMemory> Domain<M> {
     ) -> Result<usize, Error> {
         let mapping = self
             .mappings
-            .iter()
-            .position(|map| map.iova == iova)
-            .ok_or(Error::NotMapped)?;
-        let (table, index) = self.leaf::<E>(iova, false, bits)?;
-        memory::write(&self.tables[table], index, 0);
+            .binary_search_by_key(&iova, |map| map.iova)
+            .map_err(|_| Error::NotMapped)?;
+        for offset in (0..self.mappings[mapping].memory.length()).step_by(4096) {
+            let (table, index) = self.leaf::<E>(iova + offset, false, bits)?;
+            memory::write(&self.tables[table], index, 0);
+        }
         Ok(mapping)
     }
 }

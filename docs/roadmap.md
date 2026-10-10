@@ -61,8 +61,11 @@ provide physical DMA isolation.
   reuse. Unsupported hardware must report its actual isolation limits.
   The [standard SMMUv3 mechanism and QEMU PCI DMA fixture](../kernel/docs/smmuv3.md)
   include stage-2 mappings, IRQ-driven stream quarantine, failure containment
-  and fault injection. Assignment/lease integration and physical qualification
-  remain open, so this broader item is not complete.
+  and fault injection. [Device operation permissions and retained buffer
+  leases](../kernel/docs/io-isolation.md) now separate claim, register/IRQ and
+  DMA-address authority, and share kernel-only memory owners with SMMU mappings.
+  Production assignment/domain integration and physical qualification remain
+  open, so this broader item is not complete.
 - [ ] Implement the applicable RP1/BCM2712 DMA isolation mechanisms after
   establishing their coverage and enforcement properties. Audit bus masters,
   address aliases, bypass routes, PCI configuration/BAR access and MSI targets;

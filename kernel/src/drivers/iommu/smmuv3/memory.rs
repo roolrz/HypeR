@@ -16,6 +16,34 @@ pub unsafe trait DmaMemory {
     fn order(&self) -> usize;
 }
 
+/// A retained, page-aligned DMA buffer; the driver never accesses its CPU bytes.
+///
+/// Unlike control tables, payload memory may be shared with a guest address
+/// space. Keeping this owner alive must retain the hardware-write lease as well
+/// as the physical pages, even after all originating handles have closed.
+///
+/// # Safety
+/// `length` must be a stable, nonzero multiple of 4096. For every aligned offset
+/// below it, `physical_page` must identify a stable live 4096-byte RAM page until
+/// Drop. CPU/guest aliases must use compatible coherent attributes and cannot
+/// create Rust references racing device writes. Pages must not be substituted
+/// or returned to an allocator while any buffer owner remains alive.
+pub unsafe trait DmaBuffer {
+    fn length(&self) -> u64;
+    fn physical_page(&self, offset: u64) -> u64;
+}
+
+// SAFETY: DmaMemory owns one stable, aligned contiguous allocation. Its stronger
+// exclusive-access contract satisfies the payload lifetime requirements.
+unsafe impl<T: DmaMemory> DmaBuffer for T {
+    fn length(&self) -> u64 {
+        4096u64.checked_shl(self.order() as u32).unwrap_or(0)
+    }
+    fn physical_page(&self, offset: u64) -> u64 {
+        self.physical().wrapping_add(offset)
+    }
+}
+
 /// Allocation and platform ordering required by the physical driver.
 pub trait Environment {
     type Memory: DmaMemory;

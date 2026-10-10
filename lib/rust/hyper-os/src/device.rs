@@ -25,6 +25,7 @@ pub struct DmaExtent {
 
 /// Claims one firmware-enumerated, unbound device. The index is a discovery
 /// selector, never an arbitrary physical address or interrupt number.
+/// Requires `ASSIGN_DEVICE` on the assignment authority.
 pub fn claim(
     authority: HandleRef<'_, DeviceAssignmentAuthorityObject>,
     index: u32,
@@ -36,7 +37,7 @@ pub fn claim(
         Rights::TRANSFER
             .union(Rights::DUPLICATE)
             .union(Rights::INSPECT)
-            .union(Rights::WRITE),
+            .union(Rights::ASSIGN_DEVICE),
         &[authority.raw()],
     )
 }
@@ -73,6 +74,7 @@ pub enum FirmwareIdentity<'a> {
 
 /// Claims a unique profile/firmware match. Ambiguous selectors fail instead of
 /// falling back to a different device when the first match is already claimed.
+/// Requires `ASSIGN_DEVICE`; an `INSPECT` duplicate cannot claim.
 pub fn claim_matching(
     authority: HandleRef<'_, DeviceAssignmentAuthorityObject>,
     profile: Profile,
@@ -111,7 +113,7 @@ pub fn claim_matching(
         Rights::TRANSFER
             .union(Rights::DUPLICATE)
             .union(Rights::INSPECT)
-            .union(Rights::WRITE),
+            .union(Rights::ASSIGN_DEVICE),
         &[authority.raw()],
     )
 }
@@ -164,6 +166,7 @@ fn decode_info(record: hyper_abi::HyperNativePhysicalDeviceInfo) -> Result<Info>
 }
 
 /// Inspects an already resident contiguous extent for constructing DMA metadata.
+/// Requires `MAP_DMA` on the authority and `READ | MAP` on the VMO.
 /// The caller must retain the VMO. This does not enable DMA or replace the
 /// frozen guest-memory grants required when attaching a device to a VM.
 pub fn dma_extent(
