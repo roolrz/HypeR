@@ -18,15 +18,16 @@ test = false
 bench = false
 
 [dependencies]
+clap.workspace = true
 hyper-os.workspace = true
 hyper-rt.workspace = true
 hyper-service.workspace = true
-clap.workspace = true
 
 [lints]
 workspace = true
 
 [target.'cfg(target_os = "hyper")'.dependencies]
+hyper-clap-shared.workspace = true
 hyper-vm-policy-shared.workspace = true
 
 [target.'cfg(not(target_os = "hyper"))'.dependencies]

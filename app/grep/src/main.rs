@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
+// Select the shared parser implementation for Native delivery.
+#[cfg(target_os = "hyper")]
+extern crate hyper_clap_shared as _;
+
 use clap::Parser;
 use hyper_grep::Grep;
 use std::io::{self, BufReader, Write};

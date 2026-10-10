@@ -6,6 +6,10 @@
 //! Applications and this Rust shared library are built and deployed together.
 //! This library carries no inspection authority.
 
+// Select the shared parser implementation for Native delivery.
+#[cfg(target_os = "hyper")]
+extern crate hyper_clap_shared as _;
+
 use clap::Args;
 use std::num::NonZeroU64;
 
