@@ -795,6 +795,7 @@ fn object_transfer_classes_match_the_audited_contract() {
         ("guest_mapping", TransferClass::RendezvousOnly),
         ("file_protection", TransferClass::Forbidden),
         ("directory_stream", TransferClass::General),
+        ("backend_memory_lease", TransferClass::Forbidden),
     ];
     assert_eq!(schema::OBJECT_KINDS.len(), expected.len());
     for (kind, expected) in schema::OBJECT_KINDS.iter().zip(expected) {

@@ -3,10 +3,44 @@
 
 # Userspace physical-device assignments
 
-Profile 1 retains the existing virtio-mmio SCSI contract. Profile 2 is a generic
-userspace-controlled resource bundle; the kernel does not interpret controller,
-clock, GPIO, or DMA capability registers. Its 32-byte profile record contains
-`profile` at offset 0 and `resource_count` at offset 8; all other fields are zero.
+Profiles identify the admitted transport: virtio-mmio SCSI (1), a generic
+userspace-controlled resource bundle (2), virtio-mmio network (3), or a mediated
+PCI function (4). The kernel does not implement SDHCI, clock, GPIO or network
+controller protocols for the generic bundle.
+
+The 32-byte profile record contains `profile` at offset 0, `interrupt_count` at
+4, `resource_count` at 8, `pci_identity` at 12, `dma_bus_offset` at 16 and
+`aperture_size` at 24. Non-PCI profiles have zero PCI identity/DMA offset and a
+64 KiB aperture. Userspace bundles have zero or one physical IRQ, but assignment
+reserves one guest IRQ even when the physical IRQ count is zero.
+
+## Capability boundaries
+
+| Object | Operation | Required right |
+| --- | --- | --- |
+| DeviceAssignmentAuthority | Firmware inspection | `INSPECT` |
+| DeviceAssignmentAuthority | Claim by index, match or resource bundle | `ASSIGN_DEVICE` |
+| DeviceAssignmentAuthority | Inspect a resident VMO's DMA extent | `MAP_DMA` (also `READ\|MAP` on the VMO) |
+| PhysicalDevice | Metadata and resource descriptions | `INSPECT` |
+| PhysicalDevice | Bind to a pending VM | `ASSIGN_DEVICE` (also `WRITE` on the VM) |
+| PhysicalDevice | Read / write a userspace register | `READ` / `WRITE` |
+| PhysicalDevice | Inspect a pending IRQ sequence | `WAIT` |
+| PhysicalDevice | Acknowledge/rearm or assert the guest IRQ | `ACK_INTERRUPT` |
+
+Claim-by-index/match returns `TRANSFER|DUPLICATE|INSPECT|ASSIGN_DEVICE`.
+A userspace resource bundle additionally grants `READ|WRITE|WAIT|ACK_INTERRUPT`.
+Delegation can only preserve or reduce rights. An `INSPECT` duplicate cannot
+claim hardware, attach a device, query VMO physical addresses or operate an IRQ.
+Register reads may have side effects: `READ` is device operation authority and
+still requires an active assignment. These rights do not establish DMA isolation.
+
+Init retains root discovery/assignment/address authority and grants precisely
+`INSPECT|ASSIGN_DEVICE|MAP_DMA` to io-runtime. Its register/IRQ worker receives only
+`READ|WRITE|WAIT|ACK_INTERRUPT` on the already claimed device, with no assignment or
+further delegation permission. The Linux I/O VM receives mediated resources,
+not a Native assignment-authority handle.
+
+## Firmware and register access
 
 The existing `physical_device_info` record reports `device_id = 0` and
 `transport_version = 0` for a userspace-managed bundle, whose register protocol
@@ -24,6 +58,7 @@ start at zero and are contiguous; `NOT_FOUND` ends enumeration. Fields are:
 | 2 | Original NUL-separated compatible strings |
 | 3 | Translated register ranges, little-endian u64 base/length pairs |
 | 4 | Named raw FDT property bytes |
+| 5 | NUL-separated names of all immutable firmware properties |
 
 Info flag bit 0 means kernel-owned; other bits are reserved. IRQ trigger is zero
 for absent, 1 for level, or 2 for edge. Only field 4 accepts a name; it must be
@@ -37,8 +72,7 @@ access: firmware inspection and resource claims are separate operations.
 `resource: u32`, guest-aperture `offset: u64`) and an IRQ node index. The kernel
 checks exact firmware resources, overlap, kernel ownership, existing claims,
 and the 64 KiB aperture. This version supports exclusive level-triggered SPIs.
-The returned PhysicalDevice has WAIT as well as the existing assignment rights;
-legacy claim calls retain their original rights.
+The returned PhysicalDevice has the userspace bundle rights listed above.
 
 After installing a generic assignment, the VM owner registers its exact 64 KiB
 assigned aperture with `virtual_machine_register_mmio` before starting any vCPU.

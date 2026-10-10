@@ -104,6 +104,7 @@ pub(super) fn run() -> Result<(), Error> {
     let group = TaskGroup::try_new(&domain).map_err(|_| Error::Group)?;
     let process = create_process(&domain, &group)?;
 
+    super::device_authority::verify(&process).map_err(|_| Error::State(60))?;
     verify_handle_accounting_churn(&process)?;
     verify_partial_charge_records(&process)?;
     verify_handle_quota_rollback(&process, ResourceLimits::UNLIMITED)?;

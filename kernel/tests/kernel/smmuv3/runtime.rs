@@ -3,11 +3,14 @@
 
 //! Faults handled by the real IRQ/worker path, without polling `EventQ` in tests.
 
-use super::{E, Error, Fixture, GUARD, IOVA, OTHER_IOVA, PATTERN_A, PATTERN_B, fill, page, verify};
+use super::{
+    E, Error, Fixture, GUARD, IOVA, LeaseAddress, OTHER_IOVA, PATTERN_A, PATTERN_B, fill, page,
+    verify,
+};
 use crate::kernel::device::iommu::runtime;
 use hyper::{
     drivers::{
-        iommu::smmuv3::{CommandError, Containment, DmaMemory, Environment, Permissions},
+        iommu::smmuv3::{CommandError, Containment, Environment, Permissions},
         platform::{DriverServices, PlatformDevice},
     },
     sync::InterruptSpinLock,

@@ -118,7 +118,7 @@ pub enum FaultOutcome {
     AlreadyQuarantined,
 }
 
-impl<E: Environment> Controller<E> {
+impl<E: Environment, B: super::DmaBuffer> Controller<E, B> {
     pub fn failure(&self) -> Option<Failure> {
         self.failure
     }

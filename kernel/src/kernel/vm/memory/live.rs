@@ -32,7 +32,7 @@ pub(crate) struct Mapping {
     // A physical-order index permits logarithmic fault lookup while the
     // immutable extent list remains in frontend order for vhost registration.
     order: Vec<usize>,
-    _backing: GuestMemoryBacking,
+    _lease: crate::kernel::device::dma::Lease,
     _charge: CommittedCharge,
 }
 
@@ -57,9 +57,9 @@ impl Mapping {
         let mut extents: Vec<Extent> = Vec::new();
         crate::kernel::mm::reclaim::reserve_exact(&mut extents, count)
             .map_err(|_| Error::MetadataAllocation)?;
+        let lease = crate::kernel::device::dma::BackendMemoryLease::prepare(backing, domain)?;
         for offset in (0..length).step_by(PAGE as usize) {
-            backing.populate_page(offset)?;
-            let physical = backing.physical_page(offset)?.get();
+            let physical = lease.object().physical_page(offset);
             if physical
                 .checked_add(PAGE)
                 .is_none_or(|end| end > PHYSICAL_LIMIT)
@@ -109,7 +109,7 @@ impl Mapping {
             extents,
             table_capacity,
             order,
-            _backing: backing,
+            _lease: lease,
             _charge: charge,
         })
     }
