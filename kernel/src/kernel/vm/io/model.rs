@@ -224,6 +224,14 @@ impl NotificationState {
     pub(crate) fn back_irq(&self) -> bool {
         self.enabled && !self.closed && self.kicks != 0
     }
+    pub(crate) fn signals(&self, native: bool) -> u64 {
+        u64::from(self.closed)
+            | if native {
+                u64::from(self.status) << 1
+            } else {
+                0
+            }
+    }
     pub(crate) fn close(&mut self) {
         if self.closed {
             return;

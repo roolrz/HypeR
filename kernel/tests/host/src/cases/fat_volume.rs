@@ -198,6 +198,45 @@ fn fat_write_buffer_eviction_and_partial_overwrites_preserve_other_sectors() {
 }
 
 #[test]
+fn fat_sparse_and_contiguous_writes_preserve_overlay_across_drains() {
+    let disk = Disk::fresh();
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    require_ok(fs.create("ranges", false));
+    let mut contents = vec![0x53; 1024 * 1024 + 19];
+    require_ok(fs.write_at("ranges", 0, &contents));
+    // Cover single sectors, whole bitmap words and windows, and partial heads
+    // and tails. Leave gaps whose old bytes must survive every operation.
+    let mut seed = 0x17ab_u64;
+    for length in [
+        1,
+        511,
+        512,
+        513,
+        63 * 512,
+        64 * 512,
+        65 * 512,
+        128 * 1024 + 1,
+    ] {
+        for _ in 0..8 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let offset = seed as usize % (contents.len() - length);
+            let bytes = vec![(seed >> 32) as u8; length];
+            require_ok(fs.write_at("ranges", offset as u64, &bytes));
+            contents[offset..offset + length].copy_from_slice(&bytes);
+        }
+    }
+    require_ok(fs.sync());
+    drop(fs);
+    let mut fs = require_ok(FatVolume::mount(disk));
+    let mut output = vec![0; contents.len()];
+    assert_eq!(
+        require_ok(fs.read_at("ranges", 0, &mut output)),
+        output.len()
+    );
+    assert_eq!(output, contents);
+}
+
+#[test]
 fn fat_read_cache_refill_keeps_pending_neighbor_writes_after_drain() {
     for full_bytes in [20 * 1024, 2 * 1024 * 1024] {
         let disk = Disk::fresh();

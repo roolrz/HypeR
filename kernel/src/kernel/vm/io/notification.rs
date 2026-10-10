@@ -3,7 +3,10 @@
 
 //! Direct queue kicks and completion IRQs, independent of userspace scheduling.
 
-use super::super::{installed::InstalledMachine, registry::VmId};
+use super::super::{
+    installed::InstalledMachine,
+    registry::{VmBinding, VmId},
+};
 use super::{Error, Route, model};
 use crate::kernel::accounting::{CommittedCharge, ResourceDomain};
 use crate::kernel::authority::Rights;
@@ -41,53 +44,87 @@ pub(crate) struct Shared {
     signals: SignalState,
     _charge: CommittedCharge,
 }
+
+/// Retains each changed controller until its saved state has been published.
+/// Keeping this obligation local to a mutation prevents a later no-op from
+/// consuming it; publication must run after releasing the source lock.
+#[must_use = "publish saved interrupt changes outside the source lock"]
+struct PendingInterrupts {
+    front: Option<VmBinding>,
+    back: Option<VmBinding>,
+}
+
+impl PendingInterrupts {
+    fn publish(self) {
+        if let Some(front) = self.front {
+            front.publish_changed_interrupts();
+        }
+        if let Some(back) = self.back {
+            back.publish_changed_interrupts();
+        }
+    }
+}
+
 impl Shared {
     fn mutate<R>(&self, operation: impl FnOnce(&mut model::NotificationState) -> R) -> R {
+        let (value, pending) = self.update_saved(operation);
+        pending.publish();
+        value
+    }
+
+    fn update_saved<R>(
+        &self,
+        operation: impl FnOnce(&mut model::NotificationState) -> R,
+    ) -> (R, PendingInterrupts) {
         // Either peer can leave the registry independently. Keep the surviving
         // MMIO endpoint operational and let Native policy report device failure.
         let front = self
             .front
             .and_then(|id| super::super::registry::acquire_binding(id).ok());
         let back = super::super::registry::acquire_binding(self.back).ok();
-        let value = self.state.with(|state| {
+        let (value, front_changed, back_changed) = self.state.with(|state| {
             if self.detached.load(Ordering::Acquire) {
-                return operation(state);
+                return (operation(state), false, false);
             }
+            let previous_front = state.front_irq();
+            let previous_back = state.back_irq();
+            let previous_signals = state.signals(self.front.is_none());
             if (self.front.is_some() && front.is_none()) || back.is_none() {
                 state.close();
             }
             let value = operation(state);
-            if let Some(front) = &front {
+            let front_changed = previous_front != state.front_irq();
+            let back_changed = previous_back != state.back_irq();
+            // The source lock serializes both the state transition and its
+            // saved-controller update. Repeated kicks/completions coalesce;
+            // they do not require another controller lock or scheduler prompt.
+            if front_changed && let Some(front) = &front {
                 super::set_line(front, self.front_irq, state.front_irq());
             }
-            if let Some(back) = &back {
+            if back_changed && let Some(back) = &back {
                 super::set_line(back, self.back_irq, state.back_irq());
             }
-            let signals = u64::from(state.closed)
-                | if self.front.is_none() {
-                    u64::from(state.status) << 1
-                } else {
-                    0
-                };
-            if self
-                .signals
-                .update(
-                    SignalMask::from_trusted_bits(7),
-                    SignalMask::from_trusted_bits(signals),
-                )
-                .is_err()
+            let signals = state.signals(self.front.is_none());
+            if previous_signals != signals
+                && self
+                    .signals
+                    .update(
+                        SignalMask::from_trusted_bits(7),
+                        SignalMask::from_trusted_bits(signals),
+                    )
+                    .is_err()
             {
                 hyper::debug::invariant_failure("vm::io::notification::mutate invariant");
             }
-            value
+            (value, front_changed, back_changed)
         });
-        if let Some(front) = front {
-            front.publish_changed_interrupts();
-        }
-        if let Some(back) = back {
-            back.publish_changed_interrupts();
-        }
-        value
+        (
+            value,
+            PendingInterrupts {
+                front: if front_changed { front } else { None },
+                back: if back_changed { back } else { None },
+            },
+        )
     }
     pub(super) fn close(&self) {
         if !self.installed.load(Ordering::Acquire) {
@@ -104,12 +141,19 @@ impl Shared {
         if access.size() != 4 {
             return Some(MmioAction::Stop);
         }
+        if offset == 0x60 && matches!(access.operation(), MmioOperation::Read) {
+            // VM teardown closes the shared route under the same source lock.
+            // A snapshot needs no registry lease or interrupt reconciliation.
+            return Some(
+                self.state
+                    .with(|state| MmioAction::CompleteRead(state.status as u64)),
+            );
+        }
         Some(self.mutate(|state| match (offset, access.operation()) {
             (0x50, MmioOperation::Write(queue)) => {
                 state.kick(queue);
                 MmioAction::CompleteWrite
             }
-            (0x60, MmioOperation::Read) => MmioAction::CompleteRead(state.status as u64),
             (0x64, MmioOperation::Write(mask)) => {
                 state.ack(mask as u32);
                 MmioAction::CompleteWrite
@@ -119,6 +163,23 @@ impl Shared {
     }
     pub(super) fn back_mmio(&self, access: MmioAccess) -> MmioAction {
         let offset = access.address().get() - self.back_base;
+        if access.size() == 4 && matches!(access.operation(), MmioOperation::Read) {
+            match offset {
+                0x00 => return MmioAction::CompleteRead(0x4859_4e42),
+                0x04 => return MmioAction::CompleteRead(1),
+                0x08 => {
+                    return self
+                        .state
+                        .with(|state| MmioAction::CompleteRead(state.epoch as u64));
+                }
+                0x0c => {
+                    return self
+                        .state
+                        .with(|state| MmioAction::CompleteRead(u64::from(state.enabled)));
+                }
+                _ => {}
+            }
+        }
         if (0x20..=0x70).contains(&offset) {
             if access.size() != 8 {
                 return MmioAction::Stop;
@@ -149,10 +210,6 @@ impl Shared {
         }
 
         self.mutate(|state| match (offset, access.size(), access.operation()) {
-            (0x00, 4, MmioOperation::Read) => MmioAction::CompleteRead(0x4859_4e42),
-            (0x04, 4, MmioOperation::Read) => MmioAction::CompleteRead(1),
-            (0x08, 4, MmioOperation::Read) => MmioAction::CompleteRead(state.epoch as u64),
-            (0x0c, 4, MmioOperation::Read) => MmioAction::CompleteRead(u64::from(state.enabled)),
             (0x10, 4, MmioOperation::Read) => MmioAction::CompleteRead(state.take_kicks() as u64),
             (0x18, 8, MmioOperation::Write(value)) => {
                 state.call(value);
@@ -168,6 +225,15 @@ pub(crate) struct Notification {
     shared: FallibleArc<Shared>,
 }
 impl Notification {
+    #[cfg(all(CONFIG_ARCH_AARCH64, feature = "kernel-self-test"))]
+    pub(crate) fn verify_delivery_for_test(
+        front: super::super::registry::PreparedVm,
+        back: super::super::registry::PreparedVm,
+        domain: &ResourceDomain,
+    ) -> Result<(), &'static str> {
+        delivery_test::run(front, back, domain)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
         front: &FallibleArc<InstalledMachine>,
@@ -417,6 +483,10 @@ impl Notification {
             .map_err(Into::into)
     }
 }
+
+#[cfg(all(CONFIG_ARCH_AARCH64, feature = "kernel-self-test"))]
+#[path = "../../../../tests/kernel/guest_notification.rs"]
+mod delivery_test;
 impl private::Sealed for Notification {}
 impl private::UserExportable for Notification {}
 impl KernelObject for Notification {

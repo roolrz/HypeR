@@ -176,13 +176,19 @@ reserves a future network identity without creating a frontend or link.
 The reference GICv2/GICv3 controller exposes 256 interrupt IDs, and physical
 assignment supports multiple controllers with common VM publication and
 retirement. The network device has one RX/TX pair, a configured MAC and MTU
-1500; offloads and multiqueue remain disabled.
+1500. Guest TX checksum and TCPv4/TCPv6 segmentation can be negotiated with an
+offload-capable I/O VM. Both pinned upstream appliances advertise these optional
+features; default builds require no local backend override. RX offloads and
+multiqueue remain disabled. See the [network contract](io-vm.md#guest-networking) for the header
+ownership and software fallback requirements.
 
 Host configuration/state-machine tests and Linux control/retirement-failure
 tests pass. Manual AArch64 QEMU TCG acceptance passes with both GICv2 and GICv3:
 
 - A disk+network guest and a network-only guest obtain separate DHCP leases.
 - Each downloads a 256 KiB + 137 byte host-served payload and verifies SHA-256.
+  The TX offload test also uploads it, requiring an independently computed
+  checksum receipt, and verifies negotiated feature bits after each activation.
   An additional public HTTP fetch checks DNS and outbound connectivity.
 - Each network driver unbinds/rebinds and transfers again while the other VM
   remains running; both guests also pass stop/start and repeat transfers.
@@ -196,7 +202,18 @@ default GICv3 QEMU deployment. Separate guest boot checks confirm that a missing
 NIC or DHCP server does not block the shell.
 
 The QEMU results above are functional tests without performance measurements. The
-Pi 5 development image also passed a physical smoke test after PCI host window
+TX offload implementation has passed both GIC variants and fallback with the
+previous appliance generation. Its Linux packet fixture also passes TCPv4/TCPv6
+software segmentation and checksum verification on both kernel profiles.
+The 2026-10-10 manual Pi 5 survey reached about 935–936 Mbit/s guest TX after
+fixing vhost work-node reuse ordering. Single-connection 60- and 120-second TX
+runs and one/four-connection bidirectional cases completed without a stall.
+These results used a local build of the same appliance source tree; they do
+not qualify the exact published binary or establish long-duration stability.
+See the [Pi 5 I/O measurements](../README.md#exploratory-pi-5-io-measurements) for the
+comparison and its limits.
+
+The Pi 5 development image also passed a physical smoke test after PCI host window
 setup was corrected. The implementation assigns the whole RP1 PCI function to
 Linux, with a separate noncoherent DMA bus and exclusive ownership of the RP1
 shared infrastructure. The published pin subsequently served the 2026-10-06
