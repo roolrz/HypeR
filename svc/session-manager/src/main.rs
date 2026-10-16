@@ -211,7 +211,21 @@ fn run_session(
         .into());
     }
     let mut bytes = [0; 32];
-    let count = ready.as_byte_channel().receive(&mut bytes)?;
+    let count = match ready.as_byte_channel().try_receive(&mut bytes) {
+        Ok(count) => count,
+        Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)) => {
+            // Exit withdraws active handles before publishing TERMINATED.
+            // Readiness can therefore close first; still collect the child's
+            // termination reason instead of losing it behind a channel error.
+            return Err(terminal_failure(
+                &terminal_process,
+                &retirement,
+                "terminal-service closed readiness during startup",
+            )
+            .into());
+        }
+        Err(error) => return Err(error.into()),
+    };
     if &bytes[..count] != b"terminal-ready\n" {
         return Err("invalid terminal readiness reply".into());
     }

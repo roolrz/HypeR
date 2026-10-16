@@ -88,7 +88,7 @@ def run(args, case, initramfs):
                    '--disk', str(args.output / case / 'disk.img')]
     with Session(command, log) as vm:
         if case == 'missing-terminal':
-            vm.observe(rb'HypeR component-manager: CRITICAL: /session-manager generation=1 worker failure: .*terminal-service exited during startup.*ProcessExited', 120)
+            vm.observe(rb'HypeR component-manager: CRITICAL: /session-manager generation=1 worker failure: .*terminal-service (?:exited|closed readiness) during startup.*ProcessExited', 120)
             print(f'service failure {case} passed: {log}', flush=True)
             return
         vm.await_text(rb'hyper-sh\$ ', timeout=180)
