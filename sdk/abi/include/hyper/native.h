@@ -53,6 +53,7 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_STATUS_IO_ERROR (-INT64_C(23))
 #define HYPER_NATIVE_STATUS_NO_SPACE (-INT64_C(24))
 #define HYPER_NATIVE_STATUS_READ_ONLY (-INT64_C(25))
+#define HYPER_NATIVE_STATUS_REVOKED (-INT64_C(26))
 
 #define HYPER_NATIVE_OBJECT_NONE UINT32_C(0)
 #define HYPER_NATIVE_OBJECT_EVENT UINT32_C(1)
@@ -92,6 +93,8 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_OBJECT_DIRECTORY_STREAM UINT32_C(35)
 #define HYPER_NATIVE_OBJECT_ROOT_TRANSITION UINT32_C(36)
 #define HYPER_NATIVE_OBJECT_GUEST_INTERRUPT UINT32_C(37)
+#define HYPER_NATIVE_OBJECT_PROCESS_RETIREMENT UINT32_C(38)
+#define HYPER_NATIVE_OBJECT_CRASH_VIEW UINT32_C(39)
 
 #define HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN UINT32_C(0)
 #define HYPER_NATIVE_TRANSFER_CLASS_GENERAL UINT32_C(1)
@@ -137,10 +140,14 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
         case HYPER_NATIVE_OBJECT_DIRECTORY_STREAM: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
         case HYPER_NATIVE_OBJECT_ROOT_TRANSITION: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         case HYPER_NATIVE_OBJECT_GUEST_INTERRUPT: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
+        case HYPER_NATIVE_OBJECT_PROCESS_RETIREMENT: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
+        case HYPER_NATIVE_OBJECT_CRASH_VIEW: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
         default: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
     }
 }
 
+#define HYPER_NATIVE_RIGHT_RETIRE (UINT64_C(1) << 38)
+#define HYPER_NATIVE_RIGHT_RETAIN_PROCESS (UINT64_C(1) << 37)
 #define HYPER_NATIVE_RIGHT_LOCK_MEMORY (UINT64_C(1) << 36)
 #define HYPER_NATIVE_RIGHT_PROTECT (UINT64_C(1) << 35)
 #define HYPER_NATIVE_RIGHT_MANAGE_NAMESPACE (UINT64_C(1) << 34)
@@ -179,8 +186,10 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_RIGHT_SET_ATTRIBUTES (UINT64_C(1) << 31)
 #define HYPER_NATIVE_RIGHT_LOCK_FILE (UINT64_C(1) << 32)
 
-#define HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x1fffffffff)
+#define HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x7fffffffff)
 
+#define HYPER_NATIVE_SIGNAL_PROCESS_RETIREMENT_READY (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_PROCESS_RETIREMENT_RELEASED (UINT64_C(1) << 1)
 #define HYPER_NATIVE_SIGNAL_PHYSICAL_DEVICE_READABLE (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_NATIVE_BLOCK_PEER_CLOSED (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_READABLE (UINT64_C(1) << 0)
@@ -208,6 +217,28 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_WRITABLE (UINT64_C(1) << 1)
 #define HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_PEER_CLOSED (UINT64_C(1) << 2)
 
+#define HYPER_NATIVE_PROCESS_RETIREMENT_PREPARED UINT64_C(0)
+#define HYPER_NATIVE_PROCESS_RETIREMENT_RUNNING UINT64_C(1)
+#define HYPER_NATIVE_PROCESS_RETIREMENT_STOPPING UINT64_C(2)
+#define HYPER_NATIVE_PROCESS_RETIREMENT_READY UINT64_C(3)
+#define HYPER_NATIVE_PROCESS_RETIREMENT_RELEASED UINT64_C(4)
+#define HYPER_NATIVE_CRASH_PARTIAL_MEMORY UINT64_C(1)
+#define HYPER_NATIVE_CRASH_PARTIAL_THREADS UINT64_C(2)
+#define HYPER_NATIVE_CRASH_PARTIAL_HANDLES UINT64_C(4)
+#define HYPER_NATIVE_CRASH_PARTIAL_MAPPINGS UINT64_C(8)
+#define HYPER_NATIVE_PROCESS_RETIREMENT_RELEASE_NONE UINT64_C(0)
+#define HYPER_NATIVE_PROCESS_RETIREMENT_RELEASE_EXPLICIT UINT64_C(1)
+#define HYPER_NATIVE_PROCESS_RETIREMENT_RELEASE_OWNER_LOST UINT64_C(2)
+#define HYPER_NATIVE_PROCESS_RETIREMENT_RELEASE_DEADLINE UINT64_C(3)
+#define HYPER_NATIVE_PROCESS_RETIREMENT_RELEASE_ABORTED UINT64_C(4)
+#define HYPER_NATIVE_CRASH_MAPPING_RETAINED UINT64_C(1)
+#define HYPER_NATIVE_CRASH_MAPPING_PARTIAL UINT64_C(2)
+#define HYPER_NATIVE_CRASH_MAPPING_EXCLUDED_SHARED UINT64_C(4)
+#define HYPER_NATIVE_CRASH_MAPPING_EXCLUDED_FILE UINT64_C(8)
+#define HYPER_NATIVE_CRASH_MAPPING_ANONYMOUS UINT64_C(1)
+#define HYPER_NATIVE_CRASH_MAPPING_PRIVATE_FILE UINT64_C(2)
+#define HYPER_NATIVE_CRASH_MAPPING_SHARED UINT64_C(3)
+#define HYPER_NATIVE_CRASH_READ_MAX_BYTES UINT64_C(65536)
 #define HYPER_NATIVE_MEMORY_STATISTICS_HEAP UINT64_C(1)
 #define HYPER_NATIVE_MEMORY_STATISTICS_BUDDY UINT64_C(2)
 #define HYPER_NATIVE_MEMORY_STATISTICS_OWNER UINT64_C(3)
@@ -584,6 +615,15 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_GUEST_INTERRUPT_CREATE UINT64_C(170)
 #define HYPER_NATIVE_SYS_GUEST_INTERRUPT_SET_LEVEL UINT64_C(171)
 #define HYPER_NATIVE_SYS_MEMORY_INSPECTOR_READ_STATISTICS UINT64_C(172)
+#define HYPER_NATIVE_SYS_PROCESS_BUILDER_RETAIN UINT64_C(173)
+#define HYPER_NATIVE_SYS_PROCESS_RETIREMENT_GET_INFO UINT64_C(174)
+#define HYPER_NATIVE_SYS_PROCESS_RETIREMENT_OPEN_VIEW UINT64_C(175)
+#define HYPER_NATIVE_SYS_PROCESS_RETIREMENT_RELEASE UINT64_C(176)
+#define HYPER_NATIVE_SYS_CRASH_VIEW_GET_INFO UINT64_C(177)
+#define HYPER_NATIVE_SYS_CRASH_VIEW_READ UINT64_C(178)
+#define HYPER_NATIVE_SYS_CRASH_VIEW_THREAD UINT64_C(179)
+#define HYPER_NATIVE_SYS_CRASH_VIEW_MAPPING UINT64_C(180)
+#define HYPER_NATIVE_SYS_CRASH_VIEW_HANDLE UINT64_C(181)
 #define HYPER_NATIVE_SYS_NATIVE_BLOCK_TRANSFER UINT64_C(496)
 
 static inline uint64_t hyper_native_failure_result_mask(
@@ -607,6 +647,120 @@ static inline uint64_t hyper_native_failure_result_mask(
     }
     return UINT64_C(0);
 }
+
+#define HYPER_NATIVE_PROCESS_RETIREMENT_INFO_MIN_SIZE UINT64_C(104)
+typedef struct hyper_native_process_retirement_info_t {
+    uint32_t size;
+    uint32_t phase;
+    uint32_t flags;
+    uint32_t release_reason;
+    uint64_t process_koid;
+    uint64_t deadline_ns;
+    uint64_t retained_bytes;
+    uint64_t memory_limit;
+    uint32_t terminal_reason;
+    uint32_t fault_class;
+    int64_t exit_status;
+    uint64_t fault_pc;
+    uint64_t fault_address;
+    uint64_t fault_syndrome;
+    uint32_t thread_count;
+    uint32_t mapping_count;
+    uint32_t handle_count;
+    uint32_t reserved;
+} hyper_native_process_retirement_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_process_retirement_info_t) == 104, "process_retirement_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_process_retirement_info_t) == 8, "process_retirement_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, size) == 0, "process_retirement_info.size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, phase) == 4, "process_retirement_info.phase offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, flags) == 8, "process_retirement_info.flags offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, release_reason) == 12, "process_retirement_info.release_reason offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, process_koid) == 16, "process_retirement_info.process_koid offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, deadline_ns) == 24, "process_retirement_info.deadline_ns offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, retained_bytes) == 32, "process_retirement_info.retained_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, memory_limit) == 40, "process_retirement_info.memory_limit offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, terminal_reason) == 48, "process_retirement_info.terminal_reason offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, fault_class) == 52, "process_retirement_info.fault_class offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, exit_status) == 56, "process_retirement_info.exit_status offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, fault_pc) == 64, "process_retirement_info.fault_pc offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, fault_address) == 72, "process_retirement_info.fault_address offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, fault_syndrome) == 80, "process_retirement_info.fault_syndrome offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, thread_count) == 88, "process_retirement_info.thread_count offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, mapping_count) == 92, "process_retirement_info.mapping_count offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, handle_count) == 96, "process_retirement_info.handle_count offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_retirement_info_t, reserved) == 100, "process_retirement_info.reserved offset");
+
+#define HYPER_NATIVE_CRASH_THREAD_MIN_SIZE UINT64_C(840)
+typedef struct hyper_native_crash_thread_t {
+    uint32_t size;
+    uint32_t machine;
+    uint32_t flags;
+    uint32_t reserved;
+    uint64_t thread_koid;
+    uint64_t pc;
+    uint64_t sp;
+    uint64_t tls;
+    uint64_t processor_state;
+    uint8_t general[256];
+    uint8_t vector[512];
+    uint8_t fp_control[16];
+} hyper_native_crash_thread_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_crash_thread_t) == 840, "crash_thread size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_crash_thread_t) == 8, "crash_thread alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_thread_t, size) == 0, "crash_thread.size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_thread_t, machine) == 4, "crash_thread.machine offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_thread_t, flags) == 8, "crash_thread.flags offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_thread_t, reserved) == 12, "crash_thread.reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_thread_t, thread_koid) == 16, "crash_thread.thread_koid offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_thread_t, pc) == 24, "crash_thread.pc offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_thread_t, sp) == 32, "crash_thread.sp offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_thread_t, tls) == 40, "crash_thread.tls offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_thread_t, processor_state) == 48, "crash_thread.processor_state offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_thread_t, general) == 56, "crash_thread.general offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_thread_t, vector) == 312, "crash_thread.vector offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_thread_t, fp_control) == 824, "crash_thread.fp_control offset");
+
+#define HYPER_NATIVE_CRASH_MAPPING_MIN_SIZE UINT64_C(48)
+typedef struct hyper_native_crash_mapping_t {
+    uint32_t size;
+    uint32_t flags;
+    uint64_t base;
+    uint64_t length;
+    uint64_t object_offset;
+    uint64_t object_koid;
+    uint32_t permissions;
+    uint32_t kind;
+} hyper_native_crash_mapping_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_crash_mapping_t) == 48, "crash_mapping size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_crash_mapping_t) == 8, "crash_mapping alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_mapping_t, size) == 0, "crash_mapping.size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_mapping_t, flags) == 4, "crash_mapping.flags offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_mapping_t, base) == 8, "crash_mapping.base offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_mapping_t, length) == 16, "crash_mapping.length offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_mapping_t, object_offset) == 24, "crash_mapping.object_offset offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_mapping_t, object_koid) == 32, "crash_mapping.object_koid offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_mapping_t, permissions) == 40, "crash_mapping.permissions offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_mapping_t, kind) == 44, "crash_mapping.kind offset");
+
+#define HYPER_NATIVE_CRASH_HANDLE_MIN_SIZE UINT64_C(40)
+typedef struct hyper_native_crash_handle_t {
+    uint32_t size;
+    uint32_t kind;
+    uint64_t value;
+    uint64_t koid;
+    uint64_t rights;
+    uint32_t flags;
+    uint32_t reserved;
+} hyper_native_crash_handle_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_crash_handle_t) == 40, "crash_handle size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_crash_handle_t) == 8, "crash_handle alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_handle_t, size) == 0, "crash_handle.size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_handle_t, kind) == 4, "crash_handle.kind offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_handle_t, value) == 8, "crash_handle.value offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_handle_t, koid) == 16, "crash_handle.koid offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_handle_t, rights) == 24, "crash_handle.rights offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_handle_t, flags) == 32, "crash_handle.flags offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_crash_handle_t, reserved) == 36, "crash_handle.reserved offset");
 
 #define HYPER_NATIVE_MEMORY_HEAP_STATISTICS_MIN_SIZE UINT64_C(176)
 typedef struct hyper_native_memory_heap_statistics_t {

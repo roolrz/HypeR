@@ -39,6 +39,9 @@ const CAPABILITY_CHANNEL_OBJECT_KIND: u32 =
     hyper::abi::native::HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL;
 const THREAD_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_THREAD;
 const PROCESS_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_PROCESS;
+const PROCESS_RETIREMENT_OBJECT_KIND: u32 =
+    hyper::abi::native::HYPER_NATIVE_OBJECT_PROCESS_RETIREMENT;
+const CRASH_VIEW_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_CRASH_VIEW;
 const TASK_GROUP_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_TASK_GROUP;
 const RESOURCE_DOMAIN_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_RESOURCE_DOMAIN;
 const TASK_FACTORY_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_TASK_FACTORY;
@@ -134,6 +137,8 @@ impl ObjectKind {
     pub(crate) const THREAD: Self = Self(THREAD_OBJECT_KIND);
     /// Native process-control kind declared by the generated ABI schema.
     pub(crate) const PROCESS: Self = Self(PROCESS_OBJECT_KIND);
+    pub(crate) const PROCESS_RETIREMENT: Self = Self(PROCESS_RETIREMENT_OBJECT_KIND);
+    pub(crate) const CRASH_VIEW: Self = Self(CRASH_VIEW_OBJECT_KIND);
     /// Grouped process-lifecycle kind declared by the generated ABI schema.
     pub(crate) const TASK_GROUP: Self = Self(TASK_GROUP_OBJECT_KIND);
     /// Hierarchical resource-accounting kind declared by the generated ABI schema.
@@ -189,6 +194,8 @@ impl ObjectKind {
             | CAPABILITY_CHANNEL_OBJECT_KIND
             | THREAD_OBJECT_KIND
             | PROCESS_OBJECT_KIND
+            | PROCESS_RETIREMENT_OBJECT_KIND
+            | CRASH_VIEW_OBJECT_KIND
             | TASK_GROUP_OBJECT_KIND
             | RESOURCE_DOMAIN_OBJECT_KIND
             | TASK_FACTORY_OBJECT_KIND

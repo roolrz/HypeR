@@ -95,6 +95,16 @@ pub(crate) struct UserContext {
 }
 
 impl UserContext {
+    pub(crate) fn snapshot_registers(&self, output: &mut hyper::hal::user::UserRegisterSnapshot) {
+        output.machine = 183;
+        output.general[..31].copy_from_slice(&self.machine.general);
+        output.pc = self.machine.program_counter;
+        output.sp = self.machine.stack_pointer;
+        output.tls = self.machine.tpidr_el0;
+        output.processor_state = self.machine.processor_state;
+        self.machine.fp.snapshot(output);
+    }
+
     pub(crate) fn set_entry_argument(&mut self, argument: u64) {
         self.machine.general[0] = argument;
     }

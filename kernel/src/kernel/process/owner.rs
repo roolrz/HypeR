@@ -81,6 +81,9 @@ static RETIREMENTS: ProcessLock<RetirementQueue> = ProcessLock::new(RetirementQu
 });
 
 fn queue_retirement(process: Process) {
+    if process.inner.retirement_queued.swap(true, Ordering::AcqRel) {
+        return;
+    }
     RETIREMENTS.with(|queue| queue.ready.push_back(process));
 }
 
@@ -119,7 +122,13 @@ pub(crate) fn reap_one_process(_access: &mut crate::kernel::reaper::ReaperAccess
     let retry = process.inner.retirement_retry.with(Option::take);
     let step = match retry {
         Some(retry) => match retry.retry() {
-            Ok(()) => ProcessRetirementStep::Complete,
+            Ok(())
+                if process.inner.state.with(|state| state.lifecycle.phase())
+                    == ProcessPhase::Retired =>
+            {
+                ProcessRetirementStep::Complete
+            }
+            Ok(()) => ProcessRetirementStep::InProgress,
             Err((retry, _)) => ProcessRetirementStep::Retry(retry),
         },
         None => match process.retire() {
@@ -219,6 +228,8 @@ struct ProcessState {
     // storage stays charged until final table retirement.
     handle_table_charge: Option<CommittedCharge>,
     handles_retired: bool,
+    stopping_handle_cursor: usize,
+    address_retired: bool,
 }
 
 struct HandleChargeState {
@@ -258,6 +269,9 @@ pub(super) struct ProcessInner {
     state: ProcessLock<ProcessState>,
     object: PublishedOnce<PublishableRef<ProcessObject, KernelService>>,
     stopped: Completion,
+    retirement_queued: AtomicBool,
+    retention: PublishedOnce<FallibleArc<super::retention::Retention>>,
+    retention_budget: ProcessLock<Option<FallibleArc<super::retention::SupervisorBudget>>>,
     retirement_next: ProcessLock<Option<Process>>,
     retirement_retry: ProcessLock<Option<AddressSpaceRetirement>>,
     _metadata_charge: CommittedCharge,
@@ -477,9 +491,14 @@ impl PreparedProcess {
                 handle_accounting: HandleAccounting::new(),
                 handle_table_charge: None,
                 handles_retired: false,
+                stopping_handle_cursor: 0,
+                address_retired: false,
             }),
             object: PublishedOnce::new(),
             stopped: Completion::new(),
+            retirement_queued: AtomicBool::new(false),
+            retention: PublishedOnce::new(),
+            retention_budget: ProcessLock::new(None),
             retirement_next: ProcessLock::new(None),
             retirement_retry: ProcessLock::new(None),
             _metadata_charge: metadata_charge,
@@ -579,6 +598,9 @@ impl PreparedProcess {
             process_invariant_violation();
         }
         process.install_object(object);
+        if let Some(retention) = process.inner.retention.get() {
+            retention.started(process.koid().get());
+        }
         process.inner.state.with(|state| {
             if state.lifecycle.publish().is_err() {
                 process_invariant_violation();
@@ -614,6 +636,9 @@ impl PreparedProcess {
             Some(process) => process,
             None => process_invariant_violation(),
         };
+        if let Some(retention) = process.inner.retention.get() {
+            retention.release(super::retention::RELEASE_ABORTED);
+        }
         drop(self.group.take());
         drop(self.registration.take());
         let address = recover_unpublished_address_space(process);
@@ -1007,7 +1032,51 @@ impl Process {
         })
     }
 
+    pub(super) fn install_retention(&self, retention: FallibleArc<super::retention::Retention>) {
+        if self.inner.retention.publish(retention).is_err() {
+            process_invariant_violation();
+        }
+    }
+
+    pub(super) fn retention_budget(
+        &self,
+    ) -> Result<FallibleArc<super::retention::SupervisorBudget>, super::retention::Error> {
+        if let Some(budget) = self.inner.retention_budget.with(|slot| slot.clone()) {
+            return Ok(budget);
+        }
+        let mut prepared = Some(super::retention::SupervisorBudget::new(&self.inner.domain)?);
+        let budget = self.inner.retention_budget.with(|slot| {
+            if slot.is_none() {
+                *slot = prepared.take();
+            }
+            match slot.as_ref() {
+                Some(budget) => budget.clone(),
+                None => process_invariant_violation(),
+            }
+        });
+        drop(prepared);
+        Ok(budget)
+    }
+
+    pub(crate) fn request_fault_stop(
+        &self,
+        reason: TerminalReason,
+        pc: u64,
+        address: u64,
+        syndrome: u64,
+    ) -> ProcessStopReport {
+        self.request_stop_inner(reason, Some((pc, address, syndrome)))
+    }
+
     pub(crate) fn request_stop(&self, reason: TerminalReason) -> ProcessStopReport {
+        self.request_stop_inner(reason, None)
+    }
+
+    fn request_stop_inner(
+        &self,
+        reason: TerminalReason,
+        fault: Option<(u64, u64, u64)>,
+    ) -> ProcessStopReport {
         let (newly_requested, completed, effective_reason, pending_threads) =
             self.inner.state.with(|state| {
                 let before = state.lifecycle.phase();
@@ -1016,6 +1085,15 @@ impl Process {
                     Some(reason) => reason,
                     None => process_invariant_violation(),
                 };
+                if newly_requested && let Some(retention) = self.inner.retention.get() {
+                    // Publish the winning fault and stop deadline before a
+                    // concurrent final detach can expose Stopped to the reaper.
+                    // These metadata-only operations never reenter Process.
+                    if let Some((pc, address, syndrome)) = fault {
+                        retention.fault(pc, address, syndrome);
+                    }
+                    retention.stopping(effective_reason);
+                }
                 (
                     newly_requested,
                     before != ProcessPhase::Stopped
@@ -1024,6 +1102,13 @@ impl Process {
                     state.lifecycle.pending_threads(),
                 )
             });
+        if newly_requested {
+            if let Some(address) = self.inner.state.with(|state| state.address_space.clone()) {
+                address.begin_process_stop();
+            }
+            queue_retirement(self.clone());
+            crate::kernel::reaper::request();
+        }
         if completed {
             self.publish_stopped();
         }
@@ -1147,8 +1232,57 @@ impl Process {
     }
 
     fn retire(&self) -> Result<ProcessRetirementStep, ProcessError> {
+        if let Some(retention) = self.inner.retention.get()
+            && retention.released()
+        {
+            retention.discard_released();
+        }
         let phase = self.inner.state.with(|state| state.lifecycle.phase());
+        // Withdrawing active handles does not destroy resolved operation pins.
+        // In-flight transactions retain their reserved slots until rollback;
+        // unrelated endpoints close even while a filesystem call is draining.
+        if phase == ProcessPhase::Stopping {
+            let mut cursor = self.inner.state.with(|state| state.stopping_handle_cursor);
+            for _ in 0..64 {
+                let detached = self
+                    .inner
+                    .handles
+                    .with(|table| table.remove_stopping_owner(&mut cursor));
+                let Some((metadata, owner)) = detached else {
+                    break;
+                };
+                if let Some(retention) = self.inner.retention.get() {
+                    retention.handle(metadata);
+                }
+                owner.complete();
+            }
+            self.inner
+                .state
+                .with(|state| state.stopping_handle_cursor = cursor);
+            return Ok(ProcessRetirementStep::InProgress);
+        }
+        if self.inner.state.with(|state| state.address_retired) {
+            if self.retention_holds() {
+                return Ok(ProcessRetirementStep::InProgress);
+            }
+            self.finish_retirement();
+            return Ok(ProcessRetirementStep::Complete);
+        }
         if phase == ProcessPhase::Stopped {
+            // Capture remaining occupied metadata before the final table seal.
+            if let Some(retention) = self.inner.retention.get() {
+                let mut scan = crate::kernel::capability::HandleScanCursor::from_token(0);
+                loop {
+                    let page = self.scan_handles(scan)?;
+                    for metadata in page.entries() {
+                        retention.handle(*metadata);
+                    }
+                    match page.next() {
+                        Some(next) => scan = next,
+                        None => break,
+                    }
+                }
+            }
             let mut cursor = self.inner.state.with(|state| {
                 let cursor = self.inner.handles.with(HandleTable::begin_teardown)?;
                 state.lifecycle.begin_retirement()?;
@@ -1168,6 +1302,12 @@ impl Process {
                 .handles
                 .with(|table| table.finish_teardown(cursor));
             self.inner.state.with(|state| state.handles_retired = true);
+            if self.inner.retention.get().is_some() {
+                // Let final object destruction run before testing exclusive
+                // VMO ownership. Closed handles no longer carry authority,
+                // but their queued payloads may still hold conservative refs.
+                return Ok(ProcessRetirementStep::InProgress);
+            }
         } else if phase != ProcessPhase::Retiring {
             return Err(ProcessError::Lifecycle(LifecycleError::NotStopped));
         } else if !self.inner.state.with(|state| state.handles_retired) {
@@ -1181,7 +1321,11 @@ impl Process {
         // does not allocate or depend on quota headroom for a new page table.
         let mapping_owner = self.inner.state.with(|state| state.address_space.clone());
         if let Some(address_space) = mapping_owner {
+            address_space.begin_process_stop();
             address_space.retire_file_sources();
+            if let Some(retention) = self.inner.retention.get() {
+                retention.capture(&address_space);
+            }
         }
         let address_space = self.inner.state.with(|state| {
             if !state.handles_retired {
@@ -1203,6 +1347,10 @@ impl Process {
         };
         match NativeAddressSpace::retire(address_space) {
             Ok(()) => {
+                self.inner.state.with(|state| state.address_retired = true);
+                if self.retention_holds() {
+                    return Ok(ProcessRetirementStep::InProgress);
+                }
                 self.finish_retirement();
                 Ok(ProcessRetirementStep::Complete)
             }
@@ -1235,6 +1383,17 @@ impl Process {
             }
             Ok(operation())
         })
+    }
+
+    fn retention_holds(&self) -> bool {
+        match self.inner.retention.get() {
+            Some(retention) if retention.released() => {
+                retention.discard_released();
+                false
+            }
+            Some(_) => true,
+            None => false,
+        }
     }
 
     fn finish_retirement(&self) {
@@ -1295,6 +1454,11 @@ impl Process {
 
     /// Publishes object-visible termination before waking Process joiners.
     fn publish_stopped(&self) {
+        if let Some(retention) = self.inner.retention.get()
+            && let Some(reason) = self.inner.state.with(|state| state.lifecycle.terminal())
+        {
+            retention.stopping(reason);
+        }
         match self.inner.object.get() {
             Some(object) => object.object().publish_stopped(),
             None => process_invariant_violation(),
@@ -1406,7 +1570,12 @@ impl ProcessThreadMembership {
         &self.process
     }
 
-    pub(super) fn detach(mut self, terminal: TerminalReason) {
+    pub(super) fn detach(
+        mut self,
+        terminal: TerminalReason,
+        koid: u64,
+        context: &crate::hal::user::UserContext,
+    ) {
         let record = match self.record.take() {
             Some(record) => record,
             None => process_invariant_violation(),
@@ -1422,6 +1591,14 @@ impl ProcessThreadMembership {
         };
         let detached = self.process.inner.state.with(|state| {
             let before = state.lifecycle.phase();
+            // Select final-thread evidence in the same critical section as
+            // detachment. Concurrent normal exits must not both observe two
+            // live threads and then omit the actual last thread's registers.
+            if (state.lifecycle.terminal().is_some() || state.lifecycle.active_threads() == 1)
+                && let Some(retention) = self.process.inner.retention.get()
+            {
+                retention.thread(koid, context);
+            }
             state.lifecycle.detach_thread(status)?;
             let detached = unlink_thread_record(state, &record);
             Ok::<_, LifecycleError>((
@@ -1458,13 +1635,24 @@ pub(crate) struct AddressSpaceRetirement {
 
 impl AddressSpaceRetirement {
     pub(crate) fn retry(mut self) -> Result<(), (Self, MachineError)> {
+        if let Some(retention) = self.process.inner.retention.get()
+            && retention.released()
+        {
+            retention.discard_released();
+        }
         let address_space = match self.address_space.take() {
             Some(address_space) => address_space,
             None => process_invariant_violation(),
         };
         match NativeAddressSpace::retire(address_space) {
             Ok(()) => {
-                self.process.finish_retirement();
+                self.process
+                    .inner
+                    .state
+                    .with(|state| state.address_retired = true);
+                if !self.process.retention_holds() {
+                    self.process.finish_retirement();
+                }
                 crate::pr_info!(
                     "HypeR: Process {:?} address-space retirement completed after {} failed attempts",
                     self.process.id(),

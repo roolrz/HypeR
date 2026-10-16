@@ -15,6 +15,7 @@ mod lifecycle;
 pub(crate) mod loader;
 mod objects;
 mod owner;
+pub(crate) mod retention;
 mod task_group;
 mod user_thread;
 

@@ -50,7 +50,8 @@ at startup. An absent file, or omitted fields, uses these defaults:
 {
   "terminal": "svc/terminal-service",
   "shell": "bin/sh",
-  "restart_limit": 3
+  "restart_limit": 3,
+  "failure_grace_ms": 2000
 }
 ```
 
@@ -64,6 +65,15 @@ after exits within 10 seconds of launch, including clean shell exits. Zero
 disables retries after such an exit. A session lasting at least 10 seconds resets
 the counter. Each restart waits 250 ms. This is the manager's local session
 policy; component-manager continues to own whole-service supervision.
+
+When terminal-service dies, its existing streams return `PEER_CLOSED`; this is
+not the canonical-mode EOF character. After reporting the failure, session-manager
+allows up to `failure_grace_ms` (0 through 10000) for disconnected applications to
+finish or save through their remaining capabilities. It then stops the old
+session group and resets the raw console before creating a new terminal and
+shell. No old stream is reconnected and no buffered input is replayed. The grace
+period provides an opportunity for application cleanup, not an automatic-save
+guarantee. Startup failure before a shell exists does not need this grace period.
 
 Component-manager reports startup state directly on the Console after receiving
 bootstrap ownership, before formal providers are adopted. It writes complete

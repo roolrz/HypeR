@@ -4,7 +4,9 @@
 //! Concurrent VMAR authority and transactional native address-space mappings.
 
 mod file;
+mod observation;
 mod residency;
+pub(crate) use observation::{CrashMapping, CrashMappingKind, CrashMemory, CrashReadError};
 
 use alloc::vec::Vec;
 use core::mem::{ManuallyDrop, size_of};
@@ -164,6 +166,7 @@ pub(crate) enum AddressSpaceError<BackendError, AccountError> {
     StaleMapping,
     StaleTransaction,
     StaleVmar,
+    Stopped,
     WriteDenied,
     WritableExecutableBacking,
 }
@@ -276,6 +279,7 @@ struct UserWriteRange {
 }
 
 struct AddressSpaceState<Backend: PageBackend, Account: MemoryAccount> {
+    sealed: bool,
     mappings: FallibleArc<MappingSet<Backend, Account>>,
     vmars: VmarSet<Account>,
     next_mapping_id: u64,
@@ -288,6 +292,7 @@ struct AddressSpaceState<Backend: PageBackend, Account: MemoryAccount> {
 }
 
 struct AddressSpaceSnapshot<Backend: PageBackend, Account: MemoryAccount> {
+    sealed: bool,
     mappings: FallibleArc<MappingSet<Backend, Account>>,
     vmars: VmarSet<Account>,
     authority_epoch: u64,
@@ -359,6 +364,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             backend,
             account,
             state: AddressSpaceLock::new(AddressSpaceState {
+                sealed: false,
                 mappings,
                 vmars,
                 next_mapping_id: 1,
@@ -466,6 +472,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
 
     fn snapshot(&self) -> AddressSpaceSnapshot<Backend, Account> {
         self.state.with(|state| AddressSpaceSnapshot {
+            sealed: state.sealed,
             mappings: state.mappings.clone(),
             vmars: state.vmars.clone(),
             authority_epoch: state.authority_epoch,
@@ -531,6 +538,9 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             .checked_add(1)
             .ok_or(AddressSpaceError::IdentityExhausted)?;
         let id = self.state.with(|state| {
+            if state.sealed {
+                return Err(AddressSpaceError::Stopped);
+            }
             if state.authority_epoch != snapshot.authority_epoch {
                 return Err(AddressSpaceError::StaleTransaction);
             }
@@ -560,6 +570,9 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             .insert(updated_parent, &self.account)?
             .insert(child, &self.account)?;
         let retired = self.state.with(|state| {
+            if state.sealed {
+                return Err(AddressSpaceError::Stopped);
+            }
             if state.authority_epoch != snapshot.authority_epoch {
                 return Err(AddressSpaceError::StaleTransaction);
             }
@@ -608,6 +621,9 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             .remove(token.id, &self.account)?
             .insert(parent, &self.account)?;
         let retired = self.state.with(|state| {
+            if state.sealed {
+                return Err(AddressSpaceError::Stopped);
+            }
             if state.authority_epoch != snapshot.authority_epoch {
                 return Err(AddressSpaceError::StaleTransaction);
             }
@@ -730,6 +746,9 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         }
         let snapshot = self.snapshot();
         let mut cursor = range.base();
+        if snapshot.sealed {
+            return Err(AddressSpaceError::Stopped);
+        }
         let mut needed = false;
         for mapping in &snapshot.mappings.records {
             let Some(overlap) = intersection(mapping.snapshot.range, range) else {
@@ -1249,6 +1268,9 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             .try_reserve_exact(capacity)
             .map_err(|_| AddressSpaceError::Allocation)?;
         let retired = self.state.with(|state| {
+            if state.sealed {
+                return Err(AddressSpaceError::Stopped);
+            }
             if state.mapping_epoch != snapshot.mapping_epoch
                 || state.next_user_write_id != reservation_id
             {
@@ -1377,6 +1399,9 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         }
         let range = UserSlice::new(address, 4).map_err(|_| AddressSpaceError::InvalidRange)?;
         let snapshot = self.snapshot();
+        if snapshot.sealed {
+            return Err(AddressSpaceError::Stopped);
+        }
         let mapping = snapshot
             .mappings
             .records
@@ -1429,6 +1454,9 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         access: Access,
         snapshot: &AddressSpaceSnapshot<Backend, Account>,
     ) -> Result<CopyPlan<Backend, Account>, AddressSpaceError<Backend::Error, Account::Error>> {
+        if snapshot.sealed {
+            return Err(AddressSpaceError::Stopped);
+        }
         if !self.root.range.contains(range) {
             return Err(AddressSpaceError::InvalidRange);
         }
@@ -1588,6 +1616,8 @@ enum MappingChangeKind {
     /// Changes only previously read-only private physical backing. Existing
     /// writable pages, virtual ranges, permissions and mapping tokens survive.
     PrivateBacking,
+    /// Drops only clean file pages, including in a sealed stopped space.
+    FileReclaim,
 }
 
 #[must_use = "prepared mapping state must be committed or explicitly abandoned"]
@@ -1624,8 +1654,8 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
         })
     }
 
-    /// Only `prepare_private_write` may use this constructor: it preserves every
-    /// mapping's authority and every already-writable page owner. A reserved
+    /// Backing/residency changes preserve every mapping's authority and every
+    /// already-writable page owner. A reserved
     /// user output is fully materialized before reservation publication, so no
     /// page referenced by an active reservation can change in this transaction.
     fn new_private_backing(
@@ -1714,6 +1744,9 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
         AddressSpaceError<Backend::Error, Account::Error>,
     > {
         let (retired, retired_vmars) = self.address_space.state.with(|state| {
+            if state.sealed && !matches!(self.kind, MappingChangeKind::FileReclaim) {
+                return Err(AddressSpaceError::Stopped);
+            }
             if state.authority_epoch != self.base_authority_epoch
                 || state.mapping_epoch != self.base_mapping_epoch
             {
@@ -2067,6 +2100,9 @@ fn validate_vmar<Backend: PageBackend, Account: MemoryAccount>(
     state: &AddressSpaceSnapshot<Backend, Account>,
     token: Vmar,
 ) -> Result<UserSlice, AddressSpaceError<Backend::Error, Account::Error>> {
+    if state.sealed {
+        return Err(AddressSpaceError::Stopped);
+    }
     if token.address_space != address_space {
         return Err(AddressSpaceError::InvalidAddressSpace);
     }

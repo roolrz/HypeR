@@ -1341,6 +1341,42 @@ impl HandleTable {
         })
     }
 
+    /// Withdraws one ordinary owner after the Process closes admission. Active
+    /// transfer/reservation tokens remain untouched and can roll back normally.
+    /// The returned metadata carries no object reference or execution authority.
+    pub(crate) fn remove_stopping_owner(
+        &mut self,
+        cursor: &mut usize,
+    ) -> Option<(HandleSnapshot, ClosedHandle)> {
+        if !matches!(self.lifecycle, TableLifecycle::Active) {
+            return None;
+        }
+        let Some(index) = self.slots.next_occupied(*cursor) else {
+            // A reserved transfer may roll back behind this cursor while the
+            // Process drains. The next pass revisits that restored owner.
+            *cursor = 0;
+            return None;
+        };
+        *cursor = index + 1;
+        let (generation, info) = match self.slots.get(index) {
+            Some(Slot::Occupied { generation, handle }) => (
+                *generation,
+                HandleInfo {
+                    koid: handle.object().koid(),
+                    kind: handle.object().kind(),
+                    rights: handle.rights.union(),
+                    flags: handle.flags,
+                },
+            ),
+            _ => unreachable_handle_value(),
+        };
+        let value = HandleValue::encode(index, generation);
+        match self.remove_active(value) {
+            Ok(closed) => Some((HandleSnapshot { value, info }, closed)),
+            Err(_) => unreachable_handle_value(),
+        }
+    }
+
     /// Starts exclusive Process teardown and blocks every new table operation.
     ///
     /// The Process lifecycle must prevent new syscall entry before calling this

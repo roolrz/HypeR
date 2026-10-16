@@ -54,6 +54,8 @@ fn generated_bit_constants_preserve_schema_bit_positions() {
         ("MANAGE_NAMESPACE", 34),
         ("PROTECT", 35),
         ("LOCK_MEMORY", 36),
+        ("RETAIN_PROCESS", 37),
+        ("RETIRE", 38),
     ] {
         assert!(
             generated
@@ -69,7 +71,7 @@ fn generated_bit_constants_preserve_schema_bit_positions() {
     assert!(
         generated
             .rust
-            .contains("HYPER_NATIVE_RIGHTS_MASK: u64 = 0x1fffffffff;")
+            .contains("HYPER_NATIVE_RIGHTS_MASK: u64 = 0x7fffffffff;")
     );
     assert!(
         generated
@@ -84,7 +86,7 @@ fn generated_bit_constants_preserve_schema_bit_positions() {
     assert!(
         generated
             .c
-            .contains("HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x1fffffffff)")
+            .contains("HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x7fffffffff)")
     );
 }
 
@@ -176,7 +178,20 @@ fn every_info_record_call_reports_its_supported_size() {
             })
         });
         if has_info_output {
-            assert_eq!(syscall.results.len(), 1, "{}", syscall.name);
+            let indexed = matches!(
+                syscall.name,
+                "crash_view_thread" | "crash_view_mapping" | "crash_view_handle"
+            );
+            assert_eq!(
+                syscall.results.len(),
+                if indexed { 2 } else { 1 },
+                "{}",
+                syscall.name
+            );
+            if indexed {
+                assert_eq!(syscall.results[1].name, "next_index");
+                assert_eq!(syscall.results[1].kind, ValueKind::U64);
+            }
             assert_eq!(
                 syscall.results[0].name, "supported_size",
                 "{}",
@@ -613,6 +628,7 @@ fn process_builder_is_linear_and_uses_staged_syscalls() {
             (29, "process_builder_start"),
             (30, "process_builder_abort"),
             (165, "process_builder_set_memory_lock"),
+            (173, "process_builder_retain"),
         ]
     );
     for name in ["process_builder_start", "process_builder_abort"] {
@@ -799,6 +815,8 @@ fn object_transfer_classes_match_the_audited_contract() {
         ("directory_stream", TransferClass::General),
         ("root_transition", TransferClass::RendezvousOnly),
         ("guest_interrupt", TransferClass::RendezvousOnly),
+        ("process_retirement", TransferClass::RendezvousOnly),
+        ("crash_view", TransferClass::General),
     ];
     assert_eq!(schema::OBJECT_KINDS.len(), expected.len());
     for (kind, expected) in schema::OBJECT_KINDS.iter().zip(expected) {
@@ -993,17 +1011,21 @@ fn directory_stream_derivation_requires_read_only_and_separates_cursor_authority
 
 #[test]
 fn residency_authority_is_inherited_without_becoming_a_default_grant() {
-    for (name, source) in [
-        ("process_builder_create", "factory"),
-        ("vmar_allocate", "vmar"),
+    for (name, source, inherited) in [
+        (
+            "process_builder_create",
+            "factory",
+            schema::RIGHT_LOCK_MEMORY | schema::RIGHT_RETAIN_PROCESS,
+        ),
+        ("vmar_allocate", "vmar", schema::RIGHT_LOCK_MEMORY),
     ] {
         let call = schema::SYSCALLS.iter().find(|call| call.name == name);
         assert!(
             matches!(call.and_then(|call| call.results.first()).and_then(|result| result.handle),
             Some(schema::ProducedHandle { rights: ProducedRights::FixedAndInherited {
                 fixed_rights, authority_source, inherited_rights }, .. })
-            if fixed_rights & schema::RIGHT_LOCK_MEMORY == 0
-                && authority_source == source && inherited_rights == schema::RIGHT_LOCK_MEMORY)
+            if fixed_rights & inherited == 0
+                && authority_source == source && inherited_rights == inherited)
         );
     }
 }

@@ -12,7 +12,8 @@ pub(in crate::kernel) use services::{
     ConsoleServiceError, ConsoleServices, DeviceServices, GuestIoServices, HandleServices,
     HierarchyServices, InspectServices, IpcServices, MemoryServices, NativeAction,
     ObjectServiceError, ObjectServices, ProcessBuilderServiceError, ProcessBuilderServices,
-    SystemInspectServices, TaskServices, UserMemoryServices, VfsServices, VmServices,
+    RetentionServices, SystemInspectServices, TaskServices, UserMemoryServices, VfsServices,
+    VmServices,
 };
 
 mod dispatch;

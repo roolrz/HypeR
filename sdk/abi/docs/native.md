@@ -39,6 +39,7 @@ ABI revision: `0`.
 | -23 | `io_error` |
 | -24 | `no_space` |
 | -25 | `read_only` |
+| -26 | `revoked` |
 
 ## Object kinds
 
@@ -82,11 +83,15 @@ ABI revision: `0`.
 | 35 | `directory_stream` | `general` |
 | 36 | `root_transition` | `rendezvous_only` |
 | 37 | `guest_interrupt` | `rendezvous_only` |
+| 38 | `process_retirement` | `rendezvous_only` |
+| 39 | `crash_view` | `general` |
 
 ## Object signals
 
 | Object | Bit | Name |
 | --- | ---: | --- |
+| `process_retirement` | 0 | `ready` |
+| `process_retirement` | 1 | `released` |
 | `physical_device` | 0 | `readable` |
 | `native_block` | 0 | `peer_closed` |
 | `virtual_serial` | 0 | `readable` |
@@ -118,6 +123,28 @@ ABI revision: `0`.
 
 | Name | Value |
 | --- | ---: |
+| `process_retirement_prepared` | `0` |
+| `process_retirement_running` | `1` |
+| `process_retirement_stopping` | `2` |
+| `process_retirement_ready` | `3` |
+| `process_retirement_released` | `4` |
+| `crash_partial_memory` | `1` |
+| `crash_partial_threads` | `2` |
+| `crash_partial_handles` | `4` |
+| `crash_partial_mappings` | `8` |
+| `process_retirement_release_none` | `0` |
+| `process_retirement_release_explicit` | `1` |
+| `process_retirement_release_owner_lost` | `2` |
+| `process_retirement_release_deadline` | `3` |
+| `process_retirement_release_aborted` | `4` |
+| `crash_mapping_retained` | `1` |
+| `crash_mapping_partial` | `2` |
+| `crash_mapping_excluded_shared` | `4` |
+| `crash_mapping_excluded_file` | `8` |
+| `crash_mapping_anonymous` | `1` |
+| `crash_mapping_private_file` | `2` |
+| `crash_mapping_shared` | `3` |
+| `crash_read_max_bytes` | `65536` |
 | `memory_statistics_heap` | `1` |
 | `memory_statistics_buddy` | `2` |
 | `memory_statistics_owner` | `3` |
@@ -372,6 +399,10 @@ ABI revision: `0`.
 - File and Directory information reports attribute snapshots plus filesystem, mount, and node identities for diagnostics and correlation. These identities do not grant authority, cannot be resolved back into handles, and do not define a pathname; directory entries, hard links, renames, mount namespaces, and unlinks make pathnames namespace-dependent observations rather than object identity.
 - Object wait-many borrows every input handle for the complete wait, canonicalizes duplicate object identities, and selects the lowest input index whose requested mask intersects the winning object's committed level snapshot. Source-handle close after resolution does not cancel the wait.
 - Process terminal detail fields are reason-specific: exit reasons encode the signed status as two's-complement in detail0; fault encodes class in detail0 and code in detail1; task-group stop encodes generation in detail0; unused details are zero.
+- process_builder_retain requires WRITE | RETAIN_PROCESS on an unsealed ProcessBuilder. Only a TaskFactory carrying RETAIN_PROCESS can produce that builder authority. Registration is external and precedes process start; a running process cannot register itself. The returned ProcessRetirement is a nonduplicable rendezvous-only controller. It may be transferred without creating a buffered owner. Closing its last active handle, explicit release, builder abort, or its monotonic timeout revokes all CrashView derivatives. Ordinary Process observers never extend retention. No kernel callback or application crash handler is installed.
+- Process stop closes admission and withdraws live handles while outstanding transactions cancel or finish safely. After execution quiesces, retained evidence contains register copies, numeric handle records and bounded resident private pages. It contains no live handle authority, device lease, file protection, filesystem refill source or target address space. Shared writable and clean file-backed pages are excluded; unavailable bytes return NOT_FOUND rather than faulting the target. Independently retained device and DMA owners must still finish their normal physical retirement.
+- ProcessRetirement READY publishes a bounded scene; RELEASED is sticky and may occur before READY. The timeout starts on the first stop request, including quiescence time. Current limits are 64 armed registrations, four retained scenes and 64 MiB of retained page payload per registering supervisor, with at most 60 seconds per registration. Actual limits may tighten and quota/allocation failure is observable. At most 32 thread records, 256 numeric handle records and 1024 mapping records are retained; truncation is flagged. Bounded metadata is separately resource-domain charged. Controllers should be explicitly released after observation and before joining final process or group retirement.
+- CrashView grants only read/inspect and may be duplicated or delegated. Release revokes new reads even when views remain open; already admitted bounded reads may finish. Read copies at most 64 KiB and may return a contiguous short prefix before an unavailable page. Indexed thread, mapping and handle queries begin at zero and return next_index zero at the end; absent indices return NOT_FOUND. Thread machine is ELF e_machine; general, vector and fp_control byte arrays encode little-endian u64 words in architecture register order. Mapping object_koid zero means no canonical object identity is exported. Numeric addresses and KOIDs confer no authority.
 - Object transfer classes constrain generic capability transports. General objects may be retained by buffered or rendezvous transports. Rendezvous-only objects may move or duplicate only by a direct source-to-destination commit which never creates an in-transit owner. Forbidden objects cannot cross a userspace handle table boundary.
 - AtomicOnOk capability transactions commit handle-table ownership, the rendezvous message, and live output-handle installation together only when both participants return ok. Every non-ok status preserves all input owners and the message. Non-fault failures leave output memory unchanged; fault may partially modify output byte or slot memory, but no handle value written by a failed call is live or installed. Bindings must ignore every output-memory byte after any non-ok status.
 - A capability-channel receiver advertises peer_receiving only after its byte range, typed capability slots, and destination handle-table capacity are validated, reserved, and fully published on the endpoint's FIFO receiver queue. The signal is level-triggered but may race another sender.
@@ -425,7 +456,7 @@ element size before any user-memory access.
 | 19 | `capability_channel_create` | `options: u32` | `endpoint0: handle`, `endpoint1: handle` | `endpoint0: produce, kind=capability_channel, fixed=0x3f`, `endpoint1: produce, kind=capability_channel, fixed=0x3f` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Object` |
 | 20 | `capability_channel_try_send` | `endpoint: handle`, `options: u32`, `bytes: user_address`, `byte_count: byte_count`, `dispositions: user_address`, `disposition_count: element_count` | — | `endpoint: Borrow, kind=capability_channel, rights=0x20` | `bytes: Read, len=byte_count bytes, max-bytes=4096; order=0`, `dispositions: Read, len=disposition_count elements, max-elements=16, element-size=24, record=capability_disposition, transactional-handles=(handle, rights, expected_kind, operation), common-rights=0x2, operations=[move=0:ConsumeOnCommit/rights=0x2+duplicate=1:Borrow/rights=0x3], commit=AtomicOnOk; order=1` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
 | 21 | `capability_channel_receive` | `endpoint: handle`, `deadline: u64`, `bytes: user_address`, `byte_capacity: byte_count`, `capability_slots: user_address`, `slot_count: element_count` | `actual_bytes: byte_count; also-on=buffer_too_small`, `actual_capabilities: element_count; also-on=buffer_too_small` | `endpoint: Borrow, kind=capability_channel, rights=0x10` | `bytes: Write, len=byte_capacity bytes, max-bytes=4096; order=0`, `capability_slots: ReadWrite, len=slot_count elements, max-elements=16, element-size=24, record=capability_receive_slot, typed-receive-slots=(handle, rights, expected_kind, flags), produce-transferred-handles, commit=AtomicOnOk; order=1` | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Capability` |
-| 22 | `process_builder_create` | `factory: handle`, `group: handle`, `domain: handle`, `executable: handle`, `loader: handle` | `builder: handle` | `factory: Borrow, kind=task_factory, rights=0x100000`, `group: Borrow, kind=task_group, rights=0x4000000`, `domain: Borrow, kind=resource_domain, rights=0x8000000`, `executable: Borrow, kind=file, rights=0x800000093`, `loader: Borrow, kind=file, rights=0x90`, `builder: produce, kind=process_builder, fixed=0xc2a, inherited-from(factory), mask=0x1000000000` | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
+| 22 | `process_builder_create` | `factory: handle`, `group: handle`, `domain: handle`, `executable: handle`, `loader: handle` | `builder: handle` | `factory: Borrow, kind=task_factory, rights=0x100000`, `group: Borrow, kind=task_group, rights=0x4000000`, `domain: Borrow, kind=resource_domain, rights=0x8000000`, `executable: Borrow, kind=file, rights=0x800000093`, `loader: Borrow, kind=file, rights=0x90`, `builder: produce, kind=process_builder, fixed=0xc2a, inherited-from(factory), mask=0x3000000000` | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 23 | `process_builder_set_name` | `builder: handle`, `name: user_address`, `name_size: byte_count` | — | `builder: Borrow, kind=process_builder, rights=0x20` | `name: Read, len=name_size bytes, max-bytes=64; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 24 | `process_builder_set_data` | `builder: handle`, `data: user_address`, `data_size: byte_count` | — | `builder: Borrow, kind=process_builder, rights=0x20` | `data: Read, len=data_size bytes, max-bytes=16384; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 26 | `process_builder_set_affinity` | `builder: handle`, `affinity_words: user_address`, `word_count: element_count` | — | `builder: Borrow, kind=process_builder, rights=0x20` | `affinity_words: Read, len=word_count elements, max-elements=4, element-size=8; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
@@ -572,12 +603,25 @@ element size before any user-memory access.
 | 170 | `guest_interrupt_create` | `machine: handle`, `irq: u32` | `interrupt: handle` | `machine: Borrow, kind=virtual_machine, rights=0x20`, `interrupt: produce, kind=guest_interrupt, fixed=0x2a` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 171 | `guest_interrupt_set_level` | `interrupt: handle`, `asserted: u32` | — | `interrupt: Borrow, kind=guest_interrupt, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 172 | `memory_inspector_read_statistics` | `inspector: handle`, `topic: u32`, `index: u32`, `statistics: user_address`, `statistics_size: byte_count` | `supported_size: byte_count` | `inspector: Borrow, kind=memory_inspector, rights=0x8` | `statistics: Write, len=statistics_size bytes, max-bytes=4096; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 173 | `process_builder_retain` | `builder: handle`, `max_bytes: byte_count`, `timeout_ns: u64` | `handle: handle` | `builder: Borrow, kind=process_builder, rights=0x2000000020`, `handle: produce, kind=process_retirement, fixed=0x420000000e` | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 174 | `process_retirement_get_info` | `object: handle`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count` | `object: Borrow, kind=process_retirement, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=4096, record=process_retirement_info; order=0` | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 175 | `process_retirement_open_view` | `object: handle` | `handle: handle` | `object: Borrow, kind=process_retirement, rights=0x200000000`, `handle: produce, kind=crash_view, fixed=0x1b` | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 176 | `process_retirement_release` | `object: handle` | — | `object: Borrow, kind=process_retirement, rights=0x4000000000` | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 177 | `crash_view_get_info` | `object: handle`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count` | `object: Borrow, kind=crash_view, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=4096, record=process_retirement_info; order=0` | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 178 | `crash_view_read` | `object: handle`, `address: u64`, `output: user_address`, `length: byte_count` | `actual_bytes: byte_count` | `object: Borrow, kind=crash_view, rights=0x10` | `output: Write, len=length bytes, max-bytes=65536; order=0` | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 179 | `crash_view_thread` | `object: handle`, `index: u64`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count`, `next_index: u64` | `object: Borrow, kind=crash_view, rights=0x10` | `output: Write, len=output_size bytes, max-bytes=4096, record=crash_thread; order=0` | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 180 | `crash_view_mapping` | `object: handle`, `index: u64`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count`, `next_index: u64` | `object: Borrow, kind=crash_view, rights=0x10` | `output: Write, len=output_size bytes, max-bytes=4096, record=crash_mapping; order=0` | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 181 | `crash_view_handle` | `object: handle`, `index: u64`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count`, `next_index: u64` | `object: Borrow, kind=crash_view, rights=0x10` | `output: Write, len=output_size bytes, max-bytes=4096, record=crash_handle; order=0` | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 496 | `native_block_transfer` | `block: handle`, `operation: u32`, `first_sector: u64`, `buffer: user_address`, `length: byte_count` | — | `block: Borrow, kind=native_block, rights=0x0` | `buffer: ReadWrite, len=length bytes, max-bytes=524352; order=0` | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Capability` |
 
 ## Public records
 
 | Name | Minimum prefix | Size | Alignment | Fields |
 | --- | ---: | ---: | ---: | --- |
+| `process_retirement_info` | 104 | 104 | 8 | `size: u32 @ 0`, `phase: u32 @ 4`, `flags: u32 @ 8`, `release_reason: u32 @ 12`, `process_koid: u64 @ 16`, `deadline_ns: u64 @ 24`, `retained_bytes: u64 @ 32`, `memory_limit: u64 @ 40`, `terminal_reason: u32 @ 48`, `fault_class: u32 @ 52`, `exit_status: i64 @ 56`, `fault_pc: u64 @ 64`, `fault_address: u64 @ 72`, `fault_syndrome: u64 @ 80`, `thread_count: u32 @ 88`, `mapping_count: u32 @ 92`, `handle_count: u32 @ 96`, `reserved: u32 @ 100` |
+| `crash_thread` | 840 | 840 | 8 | `size: u32 @ 0`, `machine: u32 @ 4`, `flags: u32 @ 8`, `reserved: u32 @ 12`, `thread_koid: u64 @ 16`, `pc: u64 @ 24`, `sp: u64 @ 32`, `tls: u64 @ 40`, `processor_state: u64 @ 48`, `general: bytes[256] @ 56`, `vector: bytes[512] @ 312`, `fp_control: bytes[16] @ 824` |
+| `crash_mapping` | 48 | 48 | 8 | `size: u32 @ 0`, `flags: u32 @ 4`, `base: u64 @ 8`, `length: u64 @ 16`, `object_offset: u64 @ 24`, `object_koid: u64 @ 32`, `permissions: u32 @ 40`, `kind: u32 @ 44` |
+| `crash_handle` | 40 | 40 | 8 | `size: u32 @ 0`, `kind: u32 @ 4`, `value: u64 @ 8`, `koid: u64 @ 16`, `rights: u64 @ 24`, `flags: u32 @ 32`, `reserved: u32 @ 36` |
 | `memory_heap_statistics` | 176 | 176 | 8 | `captured_at_ns: u64 @ 0`, `live_objects: u64 @ 8`, `live_slab_objects: u64 @ 16`, `live_large_objects: u64 @ 24`, `requested_bytes: u64 @ 32`, `peak_objects: u64 @ 40`, `peak_requested_bytes: u64 @ 48`, `allocations: u64 @ 56`, `failures: u64 @ 64`, `cached_objects: u64 @ 72`, `cache_hits: u64 @ 80`, `cache_misses: u64 @ 88`, `cache_refills: u64 @ 96`, `cache_drains: u64 @ 104`, `pressure_reclaims: u64 @ 112`, `reclaimed_objects: u64 @ 120`, `cache_cpus: u64 @ 128`, `profiling_enabled: u64 @ 136`, `page_allocations: u64 @ 144`, `page_failures: u64 @ 152`, `page_deallocations: u64 @ 160`, `peak_allocated_pages: u64 @ 168` |
 | `memory_buddy_statistics` | 24 | 24 | 8 | `captured_at_ns: u64 @ 0`, `order: u64 @ 8`, `free_blocks: u64 @ 16` |
 | `memory_owner_statistics` | 48 | 48 | 8 | `captured_at_ns: u64 @ 0`, `resident_pages: u64 @ 8`, `peak_pages: u64 @ 16`, `allocations: u64 @ 24`, `failures: u64 @ 32`, `deallocations: u64 @ 40` |

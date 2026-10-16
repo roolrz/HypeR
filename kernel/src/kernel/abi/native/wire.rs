@@ -442,6 +442,10 @@ pub(super) fn parse_object_kind(
         HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL => Ok(ObjectKind::CAPABILITY_CHANNEL),
         HYPER_NATIVE_OBJECT_THREAD => Ok(ObjectKind::THREAD),
         HYPER_NATIVE_OBJECT_PROCESS => Ok(ObjectKind::PROCESS),
+        hyper::abi::native::HYPER_NATIVE_OBJECT_PROCESS_RETIREMENT => {
+            Ok(ObjectKind::PROCESS_RETIREMENT)
+        }
+        hyper::abi::native::HYPER_NATIVE_OBJECT_CRASH_VIEW => Ok(ObjectKind::CRASH_VIEW),
         HYPER_NATIVE_OBJECT_TASK_GROUP => Ok(ObjectKind::TASK_GROUP),
         HYPER_NATIVE_OBJECT_RESOURCE_DOMAIN => Ok(ObjectKind::RESOURCE_DOMAIN),
         HYPER_NATIVE_OBJECT_TASK_FACTORY => Ok(ObjectKind::TASK_FACTORY),

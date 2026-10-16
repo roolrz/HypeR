@@ -450,6 +450,33 @@ pub(in crate::kernel) fn dispatch(
         abi::HYPER_NATIVE_SYS_VMAR_DESTROY => {
             handlers::sys_vmar_destroy(services, invocation.arguments())
         }
+        abi::HYPER_NATIVE_SYS_PROCESS_BUILDER_RETAIN => {
+            handlers::sys_process_builder_retain(services, invocation.arguments())
+        }
+        abi::HYPER_NATIVE_SYS_PROCESS_RETIREMENT_OPEN_VIEW => {
+            handlers::sys_process_retirement_open_view(services, invocation.arguments())
+        }
+        abi::HYPER_NATIVE_SYS_PROCESS_RETIREMENT_RELEASE => {
+            handlers::sys_process_retirement_release(services, invocation.arguments())
+        }
+        abi::HYPER_NATIVE_SYS_CRASH_VIEW_READ => {
+            handlers::sys_crash_view_read(services, invocation.arguments())
+        }
+        abi::HYPER_NATIVE_SYS_CRASH_VIEW_THREAD => {
+            handlers::sys_crash_view_thread(services, invocation.arguments())
+        }
+        abi::HYPER_NATIVE_SYS_CRASH_VIEW_MAPPING => {
+            handlers::sys_crash_view_mapping(services, invocation.arguments())
+        }
+        abi::HYPER_NATIVE_SYS_CRASH_VIEW_HANDLE => {
+            handlers::sys_crash_view_handle(services, invocation.arguments())
+        }
+        abi::HYPER_NATIVE_SYS_PROCESS_RETIREMENT_GET_INFO => {
+            handlers::sys_retention_info(services, invocation.arguments(), false)
+        }
+        abi::HYPER_NATIVE_SYS_CRASH_VIEW_GET_INFO => {
+            handlers::sys_retention_info(services, invocation.arguments(), true)
+        }
         abi::HYPER_NATIVE_SYS_PROCESS_BUILDER_CREATE => {
             handlers::sys_process_builder_create(services, invocation.arguments())
         }

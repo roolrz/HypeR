@@ -562,6 +562,60 @@ after DMA stops, IOMMU invalidation, interrupt masking and drain, mapping
 removal, and remote acknowledgement. Ambiguous teardown quarantines resources
 rather than returning them to allocation.
 
+### Supervisor-controlled process evidence
+
+Ordinary processes retire automatically. An externally constructed child may
+opt into bounded diagnostic retention through `process_builder_retain` before
+seal/start. This requires `RETAIN_PROCESS`, inherited only from an explicitly
+authorized TaskFactory. There is no running-process self-registration and no
+kernel callback into a crash handler.
+
+The supervisor owns one nonduplicable `ProcessRetirement` controller. It may
+move that controller through a direct capability rendezvous. Process stop
+closes admission and withdraws handles while already admitted transactions
+cancel or finish safely. A peer observes channel closure independently of the
+diagnostic retention interval. After every target thread has stopped, `READY`
+publishes register copies, numeric handle records and selected resident private
+pages. Handle metadata has no object references and cannot recreate authority.
+The scene owns neither the address space, file protection nor device leases.
+CPU, translation and DMA retirement still obey their existing safety rules.
+
+`CrashView` is a separately delegable read-only view. It can enumerate thread,
+mapping and handle records, and copy up to 64 KiB of retained memory per call.
+It never faults the target, accesses MMIO, or consults a filesystem. Private
+resident heap/stack and materialized COW pages can be retained; writable shared
+backing and clean file pages are excluded. Pages whose backing would also pin a
+larger contiguous allocation are excluded so retention cannot exceed its byte
+budget indirectly. Missing ranges report `NOT_FOUND`,
+and reads may return a contiguous short prefix. Truncation and excluded mapping
+kinds are explicit. Register records use ELF `e_machine` and little-endian
+64-bit words for architecture-specific register arrays.
+For AArch64, general words are x0–x30 followed by a zero word, vector words
+are low/high pairs for v0–v31, and floating-point control words are FPCR/FPSR.
+For RISC-V, general words are x0–x31, the first 32 vector words hold f0–f31,
+and the first floating-point control word is FCSR; unused words are zero.
+These are userspace registers, never kernel stack or kernel register contents.
+
+Explicit release, controller-owner loss, aborted construction or timeout revoke
+all derived views; ordinary Process observers and duplicate CrashViews cannot
+extend retention. New operations return `REVOKED`; already admitted bounded
+copies may finish. `RELEASED` is sticky and can precede `READY`. The deadline
+starts at the first stop request, including time spent quiescing. Supervisors
+must release after inspection before joining final Process/TaskGroup retirement.
+
+Current admission limits per registering supervisor are 64 armed children,
+four memory captures and 64 MiB of page payload, with a maximum 60-second
+timeout. Each scene contains at most 32 thread, 256 handle and 1024 mapping
+records. Page-selection work is bounded, and metadata is separately charged to
+resource domains. A byte limit is an upper bound, not a promise of a complete
+dump. Quota/allocation pressure can yield partial or metadata-only evidence.
+Retained pages remain charged to their original owner until released.
+
+`make test-process-retirement` exercises this contract with real child
+processes, private heap/stack contents, blocked channels, fault registers,
+attenuated authority, deadline expiry, duplicated stale views and simultaneous
+last-thread exits on separate CPUs. The fixture requires at least two vCPUs.
+
 ## Publication and output handles
 
 Capability operations follow `prepare -> validate -> publish`.

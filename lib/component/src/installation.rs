@@ -18,7 +18,8 @@ pub const MAX_GRANTS: usize = 32;
 #[serde(tag = "operation", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Request {
     /// Exactly Builder and `TaskGroup`; builder remains unsealed so the manager
-    /// can add its private connector. Ownership moves even if activation fails.
+    /// can add its private connector and arm bounded diagnostics. The source
+    /// factory must authorize retention. Ownership moves even if activation fails.
     Prepared {
         path: String,
     },
@@ -205,7 +206,8 @@ pub fn descriptors(request: &Request) -> Result<Vec<(u32, Rights)>> {
                     .union(Rights::INSPECT)
                     .union(Rights::WRITE)
                     .union(Rights::START)
-                    .union(Rights::REQUEST_STOP),
+                    .union(Rights::REQUEST_STOP)
+                    .union(Rights::RETAIN_PROCESS),
             ),
             (
                 TaskGroupObject::KIND.as_raw(),

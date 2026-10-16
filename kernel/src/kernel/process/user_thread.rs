@@ -537,7 +537,13 @@ impl UserExecution {
                 hyper::debug::invariant_failure("process::user_thread::complete_detach invariant")
             }
         };
-        ownership.membership.detach(terminal);
+        // The scheduler and machine publication have detached; FP state is
+        // already saved and scrubbed. Only the owned register image is copied.
+        ownership.membership.detach(
+            terminal,
+            thread.object_snapshot().koid.get(),
+            self.context.get_mut(),
+        );
         drop(ownership.execution_charge);
         thread.publish_join_completion();
     }

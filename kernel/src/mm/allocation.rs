@@ -153,6 +153,26 @@ impl<T> FallibleArc<T> {
         refcount::strong_count(&self.inner().strong)
     }
 
+    /// Observes whether these two distinct owners are the entire strong set.
+    ///
+    /// The acquire RMW observes the latest ownership transition rather than a
+    /// diagnostic count. This neither reserves ownership nor establishes an
+    /// exclusive borrow. Stable ownership proofs must separately close future
+    /// cloning/weak upgrades and account for borrowed references; in particular
+    /// the weak-count observations cannot exclude a concurrent upgrade/drop.
+    pub fn is_only_owner_pair(&self, other: &Self) -> bool {
+        if core::ptr::eq(self, other) || self.inner != other.inner {
+            return false;
+        }
+        let inner = self.inner();
+        inner.weak.load(Ordering::Acquire) == 1
+            && inner
+                .strong
+                .compare_exchange(2, 2, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            && inner.weak.load(Ordering::Acquire) == 1
+    }
+
     /// Creates a non-owning allocation reference.
     pub fn downgrade(&self) -> WeakFallibleArc<T> {
         refcount::retain_weak(&self.inner().weak);

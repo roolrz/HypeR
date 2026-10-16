@@ -37,6 +37,7 @@ pub const HYPER_NATIVE_STATUS_CROSS_DEVICE: HyperNativeStatus = -22;
 pub const HYPER_NATIVE_STATUS_IO_ERROR: HyperNativeStatus = -23;
 pub const HYPER_NATIVE_STATUS_NO_SPACE: HyperNativeStatus = -24;
 pub const HYPER_NATIVE_STATUS_READ_ONLY: HyperNativeStatus = -25;
+pub const HYPER_NATIVE_STATUS_REVOKED: HyperNativeStatus = -26;
 
 pub const HYPER_NATIVE_OBJECT_NONE: u32 = 0;
 pub const HYPER_NATIVE_OBJECT_EVENT: u32 = 1;
@@ -76,6 +77,8 @@ pub const HYPER_NATIVE_OBJECT_FILE_PROTECTION: u32 = 34;
 pub const HYPER_NATIVE_OBJECT_DIRECTORY_STREAM: u32 = 35;
 pub const HYPER_NATIVE_OBJECT_ROOT_TRANSITION: u32 = 36;
 pub const HYPER_NATIVE_OBJECT_GUEST_INTERRUPT: u32 = 37;
+pub const HYPER_NATIVE_OBJECT_PROCESS_RETIREMENT: u32 = 38;
+pub const HYPER_NATIVE_OBJECT_CRASH_VIEW: u32 = 39;
 
 pub const HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN: u32 = 0;
 pub const HYPER_NATIVE_TRANSFER_CLASS_GENERAL: u32 = 1;
@@ -125,10 +128,14 @@ pub const fn hyper_native_object_transfer_class(object_kind: u32) -> u32 {
         HYPER_NATIVE_OBJECT_DIRECTORY_STREAM => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
         HYPER_NATIVE_OBJECT_ROOT_TRANSITION => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
         HYPER_NATIVE_OBJECT_GUEST_INTERRUPT => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
+        HYPER_NATIVE_OBJECT_PROCESS_RETIREMENT => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
+        HYPER_NATIVE_OBJECT_CRASH_VIEW => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
         _ => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
     }
 }
 
+pub const HYPER_NATIVE_RIGHT_RETIRE: u64 = 1_u64 << 38;
+pub const HYPER_NATIVE_RIGHT_RETAIN_PROCESS: u64 = 1_u64 << 37;
 pub const HYPER_NATIVE_RIGHT_LOCK_MEMORY: u64 = 1_u64 << 36;
 pub const HYPER_NATIVE_RIGHT_PROTECT: u64 = 1_u64 << 35;
 pub const HYPER_NATIVE_RIGHT_MANAGE_NAMESPACE: u64 = 1_u64 << 34;
@@ -167,8 +174,10 @@ pub const HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE: u64 = 1_u64 << 29;
 pub const HYPER_NATIVE_RIGHT_SET_ATTRIBUTES: u64 = 1_u64 << 31;
 pub const HYPER_NATIVE_RIGHT_LOCK_FILE: u64 = 1_u64 << 32;
 
-pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 0x1fffffffff;
+pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 0x7fffffffff;
 
+pub const HYPER_NATIVE_SIGNAL_PROCESS_RETIREMENT_READY: u64 = 1_u64 << 0;
+pub const HYPER_NATIVE_SIGNAL_PROCESS_RETIREMENT_RELEASED: u64 = 1_u64 << 1;
 pub const HYPER_NATIVE_SIGNAL_PHYSICAL_DEVICE_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_NATIVE_BLOCK_PEER_CLOSED: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_READABLE: u64 = 1_u64 << 0;
@@ -196,6 +205,28 @@ pub const HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_WRITABLE: u64 = 1_u64 << 1;
 pub const HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_PEER_CLOSED: u64 = 1_u64 << 2;
 
+pub const HYPER_NATIVE_PROCESS_RETIREMENT_PREPARED: u64 = 0;
+pub const HYPER_NATIVE_PROCESS_RETIREMENT_RUNNING: u64 = 1;
+pub const HYPER_NATIVE_PROCESS_RETIREMENT_STOPPING: u64 = 2;
+pub const HYPER_NATIVE_PROCESS_RETIREMENT_READY: u64 = 3;
+pub const HYPER_NATIVE_PROCESS_RETIREMENT_RELEASED: u64 = 4;
+pub const HYPER_NATIVE_CRASH_PARTIAL_MEMORY: u64 = 1;
+pub const HYPER_NATIVE_CRASH_PARTIAL_THREADS: u64 = 2;
+pub const HYPER_NATIVE_CRASH_PARTIAL_HANDLES: u64 = 4;
+pub const HYPER_NATIVE_CRASH_PARTIAL_MAPPINGS: u64 = 8;
+pub const HYPER_NATIVE_PROCESS_RETIREMENT_RELEASE_NONE: u64 = 0;
+pub const HYPER_NATIVE_PROCESS_RETIREMENT_RELEASE_EXPLICIT: u64 = 1;
+pub const HYPER_NATIVE_PROCESS_RETIREMENT_RELEASE_OWNER_LOST: u64 = 2;
+pub const HYPER_NATIVE_PROCESS_RETIREMENT_RELEASE_DEADLINE: u64 = 3;
+pub const HYPER_NATIVE_PROCESS_RETIREMENT_RELEASE_ABORTED: u64 = 4;
+pub const HYPER_NATIVE_CRASH_MAPPING_RETAINED: u64 = 1;
+pub const HYPER_NATIVE_CRASH_MAPPING_PARTIAL: u64 = 2;
+pub const HYPER_NATIVE_CRASH_MAPPING_EXCLUDED_SHARED: u64 = 4;
+pub const HYPER_NATIVE_CRASH_MAPPING_EXCLUDED_FILE: u64 = 8;
+pub const HYPER_NATIVE_CRASH_MAPPING_ANONYMOUS: u64 = 1;
+pub const HYPER_NATIVE_CRASH_MAPPING_PRIVATE_FILE: u64 = 2;
+pub const HYPER_NATIVE_CRASH_MAPPING_SHARED: u64 = 3;
+pub const HYPER_NATIVE_CRASH_READ_MAX_BYTES: u64 = 65536;
 pub const HYPER_NATIVE_MEMORY_STATISTICS_HEAP: u64 = 1;
 pub const HYPER_NATIVE_MEMORY_STATISTICS_BUDDY: u64 = 2;
 pub const HYPER_NATIVE_MEMORY_STATISTICS_OWNER: u64 = 3;
@@ -572,6 +603,15 @@ pub const HYPER_NATIVE_SYS_GUEST_MEMORY_SCALAR: u64 = 169;
 pub const HYPER_NATIVE_SYS_GUEST_INTERRUPT_CREATE: u64 = 170;
 pub const HYPER_NATIVE_SYS_GUEST_INTERRUPT_SET_LEVEL: u64 = 171;
 pub const HYPER_NATIVE_SYS_MEMORY_INSPECTOR_READ_STATISTICS: u64 = 172;
+pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_RETAIN: u64 = 173;
+pub const HYPER_NATIVE_SYS_PROCESS_RETIREMENT_GET_INFO: u64 = 174;
+pub const HYPER_NATIVE_SYS_PROCESS_RETIREMENT_OPEN_VIEW: u64 = 175;
+pub const HYPER_NATIVE_SYS_PROCESS_RETIREMENT_RELEASE: u64 = 176;
+pub const HYPER_NATIVE_SYS_CRASH_VIEW_GET_INFO: u64 = 177;
+pub const HYPER_NATIVE_SYS_CRASH_VIEW_READ: u64 = 178;
+pub const HYPER_NATIVE_SYS_CRASH_VIEW_THREAD: u64 = 179;
+pub const HYPER_NATIVE_SYS_CRASH_VIEW_MAPPING: u64 = 180;
+pub const HYPER_NATIVE_SYS_CRASH_VIEW_HANDLE: u64 = 181;
 pub const HYPER_NATIVE_SYS_NATIVE_BLOCK_TRANSFER: u64 = 496;
 
 pub const fn hyper_native_failure_result_mask(
@@ -586,6 +626,132 @@ pub const fn hyper_native_failure_result_mask(
         _ => 0,
     }
 }
+
+pub const HYPER_NATIVE_PROCESS_RETIREMENT_INFO_MIN_SIZE: usize = 104;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeProcessRetirementInfo {
+    pub size: u32,
+    pub phase: u32,
+    pub flags: u32,
+    pub release_reason: u32,
+    pub process_koid: u64,
+    pub deadline_ns: u64,
+    pub retained_bytes: u64,
+    pub memory_limit: u64,
+    pub terminal_reason: u32,
+    pub fault_class: u32,
+    pub exit_status: i64,
+    pub fault_pc: u64,
+    pub fault_address: u64,
+    pub fault_syndrome: u64,
+    pub thread_count: u32,
+    pub mapping_count: u32,
+    pub handle_count: u32,
+    pub reserved: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeProcessRetirementInfo>() == 104);
+const _: () = assert!(core::mem::align_of::<HyperNativeProcessRetirementInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, size) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, phase) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, flags) == 8);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, release_reason) == 12);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, process_koid) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, deadline_ns) == 24);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, retained_bytes) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, memory_limit) == 40);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, terminal_reason) == 48);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, fault_class) == 52);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, exit_status) == 56);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, fault_pc) == 64);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, fault_address) == 72);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, fault_syndrome) == 80);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, thread_count) == 88);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, mapping_count) == 92);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, handle_count) == 96);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessRetirementInfo, reserved) == 100);
+
+pub const HYPER_NATIVE_CRASH_THREAD_MIN_SIZE: usize = 840;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeCrashThread {
+    pub size: u32,
+    pub machine: u32,
+    pub flags: u32,
+    pub reserved: u32,
+    pub thread_koid: u64,
+    pub pc: u64,
+    pub sp: u64,
+    pub tls: u64,
+    pub processor_state: u64,
+    pub general: [u8; 256],
+    pub vector: [u8; 512],
+    pub fp_control: [u8; 16],
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeCrashThread>() == 840);
+const _: () = assert!(core::mem::align_of::<HyperNativeCrashThread>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashThread, size) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashThread, machine) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashThread, flags) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashThread, reserved) == 12);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashThread, thread_koid) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashThread, pc) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashThread, sp) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashThread, tls) == 40);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashThread, processor_state) == 48);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashThread, general) == 56);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashThread, vector) == 312);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashThread, fp_control) == 824);
+
+pub const HYPER_NATIVE_CRASH_MAPPING_MIN_SIZE: usize = 48;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeCrashMapping {
+    pub size: u32,
+    pub flags: u32,
+    pub base: u64,
+    pub length: u64,
+    pub object_offset: u64,
+    pub object_koid: u64,
+    pub permissions: u32,
+    pub kind: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeCrashMapping>() == 48);
+const _: () = assert!(core::mem::align_of::<HyperNativeCrashMapping>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashMapping, size) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashMapping, flags) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashMapping, base) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashMapping, length) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashMapping, object_offset) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashMapping, object_koid) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashMapping, permissions) == 40);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashMapping, kind) == 44);
+
+pub const HYPER_NATIVE_CRASH_HANDLE_MIN_SIZE: usize = 40;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeCrashHandle {
+    pub size: u32,
+    pub kind: u32,
+    pub value: u64,
+    pub koid: u64,
+    pub rights: u64,
+    pub flags: u32,
+    pub reserved: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeCrashHandle>() == 40);
+const _: () = assert!(core::mem::align_of::<HyperNativeCrashHandle>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashHandle, size) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashHandle, kind) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashHandle, value) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashHandle, koid) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashHandle, rights) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashHandle, flags) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCrashHandle, reserved) == 36);
 
 pub const HYPER_NATIVE_MEMORY_HEAP_STATISTICS_MIN_SIZE: usize = 176;
 #[repr(C)]

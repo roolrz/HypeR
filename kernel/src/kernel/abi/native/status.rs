@@ -331,6 +331,7 @@ pub(super) fn status_from_process_builder_start_error(
             HYPER_NATIVE_STATUS_RESOURCE_LIMIT
         }
         ProcessBuilderError::UnsupportedStartupKind => HYPER_NATIVE_STATUS_NOT_SUPPORTED,
+        ProcessBuilderError::Retention(error) => status_from_retention_error(error),
     }
 }
 
@@ -359,6 +360,7 @@ pub(super) fn status_from_process_builder_error(
             HYPER_NATIVE_STATUS_RESOURCE_LIMIT
         }
         ProcessBuilderError::UnsupportedStartupKind => HYPER_NATIVE_STATUS_NOT_SUPPORTED,
+        ProcessBuilderError::Retention(error) => status_from_retention_error(error),
     }
 }
 
@@ -723,6 +725,7 @@ pub(super) const fn status_from_logical_error(
     match error {
         AddressSpaceError::Account(error) => status_from_resource_error(error),
         AddressSpaceError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
+        AddressSpaceError::Stopped => HYPER_NATIVE_STATUS_BAD_STATE,
         AddressSpaceError::Busy | AddressSpaceError::CowRequired => HYPER_NATIVE_STATUS_BUSY,
         AddressSpaceError::Backend(error) => status_from_page_error(error),
         AddressSpaceError::BackingIo => HYPER_NATIVE_STATUS_IO_ERROR,
@@ -758,5 +761,19 @@ pub(super) const fn status_from_page_error(
         | crate::kernel::mm::user_space::KernelPageError::Unsupported => {
             HYPER_NATIVE_STATUS_INTERNAL
         }
+    }
+}
+
+pub(super) fn status_from_retention_error(
+    error: crate::kernel::process::retention::Error,
+) -> HyperNativeStatus {
+    use crate::kernel::process::retention::Error;
+    match error {
+        Error::Process(error) => status_from_process_error(error),
+        Error::Invalid => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        Error::Busy => HYPER_NATIVE_STATUS_WOULD_BLOCK,
+        Error::Revoked => hyper::abi::native::HYPER_NATIVE_STATUS_REVOKED,
+        Error::NotFound => HYPER_NATIVE_STATUS_NOT_FOUND,
+        Error::Limit => HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
     }
 }

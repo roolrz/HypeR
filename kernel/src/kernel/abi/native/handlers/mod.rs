@@ -17,6 +17,12 @@ mod memory_statistics;
 pub(super) use memory_statistics::sys_memory_inspector_read_statistics;
 mod object;
 mod process_builder;
+mod retention;
+pub(super) use retention::{
+    sys_crash_view_handle, sys_crash_view_mapping, sys_crash_view_read, sys_crash_view_thread,
+    sys_process_builder_retain, sys_process_retirement_open_view, sys_process_retirement_release,
+    sys_retention_info,
+};
 mod system;
 mod task;
 mod vfs;
