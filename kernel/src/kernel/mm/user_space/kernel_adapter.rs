@@ -217,6 +217,13 @@ impl PageBackend for KernelPageBackend {
         page.physical()
     }
 
+    fn permits_crash_retention(&self, page: &Self::Page) -> bool {
+        // A contiguous subpage owns its whole block; retaining it as one page
+        // would bypass the evidence byte limit. Cached pages retain cache
+        // ownership instead of exclusively owned anonymous storage.
+        matches!(page.storage, PageStorage::Single(_))
+    }
+
     fn read_owned(
         &self,
         page: &Self::Page,

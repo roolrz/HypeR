@@ -42,6 +42,16 @@ pub(crate) struct PrivateView<B: PageBackend, A: MemoryAccount> {
 }
 
 impl<B: PageBackend, A: MemoryAccount> PrivateView<B, A> {
+    /// Only materialized private pages qualify. Clean file/source/zero pages
+    /// may be shared with other address spaces and must not become dump pins.
+    pub(super) fn retain_crash_page(&self, index: usize) -> Option<super::CrashPage<B, A>> {
+        let page = self.pages.get(index)?.as_ref()?;
+        if !page.writable {
+            return None;
+        }
+        super::CrashPage::try_new(page.owner.clone(), self.backend.clone())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_new(
         source: SnapshotVmo<B, A>,

@@ -24,6 +24,9 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         executable: bool,
         mode: super::PrivateMappingMode,
     ) -> SpaceResult<Backend, Account, FallibleArc<PrivateView<Backend, Account>>> {
+        if self.state.with(|state| state.sealed) {
+            return Err(AddressSpaceError::Stopped);
+        }
         Ok(PrivateView::try_file(
             source,
             size,
@@ -68,6 +71,9 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         range: UserSlice,
     ) -> SpaceResult<Backend, Account, Option<PreparedMappingChange<'_, Backend, Account>>> {
         let snapshot = self.snapshot();
+        if snapshot.sealed {
+            return Err(AddressSpaceError::Stopped);
+        }
         let needs_population = snapshot.mappings.records.iter().any(|mapping| {
             let Some(overlap) = intersection(mapping.snapshot.range, range) else {
                 return false;
@@ -272,13 +278,17 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             .mapping_epoch
             .checked_add(1)
             .ok_or(AddressSpaceError::SizeOverflow)?;
-        let prepared = PreparedMappingChange::new_private_backing(
+        let mut prepared = PreparedMappingChange::new_private_backing(
             self,
             snapshot.authority_epoch,
             snapshot.mapping_epoch,
             epoch,
             replacement,
         )?;
+        // Reclamation only removes clean file pages; it never changes mapping
+        // authority or writable private evidence. A foreign VMAR can outlive
+        // process stop, so sealing must not make its clean pages unreclaimable.
+        prepared.kind = super::MappingChangeKind::FileReclaim;
         Ok(Some((prepared, reclaimed)))
     }
 }

@@ -108,6 +108,7 @@ fn prepare_handles(
             .union(Rights::INSPECT)
             .union(Rights::CREATE_PROCESS)
             .union(Rights::CREATE_TASK_GROUP)
+            .union(Rights::RETAIN_PROCESS)
             .union(Rights::LOCK_MEMORY),
     )?);
     let root = crate::kernel::vfs::root_directory(domain).map_err(Error::RootDirectory)?;

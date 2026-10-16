@@ -240,7 +240,8 @@ impl KernelObject for TaskFactory {
         .union(Rights::INSPECT)
         .union(Rights::CREATE_PROCESS)
         .union(Rights::CREATE_TASK_GROUP)
-        .union(Rights::LOCK_MEMORY);
+        .union(Rights::LOCK_MEMORY)
+        .union(Rights::RETAIN_PROCESS);
 }
 
 fn reserve_object_charge<T: KernelObject>(

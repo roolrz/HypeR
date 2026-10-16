@@ -8,6 +8,33 @@ use core::ptr::NonNull;
 
 use crate::abi::native::{NativeInvocation, NativeResult};
 
+/// Owned register evidence copied only after a Native machine run has ended.
+/// Architectural register layouts remain explicit; unused words are zero.
+#[derive(Clone, Copy)]
+pub struct UserRegisterSnapshot {
+    pub machine: u32,
+    pub pc: u64,
+    pub sp: u64,
+    pub tls: u64,
+    pub processor_state: u64,
+    pub general: [u64; 32],
+    pub vector: [u64; 64],
+    pub fp_control: [u64; 2],
+}
+
+impl UserRegisterSnapshot {
+    pub const EMPTY: Self = Self {
+        machine: 0,
+        pc: 0,
+        sp: 0,
+        tls: 0,
+        processor_state: 0,
+        general: [0; 32],
+        vector: [0; 64],
+        fp_control: [0; 2],
+    };
+}
+
 /// Result of a Native syscall reached directly from synchronous exception entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeCallAction {

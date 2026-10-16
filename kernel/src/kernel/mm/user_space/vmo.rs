@@ -828,6 +828,24 @@ pub(super) struct PinnedPrivatePage<B: PageBackend, A: MemoryAccount> {
     _owner: PageRef<B, A>,
 }
 
+/// One resident page retained without its VMO, mappings, file source or locks.
+pub(super) struct CrashPage<B: PageBackend, A: MemoryAccount> {
+    owner: PageRef<B, A>,
+    backend: B,
+}
+
+impl<B: PageBackend, A: MemoryAccount> CrashPage<B, A> {
+    fn try_new(owner: PageRef<B, A>, backend: B) -> Option<Self> {
+        let eligible = owner.with(|owned| backend.permits_crash_retention(&owned.page));
+        eligible.then_some(Self { owner, backend })
+    }
+
+    pub(super) fn read(&self, offset: usize, output: &mut [u8]) -> Result<(), B::Error> {
+        self.owner
+            .with(|owned| self.backend.read_exposed(&owned.page, offset, output))
+    }
+}
+
 pub(super) enum MappingObject<Backend: PageBackend, Account: MemoryAccount> {
     Snapshot(SnapshotVmo<Backend, Account>),
     Private(FallibleArc<PrivateView<Backend, Account>>),
@@ -847,6 +865,47 @@ impl<Backend: PageBackend, Account: MemoryAccount> Clone for MappingObject<Backe
 }
 
 impl<Backend: PageBackend, Account: MemoryAccount> MappingObject<Backend, Account> {
+    /// The stopped address space has closed mutation admission and owns the
+    /// only mapping. `VmoInner` never publishes weak references. Therefore these
+    /// two known owners (the mapping and its lease) exclude exported VMOs,
+    /// another machine mapping, DMA leases and in-flight VMO/copy operations.
+    /// A diagnostic refcount load alone would not establish that boundary.
+    /// An old foreign VMAR preparation may still clone a mapping snapshot, but
+    /// it cannot write backing and its final commit is rejected after sealing.
+    /// Target copies/faults must be quiesced before this observation; the count
+    /// itself is not a lock or proof that borrowed references have disappeared.
+    pub(super) fn crash_writable_is_private(
+        &self,
+        lease: Option<&WritableMappingLease<Backend, Account>>,
+    ) -> bool {
+        match (self, lease) {
+            (Self::Writable(vmo), Some(lease)) => vmo.inner.is_only_owner_pair(&lease.inner.vmo),
+            _ => false,
+        }
+    }
+
+    pub(super) fn retain_crash_page(
+        &self,
+        offset: u64,
+        private_writable: bool,
+    ) -> Option<CrashPage<Backend, Account>> {
+        if !offset.is_multiple_of(PAGE_SIZE) {
+            return None;
+        }
+        let index = usize::try_from(offset / PAGE_SIZE).ok()?;
+        match self {
+            Self::Private(view) => view.retain_crash_page(index),
+            Self::Writable(vmo) if private_writable => {
+                let owner = vmo
+                    .inner
+                    .state
+                    .with(|state| state.pages.get(index).cloned().flatten())?;
+                CrashPage::try_new(owner, vmo.inner.backend.clone())
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn pin_private_page(
         &self,
         offset: u64,

@@ -973,6 +973,75 @@ pub(in crate::kernel) trait TaskServices: UserMemoryServices {
     fn request_task_group_stop(&self, group: HandleValue) -> Result<(), ProcessError>;
 }
 
+pub(in crate::kernel) trait RetentionServices: UserMemoryServices {
+    fn retain_process_builder(
+        &self,
+        _builder: HandleValue,
+        _bytes: u64,
+        _timeout: u64,
+    ) -> Result<HandleValue, ProcessBuilderServiceError> {
+        Err(ProcessBuilderServiceError::InvalidInput)
+    }
+    fn retention_info(
+        &self,
+        _handle: HandleValue,
+        _view: bool,
+    ) -> Result<crate::kernel::process::retention::Info, crate::kernel::process::retention::Error>
+    {
+        Err(crate::kernel::process::retention::Error::Invalid)
+    }
+    fn retention_open_view(
+        &self,
+        _handle: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::process::retention::Error> {
+        Err(crate::kernel::process::retention::Error::Invalid)
+    }
+    fn retention_release(
+        &self,
+        _handle: HandleValue,
+    ) -> Result<(), crate::kernel::process::retention::Error> {
+        Err(crate::kernel::process::retention::Error::Invalid)
+    }
+    fn crash_thread(
+        &self,
+        _handle: HandleValue,
+        _index: usize,
+    ) -> Result<
+        (crate::kernel::process::retention::ThreadEvidence, usize),
+        crate::kernel::process::retention::Error,
+    > {
+        Err(crate::kernel::process::retention::Error::Invalid)
+    }
+    fn crash_mapping(
+        &self,
+        _handle: HandleValue,
+        _index: usize,
+    ) -> Result<
+        (crate::kernel::mm::user_space::CrashMapping, usize),
+        crate::kernel::process::retention::Error,
+    > {
+        Err(crate::kernel::process::retention::Error::Invalid)
+    }
+    fn crash_handle(
+        &self,
+        _handle: HandleValue,
+        _index: usize,
+    ) -> Result<
+        (crate::kernel::capability::HandleSnapshot, usize),
+        crate::kernel::process::retention::Error,
+    > {
+        Err(crate::kernel::process::retention::Error::Invalid)
+    }
+    fn crash_read(
+        &self,
+        _handle: HandleValue,
+        _address: u64,
+        _output: UserSlice,
+    ) -> Result<usize, crate::kernel::process::retention::Error> {
+        Err(crate::kernel::process::retention::Error::Invalid)
+    }
+}
+
 pub(in crate::kernel) trait NativeServices:
     UserMemoryServices
     + HandleServices
@@ -988,6 +1057,7 @@ pub(in crate::kernel) trait NativeServices:
     + VfsServices
     + MemoryServices
     + ProcessBuilderServices
+    + RetentionServices
     + TaskServices
 {
 }
@@ -1007,6 +1077,7 @@ impl<T> NativeServices for T where
         + VfsServices
         + MemoryServices
         + ProcessBuilderServices
+        + RetentionServices
         + TaskServices
 {
 }

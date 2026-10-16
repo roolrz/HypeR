@@ -54,6 +54,11 @@ pub struct Program {
     pub restart_limit: u32,
     #[serde(default)]
     pub resident: bool,
+    /// Report termination and delegated worker failures directly to Console,
+    /// independently of journal and terminal availability. This does not grant
+    /// restart authority or turn a component failure into a manager failure.
+    #[serde(default)]
+    pub critical: bool,
     /// A trusted startup coordinator must install this instance's construction
     /// transaction. The manager never reconstructs consumed migration grants.
     #[serde(default)]

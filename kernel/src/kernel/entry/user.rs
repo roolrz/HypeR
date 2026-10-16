@@ -409,7 +409,12 @@ fn run_session(session: &UserSession, execution: &UserExecution) {
                 } else {
                     if !stopped {
                         report_user_fault(session, fault, observed_epoch, &resolution);
-                        session.process.request_stop(fault_reason(fault));
+                        session.process.request_fault_stop(
+                            fault_reason(fault),
+                            fault.program_counter(),
+                            fault.address(),
+                            fault.syndrome(),
+                        );
                     }
                     if let Err(failure) = completion.discard(binding) {
                         fail_completion(failure);

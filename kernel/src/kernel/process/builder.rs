@@ -66,6 +66,7 @@ pub(crate) enum ProcessBuilderError<E> {
     DataLimit,
     Transaction(E),
     UnsupportedStartupKind,
+    Retention(super::retention::Error),
 }
 
 /// One process-local handle requested for the child's startup record array.
@@ -123,7 +124,17 @@ struct BuilderPlan {
     thread_name: Option<String>,
     affinity: CpuMask,
     memory_lock_allowed: bool,
+    retention: Option<hyper::mm::FallibleArc<super::retention::Retention>>,
     startup: Vec<StoredStartupCapability>,
+}
+
+impl Drop for BuilderPlan {
+    fn drop(&mut self) {
+        if let Some(retention) = self.retention.take() {
+            retention.release(super::retention::RELEASE_ABORTED);
+            retention.discard_released();
+        }
+    }
 }
 
 /// Authority already detached from its source namespace for child startup.
@@ -219,6 +230,8 @@ impl SealedProcessBuild {
             Some(child) => child,
             None => builder_invariant_violation(),
         };
+        // The published child, not the consumed builder plan, now owns cleanup.
+        self.plan.retention.take();
         (child, core::mem::take(&mut self.plan.startup))
     }
 
@@ -337,6 +350,7 @@ impl ProcessBuilder {
                 thread_name: None,
                 affinity: CpuMask::ALL,
                 memory_lock_allowed: false,
+                retention: None,
                 startup,
             }))),
             abort_requested: AtomicBool::new(false),
@@ -389,6 +403,43 @@ impl ProcessBuilder {
         let result = copy_name(name).map(|name| {
             plan.thread_name = Some(name);
         });
+        self.finish_open_operation(plan, result)
+    }
+
+    /// Arms retention before the child exists. The creator receives the only
+    /// cleanup controller; staged startup does not admit that object kind.
+    pub(crate) fn retain_on_exit(
+        &self,
+        owner: &Process,
+        max_bytes: u64,
+        timeout_ns: u64,
+    ) -> Result<PreparedHandle, ProcessBuilderError<()>> {
+        let mut plan = self.take_open_plan()?;
+        if plan.retention.is_some() {
+            return self.finish_open_operation(plan, Err(ProcessBuilderError::Busy));
+        }
+        let result = (|| {
+            let retention = super::retention::Retention::new(owner, max_bytes, timeout_ns)
+                .map_err(ProcessBuilderError::Retention)?;
+            let controller = super::retention::ProcessRetirement::new(
+                retention.clone(),
+                &owner.resource_domain(),
+            )
+            .map_err(ProcessBuilderError::Retention)?;
+            // Prepare every fallible object/registry allocation while the
+            // builder plan is exclusively owned. A live caller can retry any
+            // failure without leaving a silently revoked retention policy.
+            let object =
+                ObjectPublication::try_new(controller).map_err(ProcessBuilderError::Object)?;
+            let prepared = PreparedHandle::try_from_new_object(
+                object,
+                super::retention::ProcessRetirement::RIGHTS,
+                HandleFlags::NONE,
+            )
+            .map_err(|error| ProcessBuilderError::Process(error.into()))?;
+            plan.retention = Some(retention);
+            Ok(prepared)
+        })();
         self.finish_open_operation(plan, result)
     }
 
@@ -593,26 +644,30 @@ impl ProcessBuilder {
         })
     }
 
-    fn finish_open_operation(
+    fn finish_open_operation<T>(
         &self,
         plan: BuilderPlan,
-        result: Result<(), ProcessBuilderError<()>>,
-    ) -> Result<(), ProcessBuilderError<()>> {
+        result: Result<T, ProcessBuilderError<()>>,
+    ) -> Result<T, ProcessBuilderError<()>> {
         let mut plan = Some(plan);
-        let outcome = self.state.with(|state| {
+        let aborted = self.state.with(|state| {
             require_busy_state(state);
             if self.abort_requested.load(Ordering::Acquire) {
                 *state = Some(BuilderState::Aborted);
-                return Err(ProcessBuilderError::Aborted);
+                return true;
             }
             *state = Some(BuilderState::Open(match plan.take() {
                 Some(plan) => plan,
                 None => builder_invariant_violation(),
             }));
-            result
+            false
         });
         drop(plan.take());
-        outcome
+        if aborted {
+            Err(ProcessBuilderError::Aborted)
+        } else {
+            result
+        }
     }
 
     /// Completes an add whose source-handle transfer has already committed.
@@ -769,7 +824,11 @@ pub(crate) fn create_process_builder(
     };
     let prepared = match PreparedHandle::try_from_new_object(
         publication,
-        ProcessBuilder::BASE_RIGHTS.union(factory.rights().intersection(Rights::LOCK_MEMORY)),
+        ProcessBuilder::BASE_RIGHTS.union(
+            factory
+                .rights()
+                .intersection(Rights::LOCK_MEMORY.union(Rights::RETAIN_PROCESS)),
+        ),
         HandleFlags::NONE,
     ) {
         Ok(prepared) => prepared,
@@ -841,7 +900,9 @@ impl private::UserExportable for ProcessBuilder {}
 
 impl KernelObject for ProcessBuilder {
     const KIND: ObjectKind = ObjectKind::PROCESS_BUILDER;
-    const SUPPORTED_RIGHTS: Rights = Self::BASE_RIGHTS.union(Rights::LOCK_MEMORY);
+    const SUPPORTED_RIGHTS: Rights = Self::BASE_RIGHTS
+        .union(Rights::LOCK_MEMORY)
+        .union(Rights::RETAIN_PROCESS);
     const TRANSFER_CLASS: TransferClass = TransferClass::RendezvousOnly;
 
     fn on_zero_active_handles(&self, _retirement: &mut crate::kernel::object::ObjectRetirement) {
@@ -896,6 +957,9 @@ fn prepare_sealed_process(plan: &BuilderPlan) -> Result<PreparedProcess, Process
             return Err(ProcessBuilderError::Process(error));
         }
     };
+    if let Some(retention) = &plan.retention {
+        prepared.process().install_retention(retention.clone());
+    }
     Ok(prepared)
 }
 

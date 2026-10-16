@@ -222,6 +222,13 @@ pub(crate) trait PageBackend: Clone {
     fn allocate_zeroed(&self) -> Result<Self::Page, Self::Error>;
     fn physical_address(&self, page: &Self::Page) -> PhysicalAddress;
 
+    /// Whether retaining this owner retains exactly one ordinary physical page
+    /// and no file-cache, DMA or larger-allocation lifetime. Eligibility must
+    /// remain stable for the owner's lifetime. Unknown adapters opt out.
+    fn permits_crash_retention(&self, _page: &Self::Page) -> bool {
+        false
+    }
+
     /// Copies through a permanently mapped, machine-quiesced owned page.
     ///
     /// The caller serializes kernel access and proves no writable machine

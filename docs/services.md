@@ -125,6 +125,10 @@ lifetimes. See [Native terminals](terminal.md) for the initial session handoff.
   in the request/reply data path. It queues at most 64 pending connections,
   at most eight per consumer, with a maximum 60-second connection deadline.
   Missing publication, provider failure and queue exhaustion return errors.
+  Connection rejection carries a structured reason: `not-offered`,
+  `invalid-request`, `unavailable`, `restarting`, `timed-out`, or `resource-limit`.
+  Transport errors remain separate. A dead provider is unavailable, not a
+  permission denial; only an absent capability route is `not-offered`.
 - Endpoints are tied to instance and generation. A stale connector cannot publish
   or connect for a replacement. Existing sessions are not replayed or repaired
   across provider death; callers must reconnect and handle application recovery.
@@ -186,6 +190,52 @@ the finite sequence; successful retirement alone publishes `bootstrap-retired`.
 If ownership becomes uncertain, it retains known owners and reports failure.
 Neither it nor the manager pretends that a committed MOVE rolled back. Stage1
 recovery remains available only before the original handoff commit.
+
+## Failure reports
+
+Formal component construction arms bounded process retention before execution:
+up to 8 MiB for at most 10 seconds. The manager first reports the immutable
+termination reason, then observes the retained fault/memory summary and explicitly
+releases its retirement control. Filesystem, terminal and VM-runtime children use
+the same mechanism under their existing domain supervisor. Ordinary applications
+do not receive retention authority. Losing the supervisor or reaching the kernel
+deadline releases the retained memory; a crashed service cannot retain itself.
+Diagnostics do not preserve a working IPC endpoint or make old sessions reusable.
+`TERMINATED` reports stopped execution; diagnostic readiness and final retirement
+are separate transitions. A replacement still waits for final resource retirement.
+
+This is diagnostic retention, not state recovery. Prepared services with consumed
+ownership remain non-restartable. Files, VM devices and in-flight writes are not
+silently rebound or replayed against a new service generation.
+
+The manager reports Process termination as soon as it observes it, before waiting
+for descendant or resource retirement. Reports include the instance path,
+generation, Process KOID and kernel termination reason (exit status, requested
+stop, or fault). The last reason remains in `componentctl status`. Launch failures
+and startup deadlines are also reported even when no Process was created.
+
+`program.critical` selects direct Console reporting in addition to journal;
+it does not stop the manager, grant restart authority or change ownership rules.
+The default composition marks console, I/O, filesystem, journal and session
+providers critical. Ordinary components report through journal; rejected log
+writes, including a full queue or dead journal, fall back to Console. This path
+uses the manager's kernel Console capability and does not depend on console-raw,
+terminal-service, the shell or loading a diagnostic executable. It remains active
+after the boot display finishes.
+
+Reports use a bounded 128-record queue. Console backpressure is retried without
+blocking lifecycle observation; partial writes preserve report order. Overflow
+is counted and reported when output resumes. Neither an indefinitely stalled
+physical console nor a failed component manager can guarantee visible output.
+These records are diagnostics, not a durable audit log or a hang detector.
+
+Domain supervisors keep ownership of their children. Filesystem, terminal/session
+and VM supervisors can report child failures over their private component
+connector. The manager supplies the parent identity and its configured critical
+policy; a child cannot choose another component's identity. These reports do not
+mark the parent Process as exited or stop healthy siblings. Filesystem reports
+include worker identity, mount point and termination reason. Normal unmount and
+successful shell exits are not child failures.
 
 ## Administration and logs
 
@@ -255,6 +305,15 @@ eviction, query lifetime and batched line framing.
 separate observation/control authority, stdio, connection deadlines, restart bounds
 and retirement using actual Native processes. See [bootstrap handoff](bootstrap-handoff.md)
 and [boot layout](boot-layout.md) for the filesystem and ownership contracts.
+
+`make test-service-failure` builds an isolated fault-injection variant and
+terminates live console, journal, session and VM-manager processes. It also checks
+fault/exit/launch failures, child reporting and Console fallback after journal
+termination. Production builds do not contain the test fault-injection
+hook. `make test-service-provider-failure ARCH=aarch64` repeats the direct-Console
+checks for I/O and filesystem providers on disposable, disk-backed QEMU roots.
+The storage boot suite separately checks mounted filesystem worker death and
+isolation of healthy mounts, including the parent's direct Console report.
 
 For a manual host retention microbenchmark, build the optimized test executable:
 

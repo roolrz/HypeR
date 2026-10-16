@@ -720,6 +720,8 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         }
     }
 
+    impl crate::kernel::abi::native::RetentionServices for RejectingServices {}
+
     impl ProcessBuilderServices for RejectingServices {
         fn create_process_builder(
             &self,

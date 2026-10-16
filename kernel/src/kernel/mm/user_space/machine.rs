@@ -29,6 +29,7 @@ pub(crate) type NativePinnedAtomicWord =
     super::address_space::PinnedAtomicWord<KernelPageBackend, DomainAccount>;
 
 type LogicalAddressSpace = UserAddressSpace<KernelPageBackend, DomainAccount>;
+pub(crate) type NativeCrashMemory = super::CrashMemory<KernelPageBackend, DomainAccount>;
 type LogicalPrepared<'a> = PreparedMappingChange<'a, KernelPageBackend, DomainAccount>;
 type LogicalUserWrite = PreparedUserWrite<KernelPageBackend, DomainAccount>;
 type StateLock = InterruptSpinLock<MachineState, crate::hal::irq::LocalMask>;
@@ -527,6 +528,25 @@ impl NativeAddressSpace {
     /// content protection, even while foreign VMAR references retain this owner.
     pub(crate) fn retire_file_sources(&self) {
         self.logical.retire_file_sources();
+    }
+
+    pub(crate) fn begin_process_stop(&self) {
+        self.logical.begin_process_stop();
+    }
+
+    /// Retains bounded resident private pages without retaining this space.
+    ///
+    /// # Safety
+    /// Every target user Thread and in-flight syscall must be stopped, its
+    /// active handles withdrawn, and no hardware execution may resume. Calling
+    /// `begin_process_stop` first seals foreign VMAR mutation and copy admission.
+    pub(crate) unsafe fn capture_crash_memory(
+        &self,
+        max_bytes: u64,
+    ) -> Result<NativeCrashMemory, Error> {
+        self.logical
+            .capture_crash_memory(max_bytes)
+            .map_err(Error::Logical)
     }
 
     /// Copies kernel-owned bytes through the logical user-address contract.

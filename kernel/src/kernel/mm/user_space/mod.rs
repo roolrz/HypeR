@@ -33,8 +33,9 @@ pub(crate) use transaction::retry_stale;
 pub(crate) use vmo::{ExclusiveHardwareWriteLease, WritableMappingLease};
 
 pub(crate) use address_space::{
-    AddressSpaceError, MappingChange, MappingSnapshot, MappingToken, PreparedMappingChange,
-    PreparedPageSnapshot, PreparedUserWrite, UserAddressSpace, Vmar,
+    AddressSpaceError, CrashMapping, CrashMappingKind, CrashMemory, CrashReadError, MappingChange,
+    MappingSnapshot, MappingToken, PreparedMappingChange, PreparedPageSnapshot, PreparedUserWrite,
+    UserAddressSpace, Vmar,
 };
 #[cfg(not(test))]
 pub(crate) use authority::ExecutableAuthority;
@@ -67,8 +68,8 @@ pub(crate) use machine::prepare_native_entry_self_test;
 pub(crate) use machine::run_dormant_self_test;
 #[cfg(not(test))]
 pub(crate) use machine::{
-    ActiveNativeAddressSpace, Error as MachineError, NativeAddressSpace, NativeImageSegment,
-    NativePinnedAtomicWord, StoppedNativeRun, UserWriteReservation,
+    ActiveNativeAddressSpace, Error as MachineError, NativeAddressSpace, NativeCrashMemory,
+    NativeImageSegment, NativePinnedAtomicWord, StoppedNativeRun, UserWriteReservation,
 };
 #[cfg(not(test))]
 pub(crate) use objects::{GuestMemoryBacking, MemoryObjectError, VmarObject, VmoObject};

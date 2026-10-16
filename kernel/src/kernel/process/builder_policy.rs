@@ -30,6 +30,7 @@ pub(crate) struct BuilderStorable;
 impl BuilderStorable {
     pub(crate) const fn permits_kind_id(kind: u32) -> bool {
         kind == native::HYPER_NATIVE_OBJECT_EVENT
+            || kind == native::HYPER_NATIVE_OBJECT_CRASH_VIEW
             || kind == native::HYPER_NATIVE_OBJECT_BYTE_CHANNEL
             || kind == native::HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL
             || kind == native::HYPER_NATIVE_OBJECT_TASK_GROUP

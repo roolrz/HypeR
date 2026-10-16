@@ -473,6 +473,10 @@ pub const STATUSES: &[Status] = &[
         value: -25,
         name: "read_only",
     },
+    Status {
+        value: -26,
+        name: "revoked",
+    },
 ];
 
 const RIGHT_DUPLICATE_BIT: u8 = 0;
@@ -682,6 +686,16 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
         name: "guest_interrupt",
         transfer: TransferClass::RendezvousOnly,
     },
+    ObjectKind {
+        value: 38,
+        name: "process_retirement",
+        transfer: TransferClass::RendezvousOnly,
+    },
+    ObjectKind {
+        value: 39,
+        name: "crash_view",
+        transfer: TransferClass::General,
+    },
 ];
 
 pub const DIRECTORY_STREAM_RIGHTS: u64 =
@@ -693,6 +707,14 @@ pub const GUEST_MEMORY_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_MAP | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE;
 
 pub const RIGHTS: &[Right] = &[
+    Right {
+        bit: 38,
+        name: "retire",
+    },
+    Right {
+        bit: 37,
+        name: "retain_process",
+    },
     Right {
         bit: 36,
         name: "lock_memory",
@@ -876,6 +898,11 @@ pub const RIGHT_INSPECT_DETAILS: u64 = 1 << 33;
 pub const RIGHT_MANAGE_NAMESPACE: u64 = 1 << 34;
 pub const RIGHT_PROTECT: u64 = 1 << 35;
 pub const RIGHT_LOCK_MEMORY: u64 = 1 << 36;
+pub const RIGHT_RETAIN_PROCESS: u64 = 1 << 37;
+pub const RIGHT_RETIRE: u64 = 1 << 38;
+pub const PROCESS_RETIREMENT_RIGHTS: u64 =
+    RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_INSPECT_DETAILS | RIGHT_RETIRE;
+pub const CRASH_VIEW_RIGHTS: u64 = RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ;
 
 pub const EVENT_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_SIGNAL;
@@ -938,6 +965,16 @@ pub const CAPABILITY_OPERATIONS: &[HandleOperation] = &[
 ];
 
 pub const SIGNALS: &[Signal] = &[
+    Signal {
+        object: "process_retirement",
+        bit: 0,
+        name: "ready",
+    },
+    Signal {
+        object: "process_retirement",
+        bit: 1,
+        name: "released",
+    },
     Signal {
         object: "physical_device",
         bit: 0,
@@ -1078,6 +1115,94 @@ const DIRECTORY_ENTRY_NAME_CAPACITY: u32 = 256;
 const DIRECTORY_ENTRY_RECORD_SIZE: u16 = 24 + DIRECTORY_ENTRY_NAME_CAPACITY as u16;
 
 pub const CONSTANTS: &[AbiConstant] = &[
+    AbiConstant {
+        name: "process_retirement_prepared",
+        value: 0,
+    },
+    AbiConstant {
+        name: "process_retirement_running",
+        value: 1,
+    },
+    AbiConstant {
+        name: "process_retirement_stopping",
+        value: 2,
+    },
+    AbiConstant {
+        name: "process_retirement_ready",
+        value: 3,
+    },
+    AbiConstant {
+        name: "process_retirement_released",
+        value: 4,
+    },
+    AbiConstant {
+        name: "crash_partial_memory",
+        value: 1,
+    },
+    AbiConstant {
+        name: "crash_partial_threads",
+        value: 2,
+    },
+    AbiConstant {
+        name: "crash_partial_handles",
+        value: 4,
+    },
+    AbiConstant {
+        name: "crash_partial_mappings",
+        value: 8,
+    },
+    AbiConstant {
+        name: "process_retirement_release_none",
+        value: 0,
+    },
+    AbiConstant {
+        name: "process_retirement_release_explicit",
+        value: 1,
+    },
+    AbiConstant {
+        name: "process_retirement_release_owner_lost",
+        value: 2,
+    },
+    AbiConstant {
+        name: "process_retirement_release_deadline",
+        value: 3,
+    },
+    AbiConstant {
+        name: "process_retirement_release_aborted",
+        value: 4,
+    },
+    AbiConstant {
+        name: "crash_mapping_retained",
+        value: 1,
+    },
+    AbiConstant {
+        name: "crash_mapping_partial",
+        value: 2,
+    },
+    AbiConstant {
+        name: "crash_mapping_excluded_shared",
+        value: 4,
+    },
+    AbiConstant {
+        name: "crash_mapping_excluded_file",
+        value: 8,
+    },
+    AbiConstant {
+        name: "crash_mapping_anonymous",
+        value: 1,
+    },
+    AbiConstant {
+        name: "crash_mapping_private_file",
+        value: 2,
+    },
+    AbiConstant {
+        name: "crash_mapping_shared",
+        value: 3,
+    },
+    AbiConstant {
+        name: "crash_read_max_bytes",
+        value: 65536,
+    },
     AbiConstant {
         name: "memory_statistics_heap",
         value: 1,
@@ -2837,6 +2962,263 @@ const RESOURCE_LIMITS_FIELDS: &[Field] = &[
 ];
 
 pub const RECORDS: &[Record] = &[
+    Record {
+        name: "process_retirement_info",
+        minimum_size: 104,
+        size: 104,
+        alignment: 8,
+        fields: &[
+            Field {
+                name: "size",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "phase",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "flags",
+                kind: FieldKind::U32,
+                offset: 8,
+            },
+            Field {
+                name: "release_reason",
+                kind: FieldKind::U32,
+                offset: 12,
+            },
+            Field {
+                name: "process_koid",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "deadline_ns",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+            Field {
+                name: "retained_bytes",
+                kind: FieldKind::U64,
+                offset: 32,
+            },
+            Field {
+                name: "memory_limit",
+                kind: FieldKind::U64,
+                offset: 40,
+            },
+            Field {
+                name: "terminal_reason",
+                kind: FieldKind::U32,
+                offset: 48,
+            },
+            Field {
+                name: "fault_class",
+                kind: FieldKind::U32,
+                offset: 52,
+            },
+            Field {
+                name: "exit_status",
+                kind: FieldKind::I64,
+                offset: 56,
+            },
+            Field {
+                name: "fault_pc",
+                kind: FieldKind::U64,
+                offset: 64,
+            },
+            Field {
+                name: "fault_address",
+                kind: FieldKind::U64,
+                offset: 72,
+            },
+            Field {
+                name: "fault_syndrome",
+                kind: FieldKind::U64,
+                offset: 80,
+            },
+            Field {
+                name: "thread_count",
+                kind: FieldKind::U32,
+                offset: 88,
+            },
+            Field {
+                name: "mapping_count",
+                kind: FieldKind::U32,
+                offset: 92,
+            },
+            Field {
+                name: "handle_count",
+                kind: FieldKind::U32,
+                offset: 96,
+            },
+            Field {
+                name: "reserved",
+                kind: FieldKind::U32,
+                offset: 100,
+            },
+        ],
+    },
+    Record {
+        name: "crash_thread",
+        minimum_size: 840,
+        size: 840,
+        alignment: 8,
+        fields: &[
+            Field {
+                name: "size",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "machine",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "flags",
+                kind: FieldKind::U32,
+                offset: 8,
+            },
+            Field {
+                name: "reserved",
+                kind: FieldKind::U32,
+                offset: 12,
+            },
+            Field {
+                name: "thread_koid",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "pc",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+            Field {
+                name: "sp",
+                kind: FieldKind::U64,
+                offset: 32,
+            },
+            Field {
+                name: "tls",
+                kind: FieldKind::U64,
+                offset: 40,
+            },
+            Field {
+                name: "processor_state",
+                kind: FieldKind::U64,
+                offset: 48,
+            },
+            Field {
+                name: "general",
+                kind: FieldKind::Bytes(256),
+                offset: 56,
+            },
+            Field {
+                name: "vector",
+                kind: FieldKind::Bytes(512),
+                offset: 312,
+            },
+            Field {
+                name: "fp_control",
+                kind: FieldKind::Bytes(16),
+                offset: 824,
+            },
+        ],
+    },
+    Record {
+        name: "crash_mapping",
+        minimum_size: 48,
+        size: 48,
+        alignment: 8,
+        fields: &[
+            Field {
+                name: "size",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "flags",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "base",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+            Field {
+                name: "length",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "object_offset",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+            Field {
+                name: "object_koid",
+                kind: FieldKind::U64,
+                offset: 32,
+            },
+            Field {
+                name: "permissions",
+                kind: FieldKind::U32,
+                offset: 40,
+            },
+            Field {
+                name: "kind",
+                kind: FieldKind::U32,
+                offset: 44,
+            },
+        ],
+    },
+    Record {
+        name: "crash_handle",
+        minimum_size: 40,
+        size: 40,
+        alignment: 8,
+        fields: &[
+            Field {
+                name: "size",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "kind",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "value",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+            Field {
+                name: "koid",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "rights",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+            Field {
+                name: "flags",
+                kind: FieldKind::U32,
+                offset: 32,
+            },
+            Field {
+                name: "reserved",
+                kind: FieldKind::U32,
+                offset: 36,
+            },
+        ],
+    },
     Record {
         name: "memory_heap_statistics",
         fields: &[
@@ -5105,7 +5487,7 @@ const PROCESS_BUILDER_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
         rights: ProducedRights::FixedAndInherited {
             fixed_rights: PROCESS_BUILDER_RIGHTS,
             authority_source: "factory",
-            inherited_rights: RIGHT_LOCK_MEMORY,
+            inherited_rights: RIGHT_LOCK_MEMORY | RIGHT_RETAIN_PROCESS,
         },
     }),
 }];
@@ -6295,6 +6677,37 @@ const ATOMIC_WAKE_ARGUMENTS: &[Argument] = &[
     scalar_argument("address", ValueKind::U64),
     scalar_argument("count", ValueKind::U32),
 ];
+
+const fn retained_object_argument(object: &'static str, rights: u64) -> Argument {
+    Argument {
+        name: "object",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind(object),
+            required_rights: rights,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    }
+}
+
+const fn crash_output_argument(record: &'static str) -> Argument {
+    Argument {
+        name: "output",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "output_size",
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+            },
+            record: Some(record),
+            handles: None,
+            validation_order: 0,
+        }),
+    }
+}
 
 pub const SYSCALLS: &[Syscall] = &[
     Syscall {
@@ -10526,6 +10939,235 @@ pub const SYSCALLS: &[Syscall] = &[
         failure_results: &[],
     },
     Syscall {
+        number: 173,
+        name: "process_builder_retain",
+        feature: FeatureGate::Core,
+        arguments: &[
+            process_builder_argument(
+                RIGHT_WRITE | RIGHT_RETAIN_PROCESS,
+                HandleDisposition::Borrow,
+            ),
+            scalar_argument("max_bytes", ValueKind::ByteCount),
+            scalar_argument("timeout_ns", ValueKind::U64),
+        ],
+        results: &[ResultValue {
+            name: "handle",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("process_retirement"),
+                rights: ProducedRights::Fixed(PROCESS_RETIREMENT_RIGHTS),
+            }),
+        }],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 174,
+        name: "process_retirement_get_info",
+        feature: FeatureGate::Core,
+        arguments: &[
+            retained_object_argument("process_retirement", RIGHT_INSPECT),
+            crash_output_argument("process_retirement_info"),
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: INFO_RECORD_RESULTS,
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 175,
+        name: "process_retirement_open_view",
+        feature: FeatureGate::Core,
+        arguments: &[retained_object_argument(
+            "process_retirement",
+            RIGHT_INSPECT_DETAILS,
+        )],
+        results: &[ResultValue {
+            name: "handle",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("crash_view"),
+                rights: ProducedRights::Fixed(CRASH_VIEW_RIGHTS),
+            }),
+        }],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 176,
+        name: "process_retirement_release",
+        feature: FeatureGate::Core,
+        arguments: &[retained_object_argument("process_retirement", RIGHT_RETIRE)],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 177,
+        name: "crash_view_get_info",
+        feature: FeatureGate::Core,
+        arguments: &[
+            retained_object_argument("crash_view", RIGHT_INSPECT),
+            crash_output_argument("process_retirement_info"),
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: INFO_RECORD_RESULTS,
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 178,
+        name: "crash_view_read",
+        feature: FeatureGate::Core,
+        arguments: &[
+            retained_object_argument("crash_view", RIGHT_READ),
+            scalar_argument("address", ValueKind::U64),
+            Argument {
+                name: "output",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "length",
+                        maximum_bytes: 65536,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("length", ValueKind::ByteCount),
+        ],
+        results: &[ResultValue {
+            name: "actual_bytes",
+            kind: ValueKind::ByteCount,
+            handle: None,
+        }],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 179,
+        name: "crash_view_thread",
+        feature: FeatureGate::Core,
+        arguments: &[
+            retained_object_argument("crash_view", RIGHT_READ),
+            scalar_argument("index", ValueKind::U64),
+            crash_output_argument("crash_thread"),
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: &[
+            ResultValue {
+                name: "supported_size",
+                kind: ValueKind::ByteCount,
+                handle: None,
+            },
+            ResultValue {
+                name: "next_index",
+                kind: ValueKind::U64,
+                handle: None,
+            },
+        ],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 180,
+        name: "crash_view_mapping",
+        feature: FeatureGate::Core,
+        arguments: &[
+            retained_object_argument("crash_view", RIGHT_READ),
+            scalar_argument("index", ValueKind::U64),
+            crash_output_argument("crash_mapping"),
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: &[
+            ResultValue {
+                name: "supported_size",
+                kind: ValueKind::ByteCount,
+                handle: None,
+            },
+            ResultValue {
+                name: "next_index",
+                kind: ValueKind::U64,
+                handle: None,
+            },
+        ],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 181,
+        name: "crash_view_handle",
+        feature: FeatureGate::Core,
+        arguments: &[
+            retained_object_argument("crash_view", RIGHT_READ),
+            scalar_argument("index", ValueKind::U64),
+            crash_output_argument("crash_handle"),
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: &[
+            ResultValue {
+                name: "supported_size",
+                kind: ValueKind::ByteCount,
+                handle: None,
+            },
+            ResultValue {
+                name: "next_index",
+                kind: ValueKind::U64,
+                handle: None,
+            },
+        ],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
         number: 496,
         name: "native_block_transfer",
         feature: FeatureGate::Core,
@@ -10629,6 +11271,10 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "File and Directory information reports attribute snapshots plus filesystem, mount, and node identities for diagnostics and correlation. These identities do not grant authority, cannot be resolved back into handles, and do not define a pathname; directory entries, hard links, renames, mount namespaces, and unlinks make pathnames namespace-dependent observations rather than object identity.",
     "Object wait-many borrows every input handle for the complete wait, canonicalizes duplicate object identities, and selects the lowest input index whose requested mask intersects the winning object's committed level snapshot. Source-handle close after resolution does not cancel the wait.",
     "Process terminal detail fields are reason-specific: exit reasons encode the signed status as two's-complement in detail0; fault encodes class in detail0 and code in detail1; task-group stop encodes generation in detail0; unused details are zero.",
+    "process_builder_retain requires WRITE | RETAIN_PROCESS on an unsealed ProcessBuilder. Only a TaskFactory carrying RETAIN_PROCESS can produce that builder authority. Registration is external and precedes process start; a running process cannot register itself. The returned ProcessRetirement is a nonduplicable rendezvous-only controller. It may be transferred without creating a buffered owner. Closing its last active handle, explicit release, builder abort, or its monotonic timeout revokes all CrashView derivatives. Ordinary Process observers never extend retention. No kernel callback or application crash handler is installed.",
+    "Process stop closes admission and withdraws live handles while outstanding transactions cancel or finish safely. After execution quiesces, retained evidence contains register copies, numeric handle records and bounded resident private pages. It contains no live handle authority, device lease, file protection, filesystem refill source or target address space. Shared writable and clean file-backed pages are excluded; unavailable bytes return NOT_FOUND rather than faulting the target. Independently retained device and DMA owners must still finish their normal physical retirement.",
+    "ProcessRetirement READY publishes a bounded scene; RELEASED is sticky and may occur before READY. The timeout starts on the first stop request, including quiescence time. Current limits are 64 armed registrations, four retained scenes and 64 MiB of retained page payload per registering supervisor, with at most 60 seconds per registration. Actual limits may tighten and quota/allocation failure is observable. At most 32 thread records, 256 numeric handle records and 1024 mapping records are retained; truncation is flagged. Bounded metadata is separately resource-domain charged. Controllers should be explicitly released after observation and before joining final process or group retirement.",
+    "CrashView grants only read/inspect and may be duplicated or delegated. Release revokes new reads even when views remain open; already admitted bounded reads may finish. Read copies at most 64 KiB and may return a contiguous short prefix before an unavailable page. Indexed thread, mapping and handle queries begin at zero and return next_index zero at the end; absent indices return NOT_FOUND. Thread machine is ELF e_machine; general, vector and fp_control byte arrays encode little-endian u64 words in architecture register order. Mapping object_koid zero means no canonical object identity is exported. Numeric addresses and KOIDs confer no authority.",
     "Object transfer classes constrain generic capability transports. General objects may be retained by buffered or rendezvous transports. Rendezvous-only objects may move or duplicate only by a direct source-to-destination commit which never creates an in-transit owner. Forbidden objects cannot cross a userspace handle table boundary.",
     "AtomicOnOk capability transactions commit handle-table ownership, the rendezvous message, and live output-handle installation together only when both participants return ok. Every non-ok status preserves all input owners and the message. Non-fault failures leave output memory unchanged; fault may partially modify output byte or slot memory, but no handle value written by a failed call is live or installed. Bindings must ignore every output-memory byte after any non-ok status.",
     "A capability-channel receiver advertises peer_receiving only after its byte range, typed capability slots, and destination handle-table capacity are validated, reserved, and fully published on the endpoint's FIFO receiver queue. The signal is level-triggered but may race another sender.",
