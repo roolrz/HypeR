@@ -683,8 +683,11 @@ replay every live local mapping before publishing a new CPU online.
 
 ## Runtime allocation
 
-The central runtime heap is the sole owner of buddy free lists, slab headers,
-partial-slab topology, and page-owner accounting. After SMP admission freezes
+The central runtime heap is the sole owner of buddy free-block indexes, slab
+headers, partial-slab topology, and page-owner accounting. Each buddy order uses
+an intrusive binary digital tree keyed by physical block address, bounding
+coalescing lookups by address width without allocating separate metadata.
+After SMP admission freezes
 the participating CPU set, the kernel enables bounded per-CPU magazines for
 the smallest slab classes. A cached object remains reserved in its central slab
 and is represented by one linear ownership token; its backing page therefore
