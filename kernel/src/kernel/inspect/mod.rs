@@ -490,7 +490,16 @@ impl ObjectInspector {
         }
         let process = find_process_by_koid(process_koid, self.scope).ok_or(Error::NotFound)?;
         let token = usize::try_from(cursor).map_err(|_| Error::NotFound)?;
-        let source = process.scan_handles(HandleScanCursor::from_token(token))?;
+        let source = process
+            .scan_handles(HandleScanCursor::from_token(token))
+            .map_err(|error| match error {
+                // A diagnostic pin keeps the Process alive, not its handle
+                // table. Exit may retire the table after directory lookup.
+                crate::kernel::process::ProcessError::Handle(
+                    crate::kernel::capability::HandleError::TableRetired,
+                ) => Error::NotFound,
+                error => Error::Process(error),
+            })?;
         let snapshot = process.snapshot();
         let mut output = Page::empty();
         for handle in source.entries() {
