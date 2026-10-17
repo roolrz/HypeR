@@ -12,9 +12,11 @@ ordinary deadlines do not wait for the next periodic tick.
 `Callout<T>` owns a typed callback context and is bound to one CPU. The default
 constructor selects the creating CPU; explicit placement selects an admitted
 CPU. Expiry transfers the preallocated delivery to that CPU's ready queue. A
-pinned `ktimer` kernel Thread invokes the callback with interrupts and
+pinned `ktimer/CPU` kernel Thread invokes the callback with interrupts and
 preemption enabled, outside the timer and ready-queue locks. It does not inherit
 the process or address space of the caller which armed it.
+The CPU suffix identifies its permanent owner. Timer workers reject affinity
+changes and explicit migration, as well as automatic load balancing.
 
 Callbacks must remain short and must not block. Work which waits for I/O or
 other tasks belongs to a separate worker: blocking a timer worker would delay
@@ -22,6 +24,12 @@ every other callback assigned to it. Bounded batches provide scheduler safe
 points between groups of callbacks; they cannot bound an individual callback's
 execution time. A deadline is the earliest eligible execution time, not a
 promise that the worker will obtain a CPU at exactly that instant.
+
+The Fair scheduler's load-balancing Callout uses this existing worker context
+for bounded periodic correction. It does not create another permanent Thread
+or perform balancing from the timer interrupt handler. See the
+[scheduling boundary](architecture.md#scheduling-boundary) for its placement
+and migration rules.
 
 `IrqCallout` notifications and `schedule_irq_*` callbacks execute outside the
 deadline queue lock but inside the timer interrupt handler. They must not

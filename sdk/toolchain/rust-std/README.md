@@ -80,6 +80,16 @@ upstream licensing terms.
 
 ## Thread and synchronization runtime
 
+`std::thread::Builder::name` publishes the worker's name to the kernel before
+running its closure, so `ps --threads` shows service-defined roles. The Native
+label is limited to 64 UTF-8 bytes: the std adapter truncates at a character
+boundary and replaces control characters with `?`. Rust retains the full
+creation-time name in `Thread::name()`. Runtime-owned cleanup threads are named
+`thread-reaper`. Unnamed Rust/raw workers keep the default `native-worker`.
+`hyper_os::thread::set_current_name(&str)` explicitly renames the caller's
+kernel label, returning an error for empty, oversized or control-containing
+input. It neither changes `Thread::name()` nor grants access to another thread.
+
 No component assumes that a process has only one thread. The initial thread and
 SDK-created workers start with a zero thread pointer (`TPIDR_EL0` on AArch64,
 `tp` on RV64); the shared runtime attaches an allocated thread control block. The kernel already preserves this register across user

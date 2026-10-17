@@ -29,7 +29,7 @@ configuration and failure semantics.
 | `cat` | `cat FILE...`, `cat -n FILE`, `cat -bs FILE`, `cat -`; streams bytes without UTF-8 conversion. Number all lines with `-n`, only nonblank lines with `-b`, and squeeze repeated blank lines with `-s`. Numbering spans inputs. |
 | `grep` | `grep -in PATTERN FILE`, `grep -F TEXT`, `grep -v PATTERN`; filters files or stdin, with counting, filename and quiet modes; `-m NUM` limits selected lines per input and `-x` matches whole lines. |
 | `ls` | `ls /etc/hyper`, `ls FILE DIRECTORY`, `ls -a`, `ls --sort size -r`; defaults to permission mode, IEC size, and sorted names. Symlinks show `name@ -> target`, including dangling targets. `--bytes` gives exact file sizes; `-1` prints names only (retaining `@`, omitting targets), `-d` lists a directory itself, `-t` sorts newest first, and `-S` sorts largest first. Directory sizes are shown as `-`. |
-| `ps` | `ps -T`, `ps -p KOID`, `ps --name vm-runtime`; select decimal/hex KOIDs (repeat `-p` or use commas) and intersect with a name substring, optionally including threads. IDs print in hexadecimal; `--no-headers` prints rows only. Thread rows include `process=NAME`; kernel-owned threads use `OWNER=kernel`, and per-CPU idle threads are named `idle/CPU`. |
+| `ps` | `ps -T`, `ps -p KOID`, `ps --name vm-runtime`; select decimal/hex KOIDs (repeat `-p` or use commas) and intersect with a name substring, optionally including threads. IDs print in hexadecimal; `--no-headers` prints rows only. Thread rows include `process=NAME`; kernel-owned threads use `OWNER=kernel`, and per-CPU idle/timer threads are named `idle/CPU` and `ktimer/CPU`. |
 | `free` | `free`, `free --bytes`, `free -m -c 5 -s 0.5`; physical totals, ownership and reclaimable cache pages. `-b/-k/-m/-g` select units; `-c` is a finite sample count (default 1), `-s` the interval. |
 | `top` | `top -d 0.5`, `top -b -n 3`; interactive refresh with q/Ctrl-C to quit, or plain finite batch snapshots. Rows sort by CPU usage; `--sort name/koid`, `-p KOID`, `--name TEXT` and `--limit NUM` select the view. |
 | `handle` | `handle shell`, `handle --kind physical-device`, `handle --all --object KOID`; inspect objects, process capabilities, and the processes holding an object. |
@@ -467,8 +467,9 @@ For a running managed VM, `vmm affinity alpine 0 1,3` sets the allowed host
 CPUs for guest vCPU 0. If its current CPU remains allowed, placement is unchanged;
 otherwise the scheduler chooses an eligible CPU and performs the safe handoff.
 CPU lists accept comma-separated IDs and inclusive ranges, such as `0,2-3`.
-This changes affinity, not guest CPU topology, and does not enable automatic
-load balancing. Affinity persists across guest CPU off/on cycles.
+This changes affinity, not guest CPU topology. The kernel's automatic Fair
+balancer may subsequently move a Ready vCPU within the allowed set; select one
+CPU to prevent that movement. Affinity persists across guest CPU off/on cycles.
 
 Acceptance can precede completion of a running vCPU's handoff. `vmm status alpine`
 reports each vCPU's currently assigned physical CPU (`pCPU`). Assignment does not mean

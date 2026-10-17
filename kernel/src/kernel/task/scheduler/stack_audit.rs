@@ -61,7 +61,7 @@ pub(super) fn record_retired(thread: &Thread) {
         ExecutionKind::Vcpu => (2, "vcpu"),
     };
     if let Some(statistics) = thread.kernel_stack_statistics() {
-        THREADS[index].record(kind, thread.name(), statistics);
+        THREADS[index].record(kind, thread.name_snapshot().as_str(), statistics);
     }
 
     // This function runs on the ordinary reaper stack. The accessor masks

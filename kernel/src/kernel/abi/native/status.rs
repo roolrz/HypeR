@@ -507,7 +507,6 @@ pub(super) const fn status_from_loader_error(
         crate::kernel::process::LoaderError::Image(_) => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         crate::kernel::process::LoaderError::Machine(error) => status_from_machine_error(error),
         crate::kernel::process::LoaderError::Resource(error) => status_from_resource_error(error),
-        crate::kernel::process::LoaderError::Scheduler(_) => HYPER_NATIVE_STATUS_INTERNAL,
         crate::kernel::process::LoaderError::UnsupportedMachine => {
             HYPER_NATIVE_STATUS_NOT_SUPPORTED
         }

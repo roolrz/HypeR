@@ -13,6 +13,12 @@ use crate::kernel::process::{
 };
 
 impl TaskServices for ProcessServices<'_> {
+    fn set_current_thread_name(&self, name: &str) -> Result<(), ProcessError> {
+        let id = self.thread.scheduler_id().ok_or(ProcessError::Scheduler(
+            crate::kernel::task::scheduler::Error::ThreadNotFound,
+        ))?;
+        crate::kernel::task::scheduler::set_thread_name(id, name).map_err(ProcessError::from)
+    }
     fn create_thread(
         &self,
         entry: u64,

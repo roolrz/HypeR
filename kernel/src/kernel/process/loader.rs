@@ -44,25 +44,12 @@ pub(crate) enum Error {
     ),
     Machine(MachineError),
     Resource(ResourceError),
-    Scheduler(
-        #[expect(
-            dead_code,
-            reason = "Retains scheduler failure details for Debug diagnostics"
-        )]
-        crate::kernel::task::scheduler::Error,
-    ),
     UnsupportedMachine,
 }
 
 impl From<MachineError> for Error {
     fn from(error: MachineError) -> Self {
         Self::Machine(error)
-    }
-}
-
-impl From<crate::kernel::task::scheduler::Error> for Error {
-    fn from(error: crate::kernel::task::scheduler::Error) -> Self {
-        Self::Scheduler(error)
     }
 }
 
@@ -130,8 +117,8 @@ fn prepare_address_space(
     )
     .map_err(|_| Error::Address)?;
     let stack_vmar = address_space.reserve_initial_stack(reservation)?;
-    // Every mapping installation, including executable cache maintenance, uses
-    // the existing address-space transaction and CPU pinning mechanisms.
+    // Segment installation pins only executable cache maintenance. Mapping
+    // commit remains sleepable when concurrent loaders contend for transport.
     for segment in image.segments() {
         let range = UserSlice::new(
             UserAddress::new(LOADER_BASE + segment.address),
@@ -153,20 +140,14 @@ fn prepare_address_space(
             bytes,
             segment.data_offset,
         )?;
-        let pin = crate::kernel::task::scheduler::preempt_disable()?;
-        let result = prepared.install(address_space, &pin);
-        crate::kernel::task::scheduler::preempt_enable_without_reschedule(pin)?;
-        result?;
+        prepared.install(address_space)?;
     }
     let stack = NativeImageSegment::try_new(
         address_space,
         UserSlice::new(UserAddress::new(stack_base), STACK_SIZE).map_err(|_| Error::Address)?,
         Permissions::read_write(),
     )?;
-    let pin = crate::kernel::task::scheduler::preempt_disable()?;
-    let result = stack.install_in_vmar(address_space, stack_vmar, &pin);
-    crate::kernel::task::scheduler::preempt_enable_without_reschedule(pin)?;
-    result?;
+    stack.install_in_vmar(address_space, stack_vmar)?;
     ProcessImage::try_native(
         machine_abi(image.machine),
         UserAddress::new(LOADER_BASE + image.entry),

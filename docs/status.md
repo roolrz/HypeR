@@ -51,6 +51,8 @@ The current foundation includes:
 - SMP startup with a scheduler-owned idle thread on every admitted CPU;
 - class-aware, intrusive ready queues with RT FIFO and a replaceable Fair
   class whose initial backend is time-sliced round-robin;
+- load-aware initial Native/kernel Fair placement and bounded periodic
+  balancing of Ready Fair threads, including vCPUs, within their CPU affinity;
 - explicit affinity-controlled kernel-Thread migration with source-context
   completion before target publication, including blocked waiters and affinity-driven vCPU migration;
 - generation-tagged, allocation-free wait arbitration across notification,
@@ -94,7 +96,7 @@ The current foundation includes:
   original RAM root at `/boot`, preserves live file and mount identities, and
   precedes system-service launch. System files use EROFS by default or RAM
   with the same startup flow;
-- capability-scoped Native `ps` and `handle` tools with immutable task names,
+- capability-scoped Native `ps` and `handle` tools with bounded task names,
   explicit Process-to-Thread ownership, decoded object purposes and rights,
   and KOIDs that remain diagnostic correlation values rather than authority;
 - an AArch64 VHE native-EL0 proof which enters through a scheduler-owned
@@ -127,7 +129,7 @@ The current foundation includes:
 
 This list describes implemented foundations, not a claim of production
 completeness. In particular, general-purpose VMM resource policy, device assignment, strong
-guest isolation policy, cross-architecture asynchronous preemption, automatic load balancing, broad hardware discovery, stable
+guest isolation policy, cross-architecture asynchronous preemption, topology-aware load balancing, broad hardware discovery, stable
 management APIs, and a general-purpose virtual I/O stack are still under
 development.
 

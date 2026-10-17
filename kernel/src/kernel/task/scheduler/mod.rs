@@ -3,6 +3,8 @@
 
 //! Public scheduler operations and architecture context-switch boundary.
 
+mod balance;
+mod balance_policy;
 #[cfg(not(test))]
 mod cpu_time;
 mod queue;
@@ -37,11 +39,13 @@ use super::thread::{
     ThreadState,
 };
 
-use super::policy::SchedulingPolicy;
 pub use super::policy::{CpuMask, ThreadPriority};
+use super::policy::{SchedulingPolicy, ThreadPlacement};
 use super::wait::{WaitMobility, WaitOutcome, WaitQueue, WaitTicket};
 
 use crate::pr_debug;
+
+pub(crate) use balance::initialize as initialize_load_balancing;
 
 /// Maximum scheduler-owned Thread population, including the bootstrap Thread.
 pub(crate) const THREAD_CAPACITY: usize = hyper::config::MAX_KERNEL_STACKS as usize + 1;
@@ -545,6 +549,13 @@ pub fn thread_name(id: ThreadId) -> Result<ThreadNameSnapshot, Error> {
     read_scheduler(|scheduler| scheduler.with_thread(id, Thread::name_snapshot))
 }
 
+/// Replaces a live Thread's diagnostic label under its independent name lock.
+/// Native callers are restricted to their own scheduler ID by the entry service.
+pub(crate) fn set_thread_name(id: ThreadId, name: &str) -> Result<(), Error> {
+    read_scheduler(|scheduler| scheduler.with_thread(id, |thread| thread.set_name(name)))?
+        .map_err(Error::Thread)
+}
+
 /// Returns authority-free canonical object identity for a scheduler Thread.
 #[cfg(feature = "kernel-self-test")]
 pub(crate) fn thread_object_snapshot(
@@ -633,9 +644,9 @@ pub fn kthread_create(
 
 /// Creates a dormant kernel thread constrained to `affinity`.
 ///
-/// The scheduler prefers the calling CPU when it is admitted and registered;
-/// otherwise it deterministically selects the lowest-numbered registered CPU
-/// in the mask. Explicit migration and affinity updates retain this constraint.
+/// Initial Fair placement selects the least runnable admitted CPU, retaining
+/// creator locality on a tie. Explicit migration and affinity updates retain
+/// the supplied mask.
 pub fn kthread_create_with_affinity(
     name: &str,
     entry: KernelThreadEntry,
@@ -649,6 +660,31 @@ pub fn kthread_create_with_affinity(
         SchedulingPolicy::fair(),
         affinity,
     )
+}
+
+/// Creates a dormant Fair worker permanently owned by one admitted CPU.
+///
+/// Its name is `name/CPU`. Unlike a movable thread with singleton affinity,
+/// this worker rejects later affinity changes and explicit migration too.
+pub(crate) fn kthread_create_per_cpu(
+    name: &str,
+    cpu: CpuIndex,
+    entry: KernelThreadEntry,
+    argument: usize,
+) -> Result<ThreadId, Error> {
+    let name = ThreadNameSnapshot::per_cpu(name, cpu)?;
+    let policy = SchedulingPolicy::fair();
+    let reservation = reserve_thread(|scheduler| {
+        scheduler.reserve_kernel_thread(cpu, CpuMask::single(cpu), policy)
+    })?;
+    let prepared = Thread::kernel(
+        reservation.id(),
+        ThreadPlacement::pinned(cpu),
+        name.as_str(),
+        entry,
+        argument,
+    );
+    finish_kernel_thread(reservation, prepared, policy)
 }
 
 /// Validates that an affinity mask currently contains an admitted CPU.
@@ -695,16 +731,21 @@ fn kthread_create_with_policy_and_affinity(
     affinity: CpuMask,
 ) -> Result<ThreadId, Error> {
     let cpu = current_cpu()?;
-    let reservation = reserve_thread(|scheduler| scheduler.reserve_kernel_thread(cpu, affinity))?;
+    let reservation =
+        reserve_thread(|scheduler| scheduler.reserve_kernel_thread(cpu, affinity, policy))?;
+    let prepared = ThreadPlacement::movable_with_affinity(reservation.cpu(), affinity)
+        .ok_or(super::thread::Error::InvalidPlacement)
+        .and_then(|placement| Thread::kernel(reservation.id(), placement, name, entry, argument));
+    finish_kernel_thread(reservation, prepared, policy)
+}
+
+fn finish_kernel_thread(
+    reservation: ThreadReservation,
+    prepared: Result<Thread, super::thread::Error>,
+    policy: SchedulingPolicy,
+) -> Result<ThreadId, Error> {
     let id = reservation.id();
-    let mut thread = match prepare_boxed_thread(Thread::kernel(
-        id,
-        reservation.cpu(),
-        affinity,
-        name,
-        entry,
-        argument,
-    )) {
+    let mut thread = match prepare_boxed_thread(prepared) {
         Ok(thread) => thread,
         Err(error) => {
             abandon_reservation(reservation)?;
@@ -798,7 +839,9 @@ pub(in crate::kernel) fn prepare_user_thread(
     affinity: CpuMask,
 ) -> Result<DormantUserThread, Error> {
     let cpu = current_cpu()?;
-    let reservation = reserve_thread(|scheduler| scheduler.reserve_kernel_thread(cpu, affinity))?;
+    let reservation = reserve_thread(|scheduler| {
+        scheduler.reserve_kernel_thread(cpu, affinity, SchedulingPolicy::fair())
+    })?;
     let id = reservation.id();
     let thread = match prepare_boxed_thread(Thread::user(
         id,
@@ -1030,7 +1073,8 @@ pub(in crate::kernel) fn ready_user_thread(id: ThreadId) -> Result<bool, Error> 
 /// source context is saved and may finish before the caller observes the return.
 /// Kernel, user, and vCPU Threads use the same saved-context handoff. User
 /// address spaces and vCPU hardware are detached before the scheduling point
-/// and reactivated on the destination CPU. Idle and bootstrap remain pinned.
+/// and reactivated on the destination CPU. Idle, bootstrap and per-CPU workers
+/// remain pinned.
 pub fn migrate_thread(id: ThreadId, target: CpuIndex) -> Result<MigrationStatus, Error> {
     let outcome = SCHEDULER.with(|slot| {
         slot.as_mut()

@@ -728,6 +728,28 @@ impl ThreadRegistry {
         }
     }
 
+    /// Visits one registry slot and advances a wrapping maintenance cursor.
+    /// Only an identity escapes; exclusive coordination retains its lifetime.
+    pub(super) fn next_balance_candidate(&self, cursor: &mut usize) -> Option<ThreadId> {
+        if self.high_water == 0 {
+            return None;
+        }
+        let index = *cursor % self.high_water;
+        *cursor = (index + 1) % self.high_water;
+        match self.table.access().table().slot(index) {
+            Some(ThreadSlot::Occupied(thread)) => Some(thread.id()),
+            _ => None,
+        }
+    }
+
+    pub(super) const fn balance_scan_limit(&self, budget: usize) -> usize {
+        if self.high_water < budget {
+            self.high_water
+        } else {
+            budget
+        }
+    }
+
     /// Number of slots ever exposed by the monotonic backing high-water mark.
     #[cfg(feature = "kernel-self-test")]
     pub const fn high_water(&self) -> usize {

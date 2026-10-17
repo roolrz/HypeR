@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::mem::{ManuallyDrop, size_of};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use hyper::cpu::{PerCpu, PinnedExecution};
+use hyper::cpu::PerCpu;
 use hyper::mm::allocator::heap::PageOwner;
 use hyper::mm::{AddressSpaceResidency, FallibleArc, PAGE_SIZE, ResidencyError, UniqueFallibleArc};
 use hyper::sync::InterruptSpinLock;
@@ -327,19 +327,14 @@ impl NativeImageSegment {
         })
     }
 
-    pub(crate) fn install(
-        self,
-        address_space: &NativeAddressSpace,
-        pin: &(impl PinnedExecution + 'static),
-    ) -> Result<(), Error> {
-        self.install_in_vmar(address_space, address_space.logical().root_vmar(), pin)
+    pub(crate) fn install(self, address_space: &NativeAddressSpace) -> Result<(), Error> {
+        self.install_in_vmar(address_space, address_space.logical().root_vmar())
     }
 
     pub(crate) fn install_in_vmar(
         self,
         address_space: &NativeAddressSpace,
         vmar: super::Vmar,
-        pin: &(impl PinnedExecution + 'static),
     ) -> Result<(), Error> {
         let logical = address_space.logical();
         let prepared = match self.storage {
@@ -353,10 +348,19 @@ impl NativeImageSegment {
             )?,
             ImageStorage::Private(storage) => {
                 let storage = if self.permissions.contains(Access::Execute) {
-                    storage.finish_executable(
+                    // Instruction publication requires a stable CPU, but mapping
+                    // commit may yield while another loader owns the cross-call
+                    // transport. Release this pin before preparing that commit,
+                    // including when executable publication fails.
+                    let pin = crate::kernel::task::scheduler::preempt_disable()
+                        .map_err(|_| Error::Transport)?;
+                    let published = storage.finish_executable(
                         &super::ExecutableProvenance::for_native_image_loader(),
-                        pin,
-                    )?
+                        &pin,
+                    );
+                    crate::kernel::task::scheduler::preempt_enable_without_reschedule(pin)
+                        .map_err(|_| Error::Transport)?;
+                    published?
                 } else {
                     storage.finish()
                 };
