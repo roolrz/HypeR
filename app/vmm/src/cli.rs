@@ -26,7 +26,10 @@ pub enum VmCommand {
     Stop(Lifecycle),
     /// Stop and then start the named VM.
     Restart(Lifecycle),
-    /// Set a vCPU allowed CPU list, for example 0,2-3 (no automatic balancing).
+    /// Set a vCPU's allowed host CPUs, for example 0,2-3.
+    ///
+    /// Automatic balancing stays within this set. Select one CPU to keep the
+    /// vCPU on that host CPU.
     Affinity {
         name: String,
         vcpu: u32,

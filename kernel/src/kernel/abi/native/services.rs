@@ -945,6 +945,7 @@ pub(in crate::kernel) trait ProcessBuilderServices {
 }
 
 pub(in crate::kernel) trait TaskServices: UserMemoryServices {
+    fn set_current_thread_name(&self, name: &str) -> Result<(), ProcessError>;
     fn create_thread(
         &self,
         entry: u64,

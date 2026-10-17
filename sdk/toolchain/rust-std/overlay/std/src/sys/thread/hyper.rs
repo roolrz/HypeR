@@ -55,4 +55,27 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
 pub fn current_os_id() -> Option<u64> {
     None
 }
-pub fn set_name(_: &CStr) {}
+pub fn set_name(name: &CStr) {
+    let Ok(name) = name.to_str() else { return };
+    // Match the Native ABI bound without splitting UTF-8. std's hook is
+    // best-effort; preserve its full creation-time name in Rust metadata.
+    let mut bytes = [0_u8; 64];
+    let mut length = 0;
+    for character in name.chars() {
+        let character = if character.is_control() {
+            '?'
+        } else {
+            character
+        };
+        let size = character.len_utf8();
+        if length + size > bytes.len() {
+            break;
+        }
+        character.encode_utf8(&mut bytes[length..length + size]);
+        length += size;
+    }
+    if length != 0 {
+        // SAFETY: the bounded UTF-8 bytes remain live until the copy completes.
+        let _ = unsafe { ffi::hyper_thread_set_current_name(bytes.as_ptr(), length) };
+    }
+}

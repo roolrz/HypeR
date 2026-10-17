@@ -28,7 +28,8 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_PROCESS_BUILDER_CREATE, HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_AFFINITY,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_NAME, HYPER_NATIVE_SYS_PROCESS_EXIT,
     HYPER_NATIVE_SYS_PROCESS_GET_INFO, HYPER_NATIVE_SYS_THREAD_CREATE,
-    HYPER_NATIVE_SYS_THREAD_EXIT, HYPER_NATIVE_SYS_THREAD_YIELD, HyperNativeCapabilityDisposition,
+    HYPER_NATIVE_SYS_THREAD_EXIT, HYPER_NATIVE_SYS_THREAD_SET_CURRENT_NAME,
+    HYPER_NATIVE_SYS_THREAD_YIELD, HyperNativeCapabilityDisposition,
     HyperNativeCapabilityReceiveSlot, HyperNativeDirectoryInfo, HyperNativeFileInfo,
     HyperNativeObjectInspection, HyperNativeResourceLimits, NativeInvocation, NativeResult,
 };
@@ -821,6 +822,10 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     }
 
     impl TaskServices for RejectingServices {
+        fn set_current_thread_name(&self, _: &str) -> Result<(), ProcessError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ProcessError::Allocation)
+        }
         fn create_thread(
             &self,
             _: u64,
@@ -1589,6 +1594,16 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     let thread_services = RejectingServices {
         calls: Cell::new(0),
     };
+    for arguments in [[0; 6], [0x3000, 65, 0, 0, 0, 0], [0x3000, 1, 1, 0, 0, 0]] {
+        if returning(
+            &thread_services,
+            invoke(HYPER_NATIVE_SYS_THREAD_SET_CURRENT_NAME, arguments),
+        )? != failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
+            || thread_services.calls.get() != 0
+        {
+            return Err(SelfTestError::DispatchAction);
+        }
+    }
     for (pointer, count, expected) in [
         (1, 0, HYPER_NATIVE_STATUS_INVALID_ARGUMENT),
         (0, 1, HYPER_NATIVE_STATUS_INVALID_ARGUMENT),

@@ -7,6 +7,7 @@
 //! Its private children group CPU-local decisions, migration, class changes,
 //! and waiting without introducing another scheduler or publication boundary.
 
+mod balance;
 mod local;
 mod migration;
 mod policy;
@@ -430,6 +431,9 @@ pub(super) struct Scheduler {
     /// is released. `TransitionLock` keeps this handoff invisible externally.
     deferred_ready_handoff: Option<(ThreadId, CpuIndex)>,
     deferred_blocked_handoff: Option<(ThreadId, CpuIndex)>,
+    /// Bounded maintenance resumes here even when a prefix contains only
+    /// pinned, blocked or otherwise ineligible Threads.
+    balance_cursor: usize,
     terminated: ThreadQueue,
     retirements: RetirementQueue,
 }
@@ -561,6 +565,7 @@ impl Scheduler {
             active_domain: None,
             deferred_ready_handoff: None,
             deferred_blocked_handoff: None,
+            balance_cursor: 0,
             terminated: ThreadQueue::new(),
             retirements: RetirementQueue::new(),
         })
@@ -770,16 +775,22 @@ impl Scheduler {
         &mut self,
         preferred_cpu: CpuIndex,
         affinity: CpuMask,
+        policy: SchedulingPolicy,
     ) -> Result<ThreadReservation, Error> {
-        let cpu = self.select_cpu(preferred_cpu, affinity)?;
+        let cpu = if policy == SchedulingPolicy::Fair {
+            self.select_initial_cpu(preferred_cpu, affinity)?
+        } else {
+            self.select_cpu(preferred_cpu, affinity)?
+        };
         self.reserve_thread_slot(cpu)
     }
 
-    /// Selects an admitted registered CPU, retaining creator locality where possible.
+    /// Selects an admitted CPU without inspecting any CPU-owned schedule.
     ///
     /// If the preferred CPU is unavailable or excluded, the lowest-numbered
-    /// registered CPU in the mask provides a stable fallback. This is an
-    /// initial assignment only; load balancing may replace the policy later.
+    /// registered CPU in the mask provides a stable fallback. Affinity changes
+    /// may call this while holding a source CPU lock; FIFO initial placement
+    /// also retains this locality policy rather than participating in balancing.
     fn select_cpu(&self, preferred_cpu: CpuIndex, affinity: CpuMask) -> Result<CpuIndex, Error> {
         if affinity.is_empty() {
             return Err(Error::EmptyCpuAffinity);

@@ -7,7 +7,10 @@ use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 
 use crate::hal::interrupt::InterruptMask;
+#[cfg(not(loom))]
 use crate::sync::atomic::{AtomicBool, Ordering};
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicBool, Ordering};
 
 use super::InterruptMaskGuard;
 
@@ -48,10 +51,21 @@ unsafe impl<T: Send + Sync, M: InterruptMask, const N: usize> Sync
 }
 
 impl<T, M: InterruptMask, const N: usize> InterruptShardedLock<T, M, N> {
+    #[cfg(not(loom))]
     pub const fn new(value: T) -> Self {
         assert!(N > 0);
         Self {
             stripes: [const { Stripe(AtomicBool::new(false)) }; N],
+            value: UnsafeCell::new(value),
+            policy: PhantomData,
+        }
+    }
+
+    #[cfg(loom)]
+    pub fn new(value: T) -> Self {
+        assert!(N > 0);
+        Self {
+            stripes: core::array::from_fn(|_| Stripe(AtomicBool::new(false))),
             value: UnsafeCell::new(value),
             policy: PhantomData,
         }
@@ -91,6 +105,36 @@ impl<T, M: InterruptMask, const N: usize> InterruptShardedLock<T, M, N> {
         drop(release);
         drop(mask);
         result
+    }
+
+    /// Attempts exclusive access without waiting for any reader or writer.
+    ///
+    /// Contention releases every acquired lane before restoring interrupts.
+    /// This is suitable for optional maintenance that may defer to a later
+    /// pass; callers must not upgrade a retained reader lane.
+    pub fn try_with<R>(&self, operation: impl FnOnce(&mut T) -> R) -> Option<R> {
+        // SAFETY: partial and complete stripe ownership end before this
+        // lexical guard restores the caller's interrupt state.
+        let mask = unsafe { InterruptMaskGuard::<M>::acquire() };
+        let mut release = Release {
+            stripes: &self.stripes,
+            held: 0,
+        };
+        for stripe in &self.stripes {
+            if stripe
+                .0
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                return None;
+            }
+            release.held += 1;
+        }
+        // SAFETY: owning every stripe excludes all other access to value.
+        let result = operation(unsafe { &mut *self.value.get() });
+        drop(release);
+        drop(mask);
+        Some(result)
     }
 
     fn acquire(stripe: &Stripe) {

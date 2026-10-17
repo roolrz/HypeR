@@ -571,8 +571,9 @@ providing a pointer-free diagnostic graph without changing object lifetime or
 placing reverse-reference locks on capability hot paths. The Native `handle`
 tool renders these snapshots through scoped inspector capabilities. Snapshot queries run in
 normal kernel context; fatal diagnostics remain lock-independent.
-Process and Thread labels are copied into bounded immutable identity snapshots
-before publication. This keeps `ps` output meaningful without retaining loader
+Process labels are fixed at publication. Native Threads may replace their own
+bounded diagnostic labels; inspection copies a complete label under a per-thread
+lock, and retirement retains the final name snapshot. This keeps `ps` output meaningful without retaining loader
 paths, builder storage, scheduler allocations, or authority-bearing references.
 
 AArch64 keeps the permanent host mapping in the canonical upper range through
@@ -682,8 +683,11 @@ replay every live local mapping before publishing a new CPU online.
 
 ## Runtime allocation
 
-The central runtime heap is the sole owner of buddy free lists, slab headers,
-partial-slab topology, and page-owner accounting. After SMP admission freezes
+The central runtime heap is the sole owner of buddy free-block indexes, slab
+headers, partial-slab topology, and page-owner accounting. Each buddy order uses
+an intrusive binary digital tree keyed by physical block address, bounding
+coalescing lookups by address width without allocating separate metadata.
+After SMP admission freezes
 the participating CPU set, the kernel enables bounded per-CPU magazines for
 the smallest slab classes. A cached object remains reserved in its central slab
 and is represented by one linear ownership token; its backing page therefore
@@ -803,9 +807,12 @@ blocking and interruption by real-time work retain its remainder. Idle threads
 never enter an ordinary run queue.
 
 Ordinary kernel threads carry movable placement policy and may retain an
-explicit `CpuMask`; creation prefers the calling CPU when admitted, then the
-lowest-numbered registered CPU in the mask. Empty masks and masks with no
-registered CPU are rejected. Explicit migration and affinity updates move
+explicit `CpuMask`. Native and kernel Fair thread creation select a least-loaded
+admitted CPU within that mask, preserving creator locality when loads tie.
+CPUs without runnable FIFO work are preferred when the mask permits one.
+Initial vCPU topology placement spreads a VM's members across admitted CPUs;
+FIFO creation retains its existing creator preference. Empty masks and masks
+with no registered CPU are rejected. Explicit migration and affinity updates move
 dormant, ready, and fully stopped blocked movable threads synchronously under the
 exclusive coordinator. A running or switch-in-flight thread retains the request
 on its own `Thread`; the source CPU commits a switch and the incoming switch tail
@@ -819,8 +826,42 @@ their detached threads move. The public vCPU control is `set_affinity`: keeping
 its assigned CPU in the mask preserves placement; excluding it selects an
 eligible CPU and triggers this handoff. The scheduler Thread owns the mask,
 which survives guest CPU off/on cycles. No separate public migrate operation
-or duplicate vCPU affinity state is needed. Bootstrap and idle threads remain pinned. Automatic load
-selection and balancing are deliberately separate future policy.
+or duplicate vCPU affinity state is needed. Bootstrap, idle and CPU-owned
+timer workers remain pinned. Their names include the CPU (`bootstrap/0`,
+`idle/CPU`, `ktimer/CPU`); `kthread_create_per_cpu` fixes both naming and placement
+for additional CPU-owned workers. Such threads reject explicit affinity changes
+and migration too. Global workers retain ordinary movable placement and no CPU
+suffix. A multi-CPU affinity mask permits later automatic Fair balancing; use
+a singleton mask when a thread or vCPU must remain on one CPU.
+
+Automatic balancing runs from one owned Callout on the existing `ktimer/0` worker,
+rearmed 20 ms after each pass. It corrects runnable-load imbalance without a
+new permanent worker or global
+coordination in the ordinary tick, wake, or local scheduling path. Each pass
+examines at most 64 registry slots and migrates at most four threads, skips a
+busy coordinator, and releases scheduler locks before prompting destination
+CPUs. A wrapping cursor prevents ineligible slots from hiding later candidates.
+A callback deadline is an eligibility time, not a bound on dispatch or overall
+convergence time.
+
+Only Ready Fair threads with movable placement are candidates. Affinity,
+CPU-local wait constraints, pending explicit migrations and source-context
+handoffs remain authoritative. Running, blocked, dormant, pinned, FIFO and Idle
+threads are not moved by this policy. Native and vCPU Fair threads use the same
+rules; the existing migration path preserves execution ownership and the Fair
+slice remainder. Load counts runnable work, not blocked threads or allocated
+vCPUs. The balancing callback excludes its own timer-worker execution from its
+load observation so it does not create an artificial imbalance. A destination
+must have no runnable FIFO work and at least two fewer runnable threads before
+the move, avoiding a transfer that merely reverses the imbalance. Initial
+placement does not count dormant threads: a batch created before any member
+starts may need subsequent balancing once it becomes runnable.
+
+This policy does not provide real-time load balancing, NUMA or heterogeneous
+CPU-capacity placement, or per-VM CPU shares. An idle CPU can remain idle until
+the next balancing callback obtains CPU time; FIFO work may delay that callback
+under the existing scheduling-class rules.
+
 The kernel always builds the SMP-capable scheduler and per-CPU infrastructure;
 the same image remains valid when firmware admits only the boot CPU. There is
 no separate uniprocessor configuration or single-CPU scheduler implementation.
@@ -854,7 +895,7 @@ retirement of these IRQ timers deliberately leaves an obsolete earlier
 comparator programmed and therefore causes at most one harmless timer interrupt
 before the source programs its next deadline. Sleep is policy over this common
 timed-wait path.
-Ordinary kernel callbacks use typed `Callout` owners and per-CPU `ktimer`
+Ordinary kernel callbacks use typed `Callout` owners and per-CPU `ktimer/CPU`
 Threads; `IrqCallout` and the `schedule_irq_*` interfaces explicitly retain
 hard-IRQ execution for critical paths. Both use the same allocation-free,
 augmented red-black deadline queue. Callout shutdown closes rearm admission and

@@ -504,7 +504,10 @@ Read these in order:
    context-switch commit and retirement. Its private modules separate
    [CPU-local decisions](../kernel/src/kernel/task/scheduler/state/local.rs),
    [affinity and migration](../kernel/src/kernel/task/scheduler/state/migration.rs),
-   and [class changes](../kernel/src/kernel/task/scheduler/state/policy.rs).
+   [class changes](../kernel/src/kernel/task/scheduler/state/policy.rs), and
+   [load balancing](../kernel/src/kernel/task/scheduler/state/balance.rs).
+   The [balancing Callout](../kernel/src/kernel/task/scheduler/balance.rs) runs
+   bounded maintenance on an existing timer worker, outside IRQ delivery.
    [Policy types](../kernel/src/kernel/task/policy.rs) define priority and CPU masks.
 3. [Wait records](../kernel/src/kernel/task/wait.rs) track a particular wait
    attempt, its ticket and outcome. [Waiting transitions](../kernel/src/kernel/task/scheduler/state/waiting.rs)

@@ -163,7 +163,7 @@ remain exploratory and do not establish production readiness.
 - transactional multi-vCPU management, richer VM supervision and accounting;
 - broader Native ABI/std coverage, ABI stabilization and generated bindings;
 - additional filesystems, cache/writeback policy and storage recovery;
-- scheduler load balancing, power management and CPU hotplug;
+- topology-aware scheduler balancing, power management and CPU hotplug;
 - broader hardware support while preserving existing AArch64/RISC-V acceptance
   and x86-64 builds.
 

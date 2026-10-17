@@ -22,6 +22,35 @@ use hyper::abi::native::{
 };
 
 #[inline(never)]
+pub(in crate::kernel::abi::native) fn sys_thread_set_current_name(
+    services: &impl TaskServices,
+    arguments: &Arguments,
+) -> NativeResult {
+    let result = (|| {
+        require_zero(&arguments[2..])?;
+        let length = arguments[1];
+        if length == 0 || length > hyper::abi::native::HYPER_NATIVE_THREAD_NAME_MAX_BYTES {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        let input = super::super::wire::optional_user_slice(arguments[0], length)?
+            .ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+        let mut bytes = [0; hyper::abi::native::HYPER_NATIVE_THREAD_NAME_MAX_BYTES as usize];
+        let bytes = &mut bytes[..length as usize];
+        services
+            .copy_from_user(input, bytes)
+            .map_err(status_from_process_error)?;
+        let name = core::str::from_utf8(bytes).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+        if name.chars().any(char::is_control) {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        services
+            .set_current_thread_name(name)
+            .map_err(status_from_process_error)
+    })();
+    status_only(result)
+}
+
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_resource_domain_create(
     services: &impl HierarchyServices,
     arguments: &Arguments,

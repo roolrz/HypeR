@@ -90,7 +90,7 @@ pub(crate) unsafe fn activate(
                 });
             }
         };
-        if let Err(timer) = super::timer::set_host_timer_enabled(!timer_asserted) {
+        if let Err(timer) = super::timer::set_guest_timer_source_enabled(!timer_asserted) {
             // SAFETY: Publication has not occurred, hardware is active, and
             // the caller still owns this stopped execution with IRQs masked.
             let rollback = unsafe {
@@ -105,7 +105,7 @@ pub(crate) unsafe fn activate(
                 Ok(()) => {
                     restore_reconcile_if_claimed(execution, reconcile_claimed);
                     crate::kernel::crash::fatal(format_args!(
-                        "HypeR: vCPU activation could not program host timer: {timer:?}"
+                        "HypeR: vCPU activation could not program guest timer source: {timer:?}"
                     ));
                 }
                 Err(hardware) => fatal_ambiguous_hardware(
@@ -171,7 +171,7 @@ pub(crate) unsafe fn activate(
             )
         };
         return match rollback {
-            Ok(()) => match super::timer::set_host_timer_enabled(true) {
+            Ok(()) => match super::timer::set_guest_timer_source_enabled(false) {
                 Ok(()) => {
                     restore_reconcile_if_claimed(execution, consumed_reconcile || final_reconcile);
                     release_execution_or_fail(execution, execution_claim);
@@ -180,7 +180,7 @@ pub(crate) unsafe fn activate(
                 Err(timer) => {
                     restore_reconcile_if_claimed(execution, consumed_reconcile || final_reconcile);
                     crate::kernel::crash::fatal(format_args!(
-                        "HypeR: publication rollback restored hardware but not host timer: publication={publication_error:?}, timer={timer:?}"
+                        "HypeR: publication rollback detached hardware but could not mask guest timer source: publication={publication_error:?}, timer={timer:?}"
                     ));
                 }
             },
@@ -227,9 +227,11 @@ pub(crate) unsafe fn deactivate(
         // still refer to this execution. Retain its claim and stop globally.
         fatal_ambiguous_hardware("could not detach active vCPU hardware", error);
     }
-    if let Err(error) = super::timer::set_host_timer_enabled(true) {
+    // Local IRQs remain masked until the now-ownerless PPI is disabled. Timer
+    // register deactivation alone does not retire controller-side delivery.
+    if let Err(error) = super::timer::set_guest_timer_source_enabled(false) {
         crate::kernel::crash::fatal(format_args!(
-            "HypeR: active vCPU detach could not restore host timer: {error:?}"
+            "HypeR: active vCPU detach could not mask guest timer source: {error:?}"
         ));
     }
     release_execution_or_fail(execution, claim);
@@ -317,16 +319,16 @@ impl DetachedVcpuExecution {
         )
     }
 
-    /// Restores host timing and releases the exact retained execution claim.
+    /// Masks guest timer delivery and releases the exact retained execution claim.
     pub(super) fn finish(mut self) {
         if crate::kernel::cpu::current_index() != Some(self.cpu) {
             crate::kernel::crash::fatal(format_args!(
                 "HypeR: detached vCPU migrated before claim release"
             ));
         }
-        if let Err(error) = super::timer::set_host_timer_enabled(true) {
+        if let Err(error) = super::timer::set_guest_timer_source_enabled(false) {
             crate::kernel::crash::fatal(format_args!(
-                "HypeR: stopped vCPU detach could not restore host timer: {error:?}"
+                "HypeR: stopped vCPU detach could not mask guest timer source: {error:?}"
             ));
         }
         // SAFETY: CPU identity matched and this armed token retains the exact
@@ -438,9 +440,9 @@ fn rollback_unpublished_activation(
         )
     }
     restore_reconcile_if_claimed(execution, restore_reconcile);
-    if let Err(error) = super::timer::set_host_timer_enabled(true) {
+    if let Err(error) = super::timer::set_guest_timer_source_enabled(false) {
         crate::kernel::crash::fatal(format_args!(
-            "HypeR: unpublished activation rollback could not restore host timer: {error:?}"
+            "HypeR: unpublished activation rollback could not mask guest timer source: {error:?}"
         ));
     }
     release_execution_or_fail(execution, claim);

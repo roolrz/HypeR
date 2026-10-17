@@ -78,6 +78,9 @@ pub(in crate::kernel) fn dispatch(
         abi::HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_CREATE => NativeAction::Return(
             handlers::sys_capability_channel_create(services, invocation.arguments()),
         ),
+        abi::HYPER_NATIVE_SYS_THREAD_SET_CURRENT_NAME => NativeAction::Return(
+            handlers::sys_thread_set_current_name(services, invocation.arguments()),
+        ),
         abi::HYPER_NATIVE_SYS_THREAD_CREATE => NativeAction::Return(handlers::sys_thread_create(
             services,
             invocation.arguments(),

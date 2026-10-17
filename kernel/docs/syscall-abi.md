@@ -70,7 +70,8 @@ same bounded little-endian `u64` CPU-mask words as process-builder affinity.
 The nonempty mask must include an allowed registered CPU; bits above the kernel
 CPU limit are rejected. If the current CPU remains allowed, placement is kept.
 Otherwise the scheduler chooses an allowed CPU and safely migrates the saved
-context. This enforces explicit affinity without automatic load balancing.
+context. Automatic Fair balancing may subsequently move a Ready vCPU within
+the allowed set; a singleton mask keeps it on the selected CPU.
 
 Success means the update or required source-context handoff was accepted; the
 handoff may finish before or after return. Stopping VMs and retired vCPUs reject
@@ -369,12 +370,17 @@ typed target handle; numeric identifiers never create a view or an operational
 handle. An out-of-scope target is indistinguishable from an absent target.
 Multi-page results are weakly consistent with mutation, use fixed ABI page
 capacities, and expose neither a pointer nor an authority-bearing identifier.
-Task records also carry bounded immutable UTF-8 names. A Process snapshot keeps
+Task records also carry bounded UTF-8 diagnostic names. A Process snapshot keeps
 the label committed with Process publication, including after its heavyweight
 owner is gone; the scheduler similarly retains each Thread label through the
-retiring registry phase. Numeric phases, roles, kinds, and rights remain the
-canonical ABI facts, while SDKs and diagnostic tools provide human-readable
-interpretation.
+retiring registry phase. `thread_set_current_name` lets a Native thread replace
+only its own label with 1–64 UTF-8 bytes containing no control characters. It
+needs no additional capability, cannot rename another thread or its Process,
+and leaves the old label intact on failure. Inspectors receive a complete old
+or new label under a small per-thread lock; user copying occurs before that
+lock, with no allocation or scheduler state change inside it. Numeric phases,
+roles, kinds, and rights remain the canonical ABI facts, while SDKs and
+diagnostic tools provide human-readable interpretation.
 
 `HandleValue` is a nonzero, process-local, opaque `u64` containing a slot and a
 large generation. Security does not depend on secrecy. Slot reuse never makes
@@ -1048,8 +1054,9 @@ including changes made after that caller was created. An explicit affinity is
 one to four little-endian `u64` bitmap words. Empty masks, unsupported CPU bits,
 unmapped payloads and masks with no schedulable CPU fail before publishing a
 child handle. As with Process affinity, offline bits may remain in the allowed
-set if at least one selected CPU is schedulable. No automatic balancing policy
-is implied by this creation interface.
+set if at least one selected CPU is schedulable. Affinity constrains both initial
+placement and automatic Fair balancing; it does not reserve CPU capacity or
+promise equal time across the selected CPUs.
 
 ### Public system configuration
 

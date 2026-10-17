@@ -28,6 +28,7 @@ unsafe extern "C" {
     ) -> i64;
     pub fn __hyper_std_thread_join(token: usize) -> i64;
     pub fn __hyper_std_thread_detach(token: usize);
+    pub fn hyper_thread_set_current_name(name: *const u8, length: usize) -> i64;
     pub fn hyper_alloc(size: usize, align: usize) -> *mut u8;
     pub fn hyper_free(pointer: *mut u8);
     pub fn hyper_realloc(pointer: *mut u8, size: usize, align: usize) -> *mut u8;

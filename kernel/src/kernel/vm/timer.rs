@@ -160,7 +160,10 @@ fn rollback_active_handler(registration: Option<crate::kernel::irq::interrupt::R
     }
 }
 
-pub(crate) fn set_host_timer_enabled(enabled: bool) -> Result<(), Error> {
+/// Controls the host PPI carrying the current guest's virtual-timer output.
+/// A detached vCPU leaves this source masked; only a new active owner or its
+/// maintenance/recovery callback may re-enable it.
+pub(crate) fn set_guest_timer_source_enabled(enabled: bool) -> Result<(), Error> {
     let interrupt = HOST_TIMER_INTERRUPT.load(Ordering::Acquire);
     if interrupt == NO_HOST_TIMER {
         return Ok(());
@@ -423,7 +426,10 @@ fn handle_source_recovery(_interrupt: VirtualInterrupt, context: usize) -> Handl
     };
     let can_unmask = match update_active_interrupts(crate::hal::vm::handle_maintenance_interrupt) {
         Ok(Some(Ok(can_unmask))) => can_unmask,
-        Ok(None) => true,
+        // The physical timer bank is detached. Keep its PPI masked until
+        // activation installs an owner, even if a prior assertion is pending
+        // at the interrupt controller after the timer was disabled.
+        Ok(None) => false,
         Ok(Some(Err(error))) => {
             crate::hal::vm::quiesce_virtual_interrupt_delivery();
             crate::pr_err!("HypeR: virtual-timer recovery failed: {error:?}");

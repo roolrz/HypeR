@@ -14,6 +14,8 @@ use hyper::cpu::CpuIndex;
 const _: () = assert!(hyper::abi::native::HYPER_NATIVE_PROCESS_NAME_MAX_BYTES <= usize::MAX as u64);
 pub(crate) const MAX_THREAD_NAME_BYTES: usize =
     hyper::abi::native::HYPER_NATIVE_PROCESS_NAME_MAX_BYTES as usize;
+const _: () =
+    assert!(MAX_THREAD_NAME_BYTES as u64 == hyper::abi::native::HYPER_NATIVE_THREAD_NAME_MAX_BYTES);
 
 use crate::kernel::mm::stack::KernelStack;
 use crate::kernel::task::policy::{
@@ -351,10 +353,10 @@ enum ScheduleOwner {
     Cpu(CpuIndex),
 }
 
-/// Immutable identity published for the complete registry lifetime.
+/// Stable identity with a separately synchronized diagnostic label.
 struct ThreadIdentity {
     id: ThreadId,
-    name: ThreadNameSnapshot,
+    name: hyper::sync::InterruptSpinLock<ThreadNameSnapshot, crate::hal::irq::LocalMask>,
 }
 
 /// State mutated only by scheduler transactions.
@@ -578,14 +580,13 @@ impl Thread {
     }
 
     pub(super) fn bootstrap(cpu_index: CpuIndex) -> Result<Self, Error> {
-        let name = match ThreadNameSnapshot::new("bootstrap") {
-            Ok(name) => name,
-            Err(_) => ThreadNameSnapshot::empty(),
-        };
         Ok(Self::from_parts(
             ThreadIdentity {
                 id: ThreadId::BOOTSTRAP,
-                name,
+                name: hyper::sync::InterruptSpinLock::new(ThreadNameSnapshot::per_cpu(
+                    "bootstrap",
+                    cpu_index,
+                )?),
             },
             ThreadObject::try_system(ThreadId::BOOTSTRAP, ThreadRole::Bootstrap)?,
             ThreadPlacement::pinned(cpu_index),
@@ -602,8 +603,7 @@ impl Thread {
 
     pub(super) fn kernel(
         id: ThreadId,
-        cpu_index: CpuIndex,
-        affinity: crate::kernel::task::policy::CpuMask,
+        placement: ThreadPlacement,
         name: &str,
         entry: KernelThreadEntry,
         argument: usize,
@@ -611,12 +611,10 @@ impl Thread {
         let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
         let mut context = crate::hal::context::ThreadContext::empty();
         context.prepare(stack.top(), entry, argument);
-        let placement = ThreadPlacement::movable_with_affinity(cpu_index, affinity)
-            .ok_or(Error::InvalidPlacement)?;
         Ok(Self::from_parts(
             ThreadIdentity {
                 id,
-                name: ThreadNameSnapshot::new(name)?,
+                name: hyper::sync::InterruptSpinLock::new(ThreadNameSnapshot::new(name)?),
             },
             ThreadObject::try_system(id, ThreadRole::Kernel)?,
             placement,
@@ -638,7 +636,9 @@ impl Thread {
         Ok(Self::from_parts(
             ThreadIdentity {
                 id,
-                name: ThreadNameSnapshot::idle(cpu_index)?,
+                name: hyper::sync::InterruptSpinLock::new(ThreadNameSnapshot::per_cpu(
+                    "idle", cpu_index,
+                )?),
             },
             ThreadObject::try_system(id, ThreadRole::Idle)?,
             ThreadPlacement::pinned(cpu_index),
@@ -653,7 +653,9 @@ impl Thread {
         Ok(Self::from_parts(
             ThreadIdentity {
                 id,
-                name: ThreadNameSnapshot::idle(cpu_index)?,
+                name: hyper::sync::InterruptSpinLock::new(ThreadNameSnapshot::per_cpu(
+                    "idle", cpu_index,
+                )?),
             },
             // A secondary bootstrap continuation exists solely to complete
             // local setup and become that CPU's permanent idle Thread.
@@ -689,7 +691,7 @@ impl Thread {
         Ok(Self::from_parts(
             ThreadIdentity {
                 id,
-                name: ThreadNameSnapshot::new(name)?,
+                name: hyper::sync::InterruptSpinLock::new(ThreadNameSnapshot::new(name)?),
             },
             ThreadObject::try_accounted_system(
                 id,
@@ -725,7 +727,7 @@ impl Thread {
         Ok(Self::from_parts(
             ThreadIdentity {
                 id,
-                name: ThreadNameSnapshot::new(name)?,
+                name: hyper::sync::InterruptSpinLock::new(ThreadNameSnapshot::new(name)?),
             },
             ThreadObject::user(object),
             placement,
@@ -882,12 +884,15 @@ impl Thread {
         self.stored_schedule().placement.policy()
     }
 
-    pub fn name(&self) -> &str {
-        self.identity.name.as_str()
+    pub(crate) fn name_snapshot(&self) -> ThreadNameSnapshot {
+        self.identity.name.with(|name| *name)
     }
 
-    pub(crate) const fn name_snapshot(&self) -> ThreadNameSnapshot {
-        self.identity.name
+    /// Changes only the diagnostic label, never object identity or scheduling.
+    pub(super) fn set_name(&self, name: &str) -> Result<(), Error> {
+        let name = ThreadNameSnapshot::new(name)?;
+        self.identity.name.with(|current| *current = name);
+        Ok(())
     }
 
     pub fn state(&self) -> ThreadState {
@@ -1132,8 +1137,15 @@ pub struct ThreadNameSnapshot {
 }
 
 impl ThreadNameSnapshot {
-    fn idle(cpu: CpuIndex) -> Result<Self, Error> {
-        let mut name = Self::new("idle/")?;
+    /// Formats a CPU-owned thread identity without a temporary heap allocation.
+    pub(crate) fn per_cpu(prefix: &str, cpu: CpuIndex) -> Result<Self, Error> {
+        let mut name = Self::new(prefix)?;
+        let separator = name
+            .bytes
+            .get_mut(usize::from(name.len))
+            .ok_or(Error::NameTooLong)?;
+        *separator = b'/';
+        name.len += 1;
         let start = usize::from(name.len);
         let mut number = cpu.get();
         loop {
@@ -1160,13 +1172,6 @@ impl ThreadNameSnapshot {
             bytes,
             len: name.len() as u8,
         })
-    }
-
-    const fn empty() -> Self {
-        Self {
-            bytes: [0; MAX_THREAD_NAME_BYTES],
-            len: 0,
-        }
     }
 
     pub fn as_str(&self) -> &str {

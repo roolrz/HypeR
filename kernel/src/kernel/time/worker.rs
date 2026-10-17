@@ -12,7 +12,7 @@ use hyper::cpu::{CpuIndex, PerCpu};
 use hyper::sync::{DeferredWork, PublishedOnce, WorkDisposition};
 
 use crate::kernel::sync::Completion;
-use crate::kernel::task::scheduler::{self, CpuMask};
+use crate::kernel::task::scheduler;
 use crate::kernel::task::thread::ThreadId;
 
 const WORK_ITEMS_PER_BATCH: usize = 32;
@@ -48,12 +48,7 @@ pub(crate) fn initialize() -> Result<(), scheduler::Error> {
         if worker.thread.get().is_some() {
             return Err(scheduler::Error::AlreadyInitialized);
         }
-        let thread = scheduler::kthread_create_with_affinity(
-            "ktimer",
-            worker_entry,
-            cpu.get(),
-            CpuMask::single(cpu),
-        )?;
+        let thread = scheduler::kthread_create_per_cpu("ktimer", cpu, worker_entry, cpu.get())?;
         if !worker.work.claim_initial_worker() || worker.thread.publish(thread).is_err() {
             return Err(scheduler::Error::AlreadyInitialized);
         }
