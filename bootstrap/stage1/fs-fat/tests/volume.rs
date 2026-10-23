@@ -1749,6 +1749,36 @@ fn readonly_write_window_bypasses_data_windows_and_read_plan_matches_bytes() {
 }
 
 #[test]
+fn windowed_sequential_write_keeps_disjoint_metadata_coalesced() {
+    let disk = Disk::fresh();
+    let mut volume = require_ok(FatVolume::mount(disk.clone()));
+    require_ok(volume.create("coalesced.bin", false));
+    let before = require_ok(disk.0.lock()).writes;
+    let input = vec![0x5a; 128 * 1024];
+    assert_eq!(
+        require_ok(volume.write_window("coalesced.bin", 0, &input, 51)),
+        input.len()
+    );
+    {
+        let state = require_ok(disk.0.lock());
+        let metadata_writes = state.writes - before - state.window_writes;
+        assert!(
+            metadata_writes <= 16,
+            "sequential window write issued {metadata_writes} metadata writes"
+        );
+    }
+    require_ok(volume.sync());
+    drop(volume);
+    let mut volume = require_ok(FatVolume::mount(disk));
+    let mut actual = vec![0; input.len()];
+    assert_eq!(
+        require_ok(volume.read_at("coalesced.bin", 0, &mut actual)),
+        input.len()
+    );
+    assert_eq!(actual, input);
+}
+
+#[test]
 fn failed_window_write_clears_source_and_poisoned_plan_fails() {
     let disk = Disk::fresh();
     let mut volume = require_ok(FatVolume::mount(disk.clone()));

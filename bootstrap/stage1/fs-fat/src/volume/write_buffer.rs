@@ -39,6 +39,13 @@ impl Window {
         self.dirty[offset / 64] & (1 << (offset % 64)) != 0
     }
 
+    fn overlaps_dirty(&self, first: u64, end: u64) -> bool {
+        let Some(base) = self.first else { return false };
+        let low = first.saturating_sub(base).min(WINDOW_SECTORS as u64) as usize;
+        let high = end.saturating_sub(base).min(WINDOW_SECTORS as u64) as usize;
+        (low..high).any(|sector| self.is_dirty(sector))
+    }
+
     fn ready(&self) -> bool {
         // A 128KiB file write may straddle two physical windows without ever
         // filling either. Submit a contiguous 64KiB run early instead. Only
@@ -116,10 +123,15 @@ impl Buffer {
     ) -> Result<(), BlockError> {
         super::super::block::validate_range(device.sectors, first, input.len())?;
         if !input.is_empty() && device.access(|d| Ok(d.is_write_window(input)))? {
-            // Earlier sparse metadata must precede a directly referenced data
-            // range if their physical addresses overlap. No payload borrow
-            // escapes: the kernel owns the immutable window until completion.
-            self.drain(device)?;
+            // Only overlapping buffered writes must precede this source range.
+            // Draining unrelated FAT sectors here turns every cluster allocation
+            // into separate metadata I/O and also breaks source-range merging.
+            let end = first + (input.len() / SECTOR_SIZE) as u64;
+            for index in 0..WINDOWS {
+                if self.windows[index].overlaps_dirty(first, end) {
+                    self.drain_windows(device, index..index + 1)?;
+                }
+            }
             return device.access(|d| d.submit_write_window(first, input));
         }
         while !input.is_empty() {
@@ -239,7 +251,7 @@ mod tests {
     use core::cell::RefCell;
     use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
 
-    struct Recorder(Vec<(u64, usize, u8)>);
+    struct Recorder(Vec<(u64, usize, u8)>, Option<(usize, usize)>);
 
     impl BlockDevice for Recorder {
         fn sector_count(&self) -> u64 {
@@ -251,6 +263,17 @@ mod tests {
         fn write_sectors(&mut self, first: u64, bytes: &[u8]) -> Result<(), BlockError> {
             self.0.push((first, bytes.len(), bytes[0]));
             Ok(())
+        }
+        fn is_write_window(&self, input: &[u8]) -> bool {
+            self.1.is_some_and(|(base, length)| {
+                (input.as_ptr() as usize)
+                    .checked_sub(base)
+                    .and_then(|offset| offset.checked_add(input.len()))
+                    .is_some_and(|end| end <= length)
+            })
+        }
+        fn submit_write_window(&mut self, first: u64, input: &[u8]) -> Result<(), BlockError> {
+            self.write_sectors(first, input)
         }
         fn flush(&mut self) -> Result<(), BlockError> {
             Ok(())
@@ -267,7 +290,7 @@ mod tests {
     #[test]
     fn empty_submitted_windows_preserve_sparse_metadata_until_drain() {
         let device = DeviceSlot {
-            device: RefCell::new(Some(Recorder(Vec::new()))),
+            device: RefCell::new(Some(Recorder(Vec::new(), None))),
             enabled: AtomicBool::new(true),
             remaining: AtomicU64::new(1000),
             failed: AtomicU8::new(0),
@@ -290,6 +313,52 @@ mod tests {
         checked(device.access(|recorder| {
             let metadata: Vec<_> = recorder.0.iter().filter(|write| write.0 == 0).collect();
             assert_eq!(metadata, [&(0, SECTOR_SIZE, 0x22)]);
+            Ok(())
+        }));
+    }
+
+    #[test]
+    fn source_window_orders_overlaps_but_preserves_adjacent_dirty_sectors() {
+        let source = [0x44; SECTOR_SIZE];
+        let device = DeviceSlot {
+            device: RefCell::new(Some(Recorder(
+                Vec::new(),
+                Some((source.as_ptr() as usize, source.len())),
+            ))),
+            enabled: AtomicBool::new(true),
+            remaining: AtomicU64::new(1000),
+            failed: AtomicU8::new(0),
+            sectors: 16 * WINDOW_SECTORS as u64,
+            readonly: false,
+        };
+        let mut buffer = checked(Buffer::new());
+        checked(buffer.write(&device, 3, &[0x11; SECTOR_SIZE]));
+        checked(buffer.write(&device, 5, &[0x22; SECTOR_SIZE]));
+        checked(buffer.write(&device, 4, &source));
+        checked(device.access(|recorder| {
+            assert_eq!(recorder.0, [(4, SECTOR_SIZE, 0x44)]);
+            Ok(())
+        }));
+        assert_eq!(buffer.sector(3), Some(&[0x11; SECTOR_SIZE][..]));
+        assert_eq!(buffer.sector(5), Some(&[0x22; SECTOR_SIZE][..]));
+
+        checked(buffer.write(&device, 3, &source));
+        assert!(buffer.sector(3).is_none());
+        checked(buffer.write(&device, 4, &[0x55; SECTOR_SIZE]));
+        checked(buffer.write(&device, 4, &source));
+        checked(buffer.drain(&device));
+        checked(device.access(|recorder| {
+            assert_eq!(
+                recorder.0,
+                [
+                    (4, SECTOR_SIZE, 0x44),
+                    (3, SECTOR_SIZE, 0x11),
+                    (5, SECTOR_SIZE, 0x22),
+                    (3, SECTOR_SIZE, 0x44),
+                    (4, SECTOR_SIZE, 0x55),
+                    (4, SECTOR_SIZE, 0x44),
+                ]
+            );
             Ok(())
         }));
     }
