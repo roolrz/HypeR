@@ -130,7 +130,8 @@ See [implementation status](docs/project/status.md) and the [roadmap](docs/proje
 ## Exploratory Pi 5 I/O measurements
 
 **Initial survey: 2026-10-06; guest TCP update: 2026-10-10;
-Native and guest storage update: 2026-10-18. For reference only.**
+guest storage update: 2026-10-18; Native storage update: 2026-10-23.
+For reference only.**
 This was an informal development setup, not a controlled benchmark. Each table
 entry comes from a single run. Card identity/state, filesystem and mount settings,
 available RAM, thermal/clock
@@ -145,12 +146,18 @@ filesystem. Alpine had two vCPUs and 256 MiB RAM; the initial I/O VM had one vCP
 and 128 MiB. The October 6 HypeR storage image was based on `b7022b6` with local test
 fixtures and the digest-pinned Pi 5 appliance from I/O VM source `c8ec02adbb8f`.
 
-The October 18 Native and Alpine storage results use the image
+The October 18 Alpine storage results use the image
 `0.1.0-7e28369b46d9`, built at `2026-10-18T07:37:46Z`, with userspace FAT,
 scheduler load balancing, and the pinned I/O VM source `56b1b8788820` on one
 vCPU and 64 MiB RAM. Alpine retains two vCPUs and 256 MiB RAM; both VMs use
-the default unrestricted CPU affinity. All HypeR storage rows below use this
-run; Raspbian remains the October 6 reference.
+the default unrestricted CPU affinity.
+
+The October 23 Native storage results use `0.1.0-3456aa050270`, built at
+`2026-10-23T13:06:05Z`, with asynchronous block queues, windowed bulk transfers
+and FAT metadata coalescing. The I/O VM source remains `56b1b8788820`, with
+one vCPU and 64 MiB RAM; Alpine was not started in this run. The table uses
+this Native sample, the October 18 Alpine sample and the October 6 Raspbian
+reference.
 
 Storage used the same deterministic **1 GiB** workload: 128 KiB sequential
 writes followed by a volume sync. Throughput and total time include the sync;
@@ -161,20 +168,25 @@ one; its IOPS are synchronous-write IOPS, not ordinary buffered or raw-disk IOPS
 
 | Storage measurement | Native Raspbian | HypeR Native | Alpine guest on HypeR |
 | --- | ---: | ---: | ---: |
-| New-file sequential write (MiB/s) | 24.76 | 9.32 | 23.03 |
-| New-file write total (s) | 41.36 | 109.92 | 44.46 |
-| Existing-file overwrite (MiB/s) | 25.48 | 14.71 | 22.81 |
-| Overwrite total (s) | 40.19 | 69.62 | 44.89 |
-| 4 KiB write + volume sync (IOPS) | 175.54 | 131.51 | 70.93 |
-| Synchronous-write mean latency (ms) | 5.70 | 7.60 | 14.10 |
-| Synchronous-write P95 latency (ms) | 13.00 | 10.22 | 20.94 |
-| Synchronous-write P99 latency (ms) | 32.60 | 11.69 | 62.96 |
-| Synchronous-write maximum latency (ms) | 52.62 | 17.13 | 392.00 |
+| New-file sequential write (MiB/s) | 24.76 | 9.99 | 23.03 |
+| New-file write total (s) | 41.36 | 102.48 | 44.46 |
+| Existing-file overwrite (MiB/s) | 25.48 | 17.80 | 22.81 |
+| Overwrite total (s) | 40.19 | 57.53 | 44.89 |
+| 4 KiB write + volume sync (IOPS) | 175.54 | 129.88 | 70.93 |
+| Synchronous-write mean latency (ms) | 5.70 | 7.70 | 14.10 |
+| Synchronous-write P95 latency (ms) | 13.00 | 9.46 | 20.94 |
+| Synchronous-write P99 latency (ms) | 32.60 | 21.41 | 62.96 |
+| Synchronous-write maximum latency (ms) | 52.62 | 63.74 | 392.00 |
 
-Against the October 16 Native sample, new-file throughput increased by 2.1%
-and overwrite throughput decreased by 10.3%. Alpine sequential throughput
-remained within 1.4% of its October 6 sample, but synchronous writes showed
-a 392 ms outlier. These single runs do not isolate the effect of scheduling.
+Against the October 21 Native profiling baseline (`ba651287a7a9`, PMU sampling
+disabled for timing), new-file throughput rose from 9.11 to 9.99 MiB/s (+9.7%)
+and overwrite throughput from 14.88 to 17.80 MiB/s (+19.6%). That baseline used
+one growth-write run and the median of three overwrite runs; October 23 used
+one run of each. Mean 4 KiB write-plus-sync latency fell from 8.73 to 7.70 ms,
+but P99 rose from 16.59 to 21.41 ms and the maximum from 45.65 to 63.74 ms.
+Percentiles use nearest ranks across 128 samples. These historical comparisons
+are not controlled A/B runs and do not isolate the effect of the I/O changes.
+The October 23 write, overwrite and sync4k commands all completed successfully.
 Readback verifies content; this workload does not measure separate read throughput.
 
 For networking, the same Mac ran iperf3 3.22 as the client, with Raspbian or the
