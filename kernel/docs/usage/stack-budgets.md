@@ -55,6 +55,12 @@ owners for the later delivery phase cannot occupy stack below sender input
 admission's usercopy/COW and allocator calls. No message capacity or transfer
 semantics change at this boundary.
 
+Block-backed filesystem transports allocate their 1040-byte extent-plan scratch
+once under the mount sponsor and reuse it under the volume mutex. The metadata
+copy remains private to the kernel; it is released with the transport. Keeping
+it off the stack avoids carrying it below nested file-page faults and block
+completion waits. The optimized image check bounds this read frame as well.
+
 `sh tests/ci/run.sh native-stack-16k` builds a production image with 16 KiB
 kernel thread stacks and runs Native acceptance on one and four CPUs. This is
 an independent CI job requiring init/root handoff, interactive shell commands,

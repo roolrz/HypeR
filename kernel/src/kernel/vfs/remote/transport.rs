@@ -51,6 +51,9 @@ pub(in crate::kernel::vfs) struct Transport {
 struct BlockTransport {
     queue: KernelRef<crate::kernel::block::BlockQueue, KernelService>,
     window: FallibleArc<crate::kernel::block::WindowBinding>,
+    // The volume mutex serializes this private copy of provider metadata.
+    // Allocate once under the mount sponsor, not below every nested page-in.
+    read_plan: super::ScratchVec<u8>,
 }
 impl Transport {
     pub(crate) fn publication(&self) -> Option<FallibleArc<crate::kernel::block::WindowBinding>> {
@@ -104,7 +107,14 @@ impl Transport {
                 .bind_window()
                 .map_err(|_| super::Error::InvalidInput)?;
             let queue = queue.into_operation_pin().into_filesystem_transport();
-            Some(BlockTransport { queue, window })
+            let mut read_plan =
+                super::ScratchVec::new(super::ScratchBudget::new(&process.resource_domain()));
+            crate::kernel::vfs::scratch::resize_bytes(&mut read_plan, protocol::EXTENT_PLAN_BYTES)?;
+            Some(BlockTransport {
+                queue,
+                window,
+                read_plan,
+            })
         } else {
             None
         };

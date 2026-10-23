@@ -20,6 +20,7 @@ impl Transport {
         self.read_scatter(path, offset, &mut [output])
     }
 
+    #[inline(never)]
     pub(in crate::kernel::vfs) fn read_scatter(
         &mut self,
         path: &str,
@@ -45,7 +46,6 @@ impl Transport {
             .ok_or(Error::InvalidInput)?;
         let mut done = 0usize;
         let sponsor = self.domain.clone();
-        let mut plan_bytes = [0u8; protocol::EXTENT_PLAN_BYTES];
         let Some(block) = &self.block else {
             return self.read_buffered_scatter(path, offset, output, 0);
         };
@@ -72,6 +72,8 @@ impl Transport {
                 }
                 Err(error) => return Err(error),
             };
+            let block = self.block.as_mut().ok_or(Error::Corrupt)?;
+            let plan_bytes = &mut block.read_plan;
             if size > plan_bytes.len() {
                 return Err(Error::Corrupt);
             }
