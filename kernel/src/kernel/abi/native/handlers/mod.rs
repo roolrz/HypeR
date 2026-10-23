@@ -125,3 +125,8 @@ mod profile;
 pub(super) use profile::{
     sys_cpu_inspector_profile_read, sys_cpu_inspector_profile_start, sys_cpu_inspector_profile_stop,
 };
+
+mod trace;
+pub(super) use trace::{
+    sys_cpu_inspector_trace_read, sys_cpu_inspector_trace_start, sys_cpu_inspector_trace_stop,
+};

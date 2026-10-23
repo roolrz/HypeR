@@ -10,7 +10,8 @@ mod macros;
 mod recorder;
 #[cfg(feature = "kernel-trace")]
 pub use global::{
-    MachineEmitter, emit, enabled, install, read, record_at, set_filter, start, stop,
+    CAPACITY, MachineEmitter, emit, enabled, install, read, record_at, set_filter, start,
+    start_with_capacity, stop,
 };
 pub use recorder::{Batch, Error, Recorder, Session, Ticket};
 
@@ -33,6 +34,9 @@ pub enum Category {
 pub struct Filter(u8);
 
 impl Filter {
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
     pub const NONE: Self = Self(0);
     pub const ALL: Self = Self(u8::MAX);
     pub const fn only(category: Category) -> Self {

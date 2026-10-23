@@ -129,6 +129,10 @@ impl From<crate::kernel::object::WaitSetError> for ObjectServiceError {
 }
 
 pub(in crate::kernel) trait ObjectServices {
+    #[cfg(feature = "kernel-trace")]
+    fn trace_thread_id(&self) -> u64 {
+        0
+    }
     fn current_process_id(&self) -> u64;
     fn wait_set_create(&self, capacity: usize) -> Result<HandleValue, ObjectServiceError>;
     fn wait_set_add(
@@ -599,6 +603,31 @@ pub(in crate::kernel) trait SystemInspectServices: UserMemoryServices {
         _cursor: u64,
         _output: &mut [u8],
     ) -> crate::kernel::profile::Result<usize> {
+        Err(hyper::abi::native::HYPER_NATIVE_STATUS_NOT_SUPPORTED)
+    }
+
+    fn trace_start(
+        &self,
+        _receiver: &InvocationReceiver,
+        _config: &[u8; 56],
+    ) -> crate::kernel::trace::Result<u64> {
+        Err(hyper::abi::native::HYPER_NATIVE_STATUS_NOT_SUPPORTED)
+    }
+    fn trace_stop(
+        &self,
+        _receiver: &InvocationReceiver,
+        _generation: u64,
+    ) -> crate::kernel::trace::Result<()> {
+        Err(hyper::abi::native::HYPER_NATIVE_STATUS_NOT_SUPPORTED)
+    }
+    fn trace_read(
+        &self,
+        _receiver: &InvocationReceiver,
+        _generation: u64,
+        _cpu: u64,
+        _cursor: u64,
+        _output: &mut [u8],
+    ) -> crate::kernel::trace::Result<usize> {
         Err(hyper::abi::native::HYPER_NATIVE_STATUS_NOT_SUPPORTED)
     }
 

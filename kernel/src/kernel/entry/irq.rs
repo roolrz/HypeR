@@ -53,6 +53,7 @@ pub(crate) fn dispatch(
             crate::kernel::irq::exception::fatal_interrupt(error.description(), Some(interrupt))
         }
     };
+    crate::tracepoint!(Irq, "irq_enter", irq = interrupt.get() as u64);
     let action = if crate::kernel::crash::is_stop_interrupt(interrupt) {
         crate::kernel::irq::interrupt::complete(interrupt);
         Action::Stop
@@ -66,6 +67,7 @@ pub(crate) fn dispatch(
         crate::kernel::device::iommu::runtime::service_irq_prompt();
         Action::Resume { postlude: None }
     };
+    crate::tracepoint!(Irq, "irq_exit", irq = interrupt.get() as u64);
     complete_entry(irq, action, origin, Some(interrupt))
 }
 

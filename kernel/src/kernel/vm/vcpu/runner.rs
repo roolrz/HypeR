@@ -92,6 +92,13 @@ fn run_current() {
             }
             crate::hal::vm::prepare_interrupts_for_entry();
             let hardware = core::ptr::addr_of_mut!((*execution).hardware);
+            crate::tracepoint!(
+                Vm,
+                "vcpu_enter",
+                thread = current.thread.get(),
+                vm = virtual_machine.trace_id(),
+                vcpu = vcpu_id as u64
+            );
             let stopped = match crate::hal::vm::run(hardware) {
                 Ok(stopped) => stopped,
                 Err(error) => crate::kernel::crash::fatal(format_args!(
@@ -99,6 +106,23 @@ fn run_current() {
                 )),
             };
             let exit = stopped.exit();
+            crate::tracepoint!(
+                Vm,
+                "vcpu_exit",
+                thread = current.thread.get(),
+                vm = virtual_machine.trace_id(),
+                vcpu = vcpu_id as u64,
+                reason = match exit.disposition() {
+                    crate::hal::vm::VcpuRunDisposition::Wait(
+                        crate::hal::vm::VcpuWaitReason::Interrupt,
+                    ) => 1,
+                    crate::hal::vm::VcpuRunDisposition::Wait(
+                        crate::hal::vm::VcpuWaitReason::Device,
+                    ) => 2,
+                    crate::hal::vm::VcpuRunDisposition::Terminal(_) => 3,
+                    crate::hal::vm::VcpuRunDisposition::AdministrativeStop(_) => 4,
+                }
+            );
             let detached = super::transition::detach_stopped(&mut *execution, stopped);
             match exit.disposition() {
                 crate::hal::vm::VcpuRunDisposition::Wait(

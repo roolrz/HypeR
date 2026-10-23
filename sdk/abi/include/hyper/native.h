@@ -175,6 +175,12 @@
  * - guest_notification_access requires frontend VirtualMachine WRITE and addresses an existing connection by original_base. Operation 0 reads pending interrupt status without acknowledgement, 1 reads and acknowledges that status atomically, and 2 submits a queue-index notification (value &lt; 32). For operations 0 and 1 value must be zero; unknown operations are rejected. It shares the direct MMIO source state and serialization. PCI bus-master disable suppresses notifications; PCI memory-decode disable does not suppress this explicit transport fallback. Closure rejects accesses. No backend identity, control operation, DMA lease or epoch can be changed through this call.
  *
  * - guest_notification_configure requires frontend VirtualMachine WRITE. original_base identifies an existing connection by its creation address; base is a page-aligned 4 KiB window wholly contained in an installed userspace MMIO reservation and, while decoding is enabled, may not overlap another enabled I/O route. Flags 0 select the original virtio-MMIO register layout; bit 0 selects modern virtio-PCI, bit 1 enables memory decoding, bit 2 masks INTx, and bit 3 enables queue notifications (bus master). Unknown flags or PCI flags without bit 0 are rejected. PCI uses a 16-bit queue-index write at BAR+0x50 and a read-to-clear 8-bit ISR at BAR+0x60. Relocation, decode, and IRQ-mask changes serialize with source state and VM retirement. The operation cannot change the admitted backend, IRQs, DMA ownership, or epoch; disabling decode is not proof of backend quiescence.
+ *
+ * - cpu_inspector_trace_start requires CpuInspector SET_ATTRIBUTES and an initialized trace_config. It starts one global generation, rejects an active/stopping capture, and replaces a stopped capture. Categories are bit flags 1 scheduler, 2 IPC, 4 Native syscall, 8 block I/O, 16 memory faults, 32 IRQ, 64 VM; zero and unknown bits fail. Duration is 1..300000 ms; capacity is 64..4096 retained events per CPU. cpu_mask is four little-endian u64 words; zero selects all online CPUs, and offline bits fail. The kernel closes capture at the deadline through an ordinary callout, independent of the collector lifetime; execution can be later if that worker is delayed. Feature-disabled kernels return NOT_SUPPORTED.
+ *
+ * - cpu_inspector_trace_stop requires SET_ATTRIBUTES and the exact generation. It closes producer admission before joining short in-flight writers; BUSY requires retry. Repeated successful stop is idempotent until another capture starts. Generation is an observation/control token, not a capability or private capture owner. Any appropriately authorized inspector may control the global session.
+ *
+ * - cpu_inspector_trace_read requires INSPECT_DETAILS. CPU UINT64_MAX selects trace_info (160 bytes, generation and cursor zero). CPU UINT64_MAX-1 selects trace_thread (72 bytes, exact generation, cursor is scheduler ThreadId); names are live best-effort observations, not authority. Ordinary online CPU indices select trace_batch (2656 bytes, eight trace_record entries) with exact generation and a per-CPU cursor. Returned value0 is the exact written size. next advances across overwritten and returned records; count zero while running is not EOF. incomplete is sticky per generation/CPU and means unquantified producer loss. Stop freezes records and loss metadata until next start. Strings are UTF-8 with NUL padding, truncated to fixed bounds; all reserved/unused bytes are zero. No kernel pointer, raw handle encoding or userspace payload is exported. Event vocabulary is diagnostic and identified by the included build revision, not a stable behavioral ABI.
  */
 #ifndef HYPER_NATIVE_H
 #define HYPER_NATIVE_H
@@ -4333,6 +4339,69 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_OP_CPU_INSPECTOR_PROFILE_READ UINT64_C(259)
 
 /**
+ * Object-local method `cpu_inspector_trace_start`.
+ *
+ * | Property | Contract |
+ * | --- | --- |
+ * | Receiver | `inspector: Borrow, kind=cpu_inspector, rights=0x80000000` |
+ * | Operation | 260 |
+ * | Feature | `Core` |
+ * | Arguments | `configuration: user_address` |
+ * | Results | `generation: u64` |
+ * | Capability effects | `inspector: Borrow, kind=cpu_inspector, rights=0x80000000` |
+ * | User memory | `configuration: Read, fixed-bytes=56, record=trace_config; order=0` |
+ * | Execution | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` |
+ * | Audit | `Object` |
+ *
+ * Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+ *
+ * Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+ */
+#define HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_START UINT64_C(260)
+
+/**
+ * Object-local method `cpu_inspector_trace_stop`.
+ *
+ * | Property | Contract |
+ * | --- | --- |
+ * | Receiver | `inspector: Borrow, kind=cpu_inspector, rights=0x80000000` |
+ * | Operation | 261 |
+ * | Feature | `Core` |
+ * | Arguments | `generation: u64` |
+ * | Results | — |
+ * | Capability effects | `inspector: Borrow, kind=cpu_inspector, rights=0x80000000` |
+ * | User memory | — |
+ * | Execution | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` |
+ * | Audit | `Object` |
+ *
+ * Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+ *
+ * Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+ */
+#define HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_STOP UINT64_C(261)
+
+/**
+ * Object-local method `cpu_inspector_trace_read`.
+ *
+ * | Property | Contract |
+ * | --- | --- |
+ * | Receiver | `inspector: Borrow, kind=cpu_inspector, rights=0x200000000` |
+ * | Operation | 262 |
+ * | Feature | `Core` |
+ * | Arguments | `generation: u64`, `cpu: u64`, `cursor: u64`, `output: user_address`, `output_size: byte_count` |
+ * | Results | `supported_size: byte_count` |
+ * | Capability effects | `inspector: Borrow, kind=cpu_inspector, rights=0x200000000` |
+ * | User memory | `output: Write, len=output_size bytes, max-bytes=2656; order=0` |
+ * | Execution | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` |
+ * | Audit | `Object` |
+ *
+ * Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+ *
+ * Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+ */
+#define HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_READ UINT64_C(262)
+
+/**
  * Object-local method `cpu_inspector_read`.
  *
  * | Property | Contract |
@@ -7177,6 +7246,243 @@ static inline uint64_t hyper_native_failure_result_mask(
     }
     return UINT64_C(0);
 }
+
+/**
+ * Minimum supported prefix of `trace_config`, in bytes; individual calls define their buffer lengths.
+ */
+#define HYPER_NATIVE_TRACE_CONFIG_MIN_SIZE UINT64_C(56)
+/**
+ * Wire layout for `trace_config`.
+ *
+ * Size: 56 bytes; alignment: 8 bytes; supported minimum prefix: 56 bytes.
+ * Scalar widths and member offsets are fixed across supported architectures.
+ * The minimum prefix describes extensibility, not permission to truncate every call's buffer;
+ * the consuming operation defines its accepted length.
+ *
+ * Used by: `cpu_inspector_trace_start`.
+ */
+typedef struct hyper_native_trace_config_t {
+    /**
+     * Wire offset 0 bytes; width 8 bytes.
+     */
+    uint64_t categories;
+    /**
+     * Wire offset 8 bytes; width 8 bytes.
+     */
+    uint64_t duration_ms;
+    /**
+     * Wire offset 16 bytes; width 8 bytes.
+     */
+    uint64_t capacity;
+    /**
+     * Wire offset 24 bytes; width 32 bytes.
+     */
+    uint8_t cpu_mask[32];
+} hyper_native_trace_config_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_trace_config_t) == 56, "trace_config size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_trace_config_t) == 8, "trace_config alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_config_t, categories) == 0, "trace_config.categories offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_config_t, duration_ms) == 8, "trace_config.duration_ms offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_config_t, capacity) == 16, "trace_config.capacity offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_config_t, cpu_mask) == 24, "trace_config.cpu_mask offset");
+
+/**
+ * Minimum supported prefix of `trace_info`, in bytes; individual calls define their buffer lengths.
+ */
+#define HYPER_NATIVE_TRACE_INFO_MIN_SIZE UINT64_C(160)
+/**
+ * Wire layout for `trace_info`.
+ *
+ * Size: 160 bytes; alignment: 8 bytes; supported minimum prefix: 160 bytes.
+ * Scalar widths and member offsets are fixed across supported architectures.
+ * The minimum prefix describes extensibility, not permission to truncate every call's buffer;
+ * the consuming operation defines its accepted length.
+ */
+typedef struct hyper_native_trace_info_t {
+    /**
+     * Wire offset 0 bytes; width 8 bytes.
+     */
+    uint64_t generation;
+    /**
+     * Wire offset 8 bytes; width 8 bytes.
+     */
+    uint64_t started_ns;
+    /**
+     * Wire offset 16 bytes; width 8 bytes.
+     */
+    uint64_t deadline_ns;
+    /**
+     * Wire offset 24 bytes; width 8 bytes.
+     */
+    uint64_t categories;
+    /**
+     * Wire offset 32 bytes; width 8 bytes.
+     */
+    uint64_t cpu_count;
+    /**
+     * Wire offset 40 bytes; width 8 bytes.
+     */
+    uint64_t capacity;
+    /**
+     * Wire offset 48 bytes; width 8 bytes.
+     */
+    uint64_t maximum_capacity;
+    /**
+     * Wire offset 56 bytes; width 8 bytes.
+     */
+    uint64_t running;
+    /**
+     * Wire offset 64 bytes; width 32 bytes.
+     */
+    uint8_t cpu_mask[32];
+    /**
+     * Wire offset 96 bytes; width 64 bytes.
+     */
+    uint8_t revision[64];
+} hyper_native_trace_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_trace_info_t) == 160, "trace_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_trace_info_t) == 8, "trace_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_info_t, generation) == 0, "trace_info.generation offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_info_t, started_ns) == 8, "trace_info.started_ns offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_info_t, deadline_ns) == 16, "trace_info.deadline_ns offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_info_t, categories) == 24, "trace_info.categories offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_info_t, cpu_count) == 32, "trace_info.cpu_count offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_info_t, capacity) == 40, "trace_info.capacity offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_info_t, maximum_capacity) == 48, "trace_info.maximum_capacity offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_info_t, running) == 56, "trace_info.running offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_info_t, cpu_mask) == 64, "trace_info.cpu_mask offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_info_t, revision) == 96, "trace_info.revision offset");
+
+/**
+ * Minimum supported prefix of `trace_record`, in bytes; individual calls define their buffer lengths.
+ */
+#define HYPER_NATIVE_TRACE_RECORD_MIN_SIZE UINT64_C(328)
+/**
+ * Wire layout for `trace_record`.
+ *
+ * Size: 328 bytes; alignment: 8 bytes; supported minimum prefix: 328 bytes.
+ * Scalar widths and member offsets are fixed across supported architectures.
+ * The minimum prefix describes extensibility, not permission to truncate every call's buffer;
+ * the consuming operation defines its accepted length.
+ */
+typedef struct hyper_native_trace_record_t {
+    /**
+     * Wire offset 0 bytes; width 8 bytes.
+     */
+    uint64_t sequence;
+    /**
+     * Wire offset 8 bytes; width 8 bytes.
+     */
+    uint64_t timestamp_ns;
+    /**
+     * Wire offset 16 bytes; width 8 bytes.
+     */
+    uint64_t category;
+    /**
+     * Wire offset 24 bytes; width 8 bytes.
+     */
+    uint64_t field_count;
+    /**
+     * Wire offset 32 bytes; width 32 bytes.
+     */
+    uint8_t values[32];
+    /**
+     * Wire offset 64 bytes; width 64 bytes.
+     */
+    uint8_t name[64];
+    /**
+     * Wire offset 128 bytes; width 96 bytes.
+     */
+    uint8_t fields[96];
+    /**
+     * Wire offset 224 bytes; width 96 bytes.
+     */
+    uint8_t source[96];
+    /**
+     * Wire offset 320 bytes; width 8 bytes.
+     */
+    uint64_t line;
+} hyper_native_trace_record_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_trace_record_t) == 328, "trace_record size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_trace_record_t) == 8, "trace_record alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_record_t, sequence) == 0, "trace_record.sequence offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_record_t, timestamp_ns) == 8, "trace_record.timestamp_ns offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_record_t, category) == 16, "trace_record.category offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_record_t, field_count) == 24, "trace_record.field_count offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_record_t, values) == 32, "trace_record.values offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_record_t, name) == 64, "trace_record.name offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_record_t, fields) == 128, "trace_record.fields offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_record_t, source) == 224, "trace_record.source offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_record_t, line) == 320, "trace_record.line offset");
+
+/**
+ * Minimum supported prefix of `trace_batch`, in bytes; individual calls define their buffer lengths.
+ */
+#define HYPER_NATIVE_TRACE_BATCH_MIN_SIZE UINT64_C(2656)
+/**
+ * Wire layout for `trace_batch`.
+ *
+ * Size: 2656 bytes; alignment: 8 bytes; supported minimum prefix: 2656 bytes.
+ * Scalar widths and member offsets are fixed across supported architectures.
+ * The minimum prefix describes extensibility, not permission to truncate every call's buffer;
+ * the consuming operation defines its accepted length.
+ */
+typedef struct hyper_native_trace_batch_t {
+    /**
+     * Wire offset 0 bytes; width 8 bytes.
+     */
+    uint64_t count;
+    /**
+     * Wire offset 8 bytes; width 8 bytes.
+     */
+    uint64_t next;
+    /**
+     * Wire offset 16 bytes; width 8 bytes.
+     */
+    uint64_t overwritten;
+    /**
+     * Wire offset 24 bytes; width 8 bytes.
+     */
+    uint64_t incomplete;
+    /**
+     * Wire offset 32 bytes; width 2624 bytes.
+     */
+    uint8_t records[2624];
+} hyper_native_trace_batch_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_trace_batch_t) == 2656, "trace_batch size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_trace_batch_t) == 8, "trace_batch alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_batch_t, count) == 0, "trace_batch.count offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_batch_t, next) == 8, "trace_batch.next offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_batch_t, overwritten) == 16, "trace_batch.overwritten offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_batch_t, incomplete) == 24, "trace_batch.incomplete offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_batch_t, records) == 32, "trace_batch.records offset");
+
+/**
+ * Minimum supported prefix of `trace_thread`, in bytes; individual calls define their buffer lengths.
+ */
+#define HYPER_NATIVE_TRACE_THREAD_MIN_SIZE UINT64_C(72)
+/**
+ * Wire layout for `trace_thread`.
+ *
+ * Size: 72 bytes; alignment: 8 bytes; supported minimum prefix: 72 bytes.
+ * Scalar widths and member offsets are fixed across supported architectures.
+ * The minimum prefix describes extensibility, not permission to truncate every call's buffer;
+ * the consuming operation defines its accepted length.
+ */
+typedef struct hyper_native_trace_thread_t {
+    /**
+     * Wire offset 0 bytes; width 8 bytes.
+     */
+    uint64_t thread;
+    /**
+     * Wire offset 8 bytes; width 64 bytes.
+     */
+    uint8_t name[64];
+} hyper_native_trace_thread_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_trace_thread_t) == 72, "trace_thread size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_trace_thread_t) == 8, "trace_thread alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_thread_t, thread) == 0, "trace_thread.thread offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_trace_thread_t, name) == 8, "trace_thread.name offset");
 
 /**
  * Minimum supported prefix of `scheduling_parameters`, in bytes; individual calls define their buffer lengths.

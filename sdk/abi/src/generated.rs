@@ -2830,6 +2830,63 @@ pub const HYPER_NATIVE_OP_CPU_INSPECTOR_PROFILE_STOP: u64 = 258;
 /// Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
 pub const HYPER_NATIVE_OP_CPU_INSPECTOR_PROFILE_READ: u64 = 259;
 
+/// Object-local method `cpu_inspector_trace_start`.
+///
+/// | Property | Contract |
+/// | --- | --- |
+/// | Receiver | `inspector: Borrow, kind=cpu_inspector, rights=0x80000000` |
+/// | Operation | 260 |
+/// | Feature | `Core` |
+/// | Arguments | `configuration: user_address` |
+/// | Results | `generation: u64` |
+/// | Capability effects | `inspector: Borrow, kind=cpu_inspector, rights=0x80000000` |
+/// | User memory | `configuration: Read, fixed-bytes=56, record=trace_config; order=0` |
+/// | Execution | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` |
+/// | Audit | `Object` |
+///
+/// Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+///
+/// Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+pub const HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_START: u64 = 260;
+
+/// Object-local method `cpu_inspector_trace_stop`.
+///
+/// | Property | Contract |
+/// | --- | --- |
+/// | Receiver | `inspector: Borrow, kind=cpu_inspector, rights=0x80000000` |
+/// | Operation | 261 |
+/// | Feature | `Core` |
+/// | Arguments | `generation: u64` |
+/// | Results | — |
+/// | Capability effects | `inspector: Borrow, kind=cpu_inspector, rights=0x80000000` |
+/// | User memory | — |
+/// | Execution | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` |
+/// | Audit | `Object` |
+///
+/// Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+///
+/// Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+pub const HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_STOP: u64 = 261;
+
+/// Object-local method `cpu_inspector_trace_read`.
+///
+/// | Property | Contract |
+/// | --- | --- |
+/// | Receiver | `inspector: Borrow, kind=cpu_inspector, rights=0x200000000` |
+/// | Operation | 262 |
+/// | Feature | `Core` |
+/// | Arguments | `generation: u64`, `cpu: u64`, `cursor: u64`, `output: user_address`, `output_size: byte_count` |
+/// | Results | `supported_size: byte_count` |
+/// | Capability effects | `inspector: Borrow, kind=cpu_inspector, rights=0x200000000` |
+/// | User memory | `output: Write, len=output_size bytes, max-bytes=2656; order=0` |
+/// | Execution | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` |
+/// | Audit | `Object` |
+///
+/// Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+///
+/// Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+pub const HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_READ: u64 = 262;
+
 /// Object-local method `cpu_inspector_read`.
 ///
 /// | Property | Contract |
@@ -5493,6 +5550,12 @@ pub enum NativeOperation {
     CpuInspectorProfileStop,
     /// Decoded method; see [`HYPER_NATIVE_OP_CPU_INSPECTOR_PROFILE_READ`] for its contract.
     CpuInspectorProfileRead,
+    /// Decoded method; see [`HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_START`] for its contract.
+    CpuInspectorTraceStart,
+    /// Decoded method; see [`HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_STOP`] for its contract.
+    CpuInspectorTraceStop,
+    /// Decoded method; see [`HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_READ`] for its contract.
+    CpuInspectorTraceRead,
     /// Decoded method; see [`HYPER_NATIVE_OP_CPU_INSPECTOR_READ`] for its contract.
     CpuInspectorRead,
     /// Decoded method; see [`HYPER_NATIVE_OP_FILE_GET_INFO`] for its contract.
@@ -5872,6 +5935,9 @@ impl NativeOperation {
             (HYPER_NATIVE_OBJECT_CPU_INSPECTOR, HYPER_NATIVE_OP_CPU_INSPECTOR_PROFILE_START) => Some(Self::CpuInspectorProfileStart),
             (HYPER_NATIVE_OBJECT_CPU_INSPECTOR, HYPER_NATIVE_OP_CPU_INSPECTOR_PROFILE_STOP) => Some(Self::CpuInspectorProfileStop),
             (HYPER_NATIVE_OBJECT_CPU_INSPECTOR, HYPER_NATIVE_OP_CPU_INSPECTOR_PROFILE_READ) => Some(Self::CpuInspectorProfileRead),
+            (HYPER_NATIVE_OBJECT_CPU_INSPECTOR, HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_START) => Some(Self::CpuInspectorTraceStart),
+            (HYPER_NATIVE_OBJECT_CPU_INSPECTOR, HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_STOP) => Some(Self::CpuInspectorTraceStop),
+            (HYPER_NATIVE_OBJECT_CPU_INSPECTOR, HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_READ) => Some(Self::CpuInspectorTraceRead),
             (HYPER_NATIVE_OBJECT_CPU_INSPECTOR, HYPER_NATIVE_OP_CPU_INSPECTOR_READ) => Some(Self::CpuInspectorRead),
             (HYPER_NATIVE_OBJECT_FILE, HYPER_NATIVE_OP_FILE_GET_INFO) => Some(Self::FileGetInfo),
             (HYPER_NATIVE_OBJECT_DIRECTORY, HYPER_NATIVE_OP_DIRECTORY_GET_INFO) => Some(Self::DirectoryGetInfo),
@@ -6070,6 +6136,9 @@ impl NativeOperation {
             Self::CpuInspectorProfileStart => HYPER_NATIVE_OP_CPU_INSPECTOR_PROFILE_START,
             Self::CpuInspectorProfileStop => HYPER_NATIVE_OP_CPU_INSPECTOR_PROFILE_STOP,
             Self::CpuInspectorProfileRead => HYPER_NATIVE_OP_CPU_INSPECTOR_PROFILE_READ,
+            Self::CpuInspectorTraceStart => HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_START,
+            Self::CpuInspectorTraceStop => HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_STOP,
+            Self::CpuInspectorTraceRead => HYPER_NATIVE_OP_CPU_INSPECTOR_TRACE_READ,
             Self::CpuInspectorRead => HYPER_NATIVE_OP_CPU_INSPECTOR_READ,
             Self::FileGetInfo => HYPER_NATIVE_OP_FILE_GET_INFO,
             Self::DirectoryGetInfo => HYPER_NATIVE_OP_DIRECTORY_GET_INFO,
@@ -6267,6 +6336,9 @@ impl NativeOperation {
             Self::CpuInspectorProfileStart => Some(HYPER_NATIVE_OBJECT_CPU_INSPECTOR),
             Self::CpuInspectorProfileStop => Some(HYPER_NATIVE_OBJECT_CPU_INSPECTOR),
             Self::CpuInspectorProfileRead => Some(HYPER_NATIVE_OBJECT_CPU_INSPECTOR),
+            Self::CpuInspectorTraceStart => Some(HYPER_NATIVE_OBJECT_CPU_INSPECTOR),
+            Self::CpuInspectorTraceStop => Some(HYPER_NATIVE_OBJECT_CPU_INSPECTOR),
+            Self::CpuInspectorTraceRead => Some(HYPER_NATIVE_OBJECT_CPU_INSPECTOR),
             Self::CpuInspectorRead => Some(HYPER_NATIVE_OBJECT_CPU_INSPECTOR),
             Self::FileGetInfo => Some(HYPER_NATIVE_OBJECT_FILE),
             Self::DirectoryGetInfo => Some(HYPER_NATIVE_OBJECT_DIRECTORY),
@@ -6464,6 +6536,9 @@ impl NativeOperation {
             Self::CpuInspectorProfileStart => 2,
             Self::CpuInspectorProfileStop => 1,
             Self::CpuInspectorProfileRead => 5,
+            Self::CpuInspectorTraceStart => 1,
+            Self::CpuInspectorTraceStop => 1,
+            Self::CpuInspectorTraceRead => 5,
             Self::CpuInspectorRead => 2,
             Self::FileGetInfo => 2,
             Self::DirectoryGetInfo => 2,
@@ -6661,6 +6736,9 @@ impl NativeOperation {
             Self::CpuInspectorProfileStart => 2147483648,
             Self::CpuInspectorProfileStop => 2147483648,
             Self::CpuInspectorProfileRead => 8589934592,
+            Self::CpuInspectorTraceStart => 2147483648,
+            Self::CpuInspectorTraceStop => 2147483648,
+            Self::CpuInspectorTraceRead => 8589934592,
             Self::CpuInspectorRead => 8,
             Self::FileGetInfo => 8,
             Self::DirectoryGetInfo => 8,
@@ -6827,6 +6905,173 @@ pub const fn hyper_native_failure_result_mask(
         None => 0,
     }
 }
+
+/// Minimum supported prefix of `trace_config`, in bytes; individual calls define their buffer lengths.
+pub const HYPER_NATIVE_TRACE_CONFIG_MIN_SIZE: usize = 56;
+/// Wire layout for `trace_config`.
+///
+/// Size: 56 bytes; alignment: 8 bytes; supported minimum prefix: 56 bytes.
+/// Scalar widths and member offsets are fixed across supported architectures.
+/// The minimum prefix describes extensibility, not permission to truncate every call's buffer;
+/// the consuming operation defines its accepted length.
+///
+/// Used by: `cpu_inspector_trace_start`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeTraceConfig {
+    /// Wire offset 0 bytes; width 8 bytes.
+    pub categories: u64,
+    /// Wire offset 8 bytes; width 8 bytes.
+    pub duration_ms: u64,
+    /// Wire offset 16 bytes; width 8 bytes.
+    pub capacity: u64,
+    /// Wire offset 24 bytes; width 32 bytes.
+    pub cpu_mask: [u8; 32],
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeTraceConfig>() == 56);
+const _: () = assert!(core::mem::align_of::<HyperNativeTraceConfig>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceConfig, categories) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceConfig, duration_ms) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceConfig, capacity) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceConfig, cpu_mask) == 24);
+
+/// Minimum supported prefix of `trace_info`, in bytes; individual calls define their buffer lengths.
+pub const HYPER_NATIVE_TRACE_INFO_MIN_SIZE: usize = 160;
+/// Wire layout for `trace_info`.
+///
+/// Size: 160 bytes; alignment: 8 bytes; supported minimum prefix: 160 bytes.
+/// Scalar widths and member offsets are fixed across supported architectures.
+/// The minimum prefix describes extensibility, not permission to truncate every call's buffer;
+/// the consuming operation defines its accepted length.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeTraceInfo {
+    /// Wire offset 0 bytes; width 8 bytes.
+    pub generation: u64,
+    /// Wire offset 8 bytes; width 8 bytes.
+    pub started_ns: u64,
+    /// Wire offset 16 bytes; width 8 bytes.
+    pub deadline_ns: u64,
+    /// Wire offset 24 bytes; width 8 bytes.
+    pub categories: u64,
+    /// Wire offset 32 bytes; width 8 bytes.
+    pub cpu_count: u64,
+    /// Wire offset 40 bytes; width 8 bytes.
+    pub capacity: u64,
+    /// Wire offset 48 bytes; width 8 bytes.
+    pub maximum_capacity: u64,
+    /// Wire offset 56 bytes; width 8 bytes.
+    pub running: u64,
+    /// Wire offset 64 bytes; width 32 bytes.
+    pub cpu_mask: [u8; 32],
+    /// Wire offset 96 bytes; width 64 bytes.
+    pub revision: [u8; 64],
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeTraceInfo>() == 160);
+const _: () = assert!(core::mem::align_of::<HyperNativeTraceInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceInfo, generation) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceInfo, started_ns) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceInfo, deadline_ns) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceInfo, categories) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceInfo, cpu_count) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceInfo, capacity) == 40);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceInfo, maximum_capacity) == 48);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceInfo, running) == 56);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceInfo, cpu_mask) == 64);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceInfo, revision) == 96);
+
+/// Minimum supported prefix of `trace_record`, in bytes; individual calls define their buffer lengths.
+pub const HYPER_NATIVE_TRACE_RECORD_MIN_SIZE: usize = 328;
+/// Wire layout for `trace_record`.
+///
+/// Size: 328 bytes; alignment: 8 bytes; supported minimum prefix: 328 bytes.
+/// Scalar widths and member offsets are fixed across supported architectures.
+/// The minimum prefix describes extensibility, not permission to truncate every call's buffer;
+/// the consuming operation defines its accepted length.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeTraceRecord {
+    /// Wire offset 0 bytes; width 8 bytes.
+    pub sequence: u64,
+    /// Wire offset 8 bytes; width 8 bytes.
+    pub timestamp_ns: u64,
+    /// Wire offset 16 bytes; width 8 bytes.
+    pub category: u64,
+    /// Wire offset 24 bytes; width 8 bytes.
+    pub field_count: u64,
+    /// Wire offset 32 bytes; width 32 bytes.
+    pub values: [u8; 32],
+    /// Wire offset 64 bytes; width 64 bytes.
+    pub name: [u8; 64],
+    /// Wire offset 128 bytes; width 96 bytes.
+    pub fields: [u8; 96],
+    /// Wire offset 224 bytes; width 96 bytes.
+    pub source: [u8; 96],
+    /// Wire offset 320 bytes; width 8 bytes.
+    pub line: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeTraceRecord>() == 328);
+const _: () = assert!(core::mem::align_of::<HyperNativeTraceRecord>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceRecord, sequence) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceRecord, timestamp_ns) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceRecord, category) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceRecord, field_count) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceRecord, values) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceRecord, name) == 64);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceRecord, fields) == 128);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceRecord, source) == 224);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceRecord, line) == 320);
+
+/// Minimum supported prefix of `trace_batch`, in bytes; individual calls define their buffer lengths.
+pub const HYPER_NATIVE_TRACE_BATCH_MIN_SIZE: usize = 2656;
+/// Wire layout for `trace_batch`.
+///
+/// Size: 2656 bytes; alignment: 8 bytes; supported minimum prefix: 2656 bytes.
+/// Scalar widths and member offsets are fixed across supported architectures.
+/// The minimum prefix describes extensibility, not permission to truncate every call's buffer;
+/// the consuming operation defines its accepted length.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeTraceBatch {
+    /// Wire offset 0 bytes; width 8 bytes.
+    pub count: u64,
+    /// Wire offset 8 bytes; width 8 bytes.
+    pub next: u64,
+    /// Wire offset 16 bytes; width 8 bytes.
+    pub overwritten: u64,
+    /// Wire offset 24 bytes; width 8 bytes.
+    pub incomplete: u64,
+    /// Wire offset 32 bytes; width 2624 bytes.
+    pub records: [u8; 2624],
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeTraceBatch>() == 2656);
+const _: () = assert!(core::mem::align_of::<HyperNativeTraceBatch>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceBatch, count) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceBatch, next) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceBatch, overwritten) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceBatch, incomplete) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceBatch, records) == 32);
+
+/// Minimum supported prefix of `trace_thread`, in bytes; individual calls define their buffer lengths.
+pub const HYPER_NATIVE_TRACE_THREAD_MIN_SIZE: usize = 72;
+/// Wire layout for `trace_thread`.
+///
+/// Size: 72 bytes; alignment: 8 bytes; supported minimum prefix: 72 bytes.
+/// Scalar widths and member offsets are fixed across supported architectures.
+/// The minimum prefix describes extensibility, not permission to truncate every call's buffer;
+/// the consuming operation defines its accepted length.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeTraceThread {
+    /// Wire offset 0 bytes; width 8 bytes.
+    pub thread: u64,
+    /// Wire offset 8 bytes; width 64 bytes.
+    pub name: [u8; 64],
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeTraceThread>() == 72);
+const _: () = assert!(core::mem::align_of::<HyperNativeTraceThread>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceThread, thread) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTraceThread, name) == 8);
 
 /// Minimum supported prefix of `scheduling_parameters`, in bytes; individual calls define their buffer lengths.
 pub const HYPER_NATIVE_SCHEDULING_PARAMETERS_MIN_SIZE: usize = 64;

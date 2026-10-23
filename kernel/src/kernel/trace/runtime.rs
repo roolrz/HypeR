@@ -5,8 +5,9 @@ use hyper::sync::InterruptMaskGuard;
 use hyper::trace::{Error, Site, Ticket};
 
 /// Installs the machine seam once. Capture remains disabled until explicitly
-/// started; no tracing thread, timer or physical IRQ is installed.
+/// started; one ordinary expiry callout is allocated but not armed.
 pub fn initialize() -> Result<(), Error> {
+    super::control::initialize()?;
     hyper::trace::install(record)
 }
 
@@ -17,6 +18,10 @@ fn record(ticket: Ticket, site: &'static Site, fields: &mut dyn FnMut() -> [u64;
     // restores the caller's prior mask on this CPU, including nested IRQ callers.
     let _mask = unsafe { InterruptMaskGuard::<crate::hal::irq::LocalMask>::acquire() };
     if let Some(cpu) = crate::kernel::cpu::current_index() {
+        // Internal self-tests use the foundation API without capture policy.
+        if !super::control::selected(cpu.get()) {
+            return;
+        }
         hyper::trace::record_at(
             ticket,
             cpu.get(),

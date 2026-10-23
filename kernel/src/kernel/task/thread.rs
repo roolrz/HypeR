@@ -209,6 +209,12 @@ impl ThreadId {
         Self(value)
     }
 
+    /// Diagnostic lookup only; this ID never grants scheduling authority.
+    #[cfg(feature = "kernel-trace")]
+    pub(crate) const fn from_diagnostic(value: u64) -> Self {
+        Self(value)
+    }
+
     pub const fn get(self) -> u64 {
         self.0
     }

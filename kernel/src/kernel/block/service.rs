@@ -51,6 +51,8 @@ pub(crate) fn create(
     let owner = backend.object().owner();
     let notification = Notification::prepare_native(&owner, notify_base, notify_irq, &domain)?;
     let device = FallibleArc::try_new(Device {
+        #[cfg(feature = "kernel-trace")]
+        trace_id: next_trace_id()?,
         memory: backing,
         guest_base,
         notification,
@@ -219,4 +221,14 @@ pub(crate) enum TransferError {
     Capability(crate::kernel::process::ProcessError),
     Device(Error),
     Status(i64),
+}
+
+// Correlation survives queue index reuse and distinguishes independently created
+// devices in the same resource domain. This is never an address or authority.
+#[cfg(feature = "kernel-trace")]
+fn next_trace_id() -> Result<u64, ServiceError> {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .map_err(|_| ServiceError::ResourceLimit)
 }

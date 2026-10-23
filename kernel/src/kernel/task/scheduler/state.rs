@@ -1663,6 +1663,18 @@ impl Scheduler {
             local.current = next;
             Ok(generation)
         })?;
+        crate::tracepoint!(
+            Scheduler,
+            "sched_switch",
+            prev = current.get(),
+            next = next.get(),
+            prev_state = self
+                .thread(current)
+                .map_or(0, |thread| thread.state() as u64),
+            next_class = self
+                .thread(next)
+                .map_or(0, |thread| thread.scheduling_class() as u64)
+        );
         let previous = self.thread(current)?.context_pointer();
         let next = self.thread(next)?.context_pointer().cast_const();
         Ok(PreparedContextSwitch {

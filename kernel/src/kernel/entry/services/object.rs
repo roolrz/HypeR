@@ -24,6 +24,10 @@ struct ResolvedWaitEntry {
 }
 
 impl ObjectServices for ProcessServices<'_> {
+    #[cfg(feature = "kernel-trace")]
+    fn trace_thread_id(&self) -> u64 {
+        self.thread.scheduler_id().map_or(0, |id| id.get())
+    }
     fn current_process_id(&self) -> u64 {
         self.process.koid().get()
     }

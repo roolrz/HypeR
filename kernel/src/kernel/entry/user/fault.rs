@@ -20,8 +20,14 @@ pub(super) fn resolve(
     kind: UserFaultKind,
     observed_epoch: u64,
 ) -> Result<bool, MachineError> {
+    crate::tracepoint!(
+        Memory,
+        "page_fault_begin",
+        thread = thread.scheduler_id().map_or(0, |id| id.get()),
+        kind = kind as u64
+    );
     let cancelled = || thread.snapshot().phase == UserThreadPhase::StopRequested;
-    reclaim::retry_prepare_with(
+    let result = reclaim::retry_prepare_with(
         || {
             if cancelled() {
                 return Ok(false);
@@ -49,5 +55,12 @@ pub(super) fn resolve(
                 reclaim::user_memory_target(error)
             }
         },
-    )
+    );
+    crate::tracepoint!(
+        Memory,
+        "page_fault_end",
+        thread = thread.scheduler_id().map_or(0, |id| id.get()),
+        resolved = u64::from(matches!(result, Ok(true)))
+    );
+    result
 }

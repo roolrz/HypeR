@@ -551,6 +551,12 @@ pub(crate) fn current_user_thread() -> Result<Option<crate::kernel::process::Use
     state::local_current_user_thread(cpu)
 }
 
+/// Resolves a diagnostic ID for privileged trace export, without granting authority.
+#[cfg(feature = "kernel-trace")]
+pub(crate) fn trace_thread_name(id: u64) -> Result<ThreadNameSnapshot, Error> {
+    thread_name(ThreadId::from_diagnostic(id))
+}
+
 /// Returns an owned name snapshot for the identified scheduler Thread.
 pub fn thread_name(id: ThreadId) -> Result<ThreadNameSnapshot, Error> {
     read_scheduler(|scheduler| scheduler.with_thread(id, Thread::name_snapshot))

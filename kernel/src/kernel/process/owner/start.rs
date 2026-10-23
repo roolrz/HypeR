@@ -102,7 +102,7 @@ impl Drop for CommittedChildProcessStart {
 
 impl ProcessStartTransaction for ProcessStartCoordinator {
     type Error = ChildProcessStartError;
-    type Prepared = PreparedChildProcessStart;
+    type Prepared = alloc::boxed::Box<PreparedChildProcessStart>;
     type Committed = CommittedChildProcessStart;
     type Output = StartedChildProcess;
 
@@ -219,7 +219,7 @@ impl PreparedChildProcessStart {
         builder_handle: HandleValue,
         builder_koid: Koid,
         build: SealedProcessBuild,
-    ) -> Result<Self, StartPreparationFailure<ChildProcessStartError>> {
+    ) -> Result<alloc::boxed::Box<Self>, StartPreparationFailure<ChildProcessStartError>> {
         let child = build.child().process().clone();
         let invocation_handles = match child.prepare_invocation_handles() {
             Ok(handles) => handles,
@@ -251,6 +251,18 @@ impl PreparedChildProcessStart {
             Ok(charge) => charge,
             Err(error) => {
                 return Err(start_failure(ChildProcessStartError::Process(error), build));
+            }
+        };
+        // The transaction owns over 1.5 KiB of rollback state. Keep it in
+        // charged heap storage so Result/phase handoffs cannot retain multiple
+        // copies below handle-table allocation and IRQ-tail scheduling.
+        let storage = match hyper::mm::try_box_uninit::<Self>() {
+            Ok(storage) => storage,
+            Err(_) => {
+                return Err(start_failure(
+                    ChildProcessStartError::Process(ProcessError::Allocation),
+                    build,
+                ));
             }
         };
         let mut child_handle_batches = match build
@@ -406,36 +418,39 @@ impl PreparedChildProcessStart {
             }
         };
 
-        Ok(Self {
-            parent,
-            builder_handle,
-            build: Some(build),
-            child,
-            child_handle_batches,
-            prepared_startup_handles,
-            retired_batch_storage,
-            retired_charge_storage,
-            retired_scratch_charges,
-            start_scratch_charge: Some(start_scratch_charge),
-            initial_thread: Some(initial_thread),
-            parent_supervisor: Some(parent_supervisor),
-            builder_consumption: Some(builder_consumption),
-            root_vmar_object: Some(root_vmar_object),
-            stack_vmar_object: Some(stack_vmar_object),
-            invocation_handles: Some(invocation_handles),
-            root_vmar_address_space,
-            root_vmar_claimed: true,
-            process_object: Some(process_object),
-            supervisor_object: Some(supervisor_object),
-            bootstrap: Some(bootstrap),
-        })
+        Ok(alloc::boxed::Box::write(
+            storage,
+            Self {
+                parent,
+                builder_handle,
+                build: Some(build),
+                child,
+                child_handle_batches,
+                prepared_startup_handles,
+                retired_batch_storage,
+                retired_charge_storage,
+                retired_scratch_charges,
+                start_scratch_charge: Some(start_scratch_charge),
+                initial_thread: Some(initial_thread),
+                parent_supervisor: Some(parent_supervisor),
+                builder_consumption: Some(builder_consumption),
+                root_vmar_object: Some(root_vmar_object),
+                stack_vmar_object: Some(stack_vmar_object),
+                invocation_handles: Some(invocation_handles),
+                root_vmar_address_space,
+                root_vmar_claimed: true,
+                process_object: Some(process_object),
+                supervisor_object: Some(supervisor_object),
+                bootstrap: Some(bootstrap),
+            },
+        ))
     }
 
     // Publication and rollback run after preparation. Keep their scratch
     // frames out of the coordinator while it calls deeper preparation paths;
     // IRQ preemption and the incoming scheduler tail also need stack headroom.
     #[inline(never)]
-    fn commit(mut self) -> CommittedChildProcessStart {
+    fn commit(mut self: alloc::boxed::Box<Self>) -> CommittedChildProcessStart {
         let build = match self.build.take() {
             Some(build) => build,
             None => process_invariant_violation(),
@@ -495,19 +510,22 @@ impl PreparedChildProcessStart {
         let (supervisor_handle, startup_channel, retired_builder) =
             commit_parent_builder_replacement(&mut self, bootstrap.parent_channel);
         child.commit_initial_execution(thread_id);
-        drop(self.start_scratch_charge.take());
+        let scratch_charge = self.start_scratch_charge.take();
         self.root_vmar_claimed = false;
-        CommittedChildProcessStart {
+        let committed = CommittedChildProcessStart {
             child,
             initial_thread,
             supervisor_handle,
             startup_channel,
             retired_builder: Some(retired_builder),
-        }
+        };
+        drop(self);
+        drop(scratch_charge);
+        committed
     }
 
     #[inline(never)]
-    fn cancel(mut self) -> SealedProcessBuild {
+    fn cancel(mut self: alloc::boxed::Box<Self>) -> SealedProcessBuild {
         let supervisor_object = self.supervisor_object.take();
         drop(supervisor_object);
         drop(self.process_object.take());
@@ -528,11 +546,14 @@ impl PreparedChildProcessStart {
         }
         abort_child_handle_batches(&self.child, &mut self.child_handle_batches);
         self.prepared_startup_handles.clear();
-        drop(self.start_scratch_charge.take());
-        match self.build.take() {
+        let scratch_charge = self.start_scratch_charge.take();
+        let build = match self.build.take() {
             Some(build) => build,
             None => process_invariant_violation(),
-        }
+        };
+        drop(self);
+        drop(scratch_charge);
+        build
     }
 }
 
@@ -567,6 +588,7 @@ fn reserve_start_scratch(
     batch_count: usize,
 ) -> Result<CommittedCharge, ProcessError> {
     let allocations = [
+        (1, core::mem::size_of::<PreparedChildProcessStart>()),
         (
             batch_count,
             core::mem::size_of::<ProcessHandleBatchReservation>(),

@@ -16,6 +16,8 @@ struct Flight<'a> {
     read: bool,
     deadline: u64,
     retired: bool,
+    #[cfg(feature = "kernel-trace")]
+    tag: u64,
 }
 
 impl Drop for Flight<'_> {
@@ -23,6 +25,12 @@ impl Drop for Flight<'_> {
         // Closing notifications does not prove DMA quiescence. The dedicated
         // grant stays leased to the backend and no queue can be reused.
         if !self.retired {
+            crate::tracepoint!(
+                Io,
+                "block_abort",
+                tag = self.tag,
+                domain = self.device.trace_id
+            );
             self.device.fail();
         }
     }
@@ -191,12 +199,22 @@ impl Session<'_> {
             read,
             deadline,
             retired: false,
+            #[cfg(feature = "kernel-trace")]
+            tag,
         };
         // Linux owns physical DMA synchronization. This release publishes CPU
         // descriptor contents before its coherent view of the available index.
         fence(Ordering::Release);
         d.index_word(wire::AVAILABLE + queue as u64 * wire::QUEUE_STRIDE + 2)?
             .store(index.wrapping_add(1).to_le(), Ordering::Release);
+        crate::tracepoint!(
+            Io,
+            "block_submit",
+            tag = tag,
+            domain = d.trace_id,
+            bytes = length as u64,
+            read = u64::from(read)
+        );
         Ok(flight)
     }
 }
@@ -262,6 +280,13 @@ impl Flight<'_> {
         d.state
             .with(|state| state.indices[self.queue] = self.index.wrapping_add(1));
         self.retired = true;
+        crate::tracepoint!(
+            Io,
+            "block_complete",
+            tag = self.tag,
+            domain = self.device.trace_id,
+            success = u64::from(result.is_ok())
+        );
         if result == Err(wire::CompletionError::Scsi) {
             return Err(Error::Io);
         }

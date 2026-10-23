@@ -54,6 +54,10 @@ pub struct VmId {
 }
 
 impl VmId {
+    #[cfg(feature = "kernel-trace")]
+    pub(crate) const fn trace_id(self) -> u64 {
+        self.execution_owner()
+    }
     const fn execution_owner(self) -> u64 {
         ((self.generation as u64) << 32) | self.slot as u64
     }

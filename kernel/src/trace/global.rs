@@ -12,7 +12,7 @@ use crate::sync::PublishedOnce;
 /// once. The adapter must not retain them or call `emit` recursively.
 pub type MachineEmitter = fn(Ticket, &'static Site, &mut dyn FnMut() -> [u64; 4]);
 
-const CAPACITY: usize = 256;
+pub const CAPACITY: usize = 4096;
 static RECORDER: Recorder<{ crate::cpu::MAX_CPUS }, CAPACITY> = Recorder::new();
 static MACHINE: PublishedOnce<MachineEmitter> = PublishedOnce::new();
 
@@ -29,6 +29,12 @@ pub fn start(filter: Filter) -> Result<Session, Error> {
         return Err(Error::Unavailable);
     }
     RECORDER.start(filter)
+}
+pub fn start_with_capacity(filter: Filter, capacity: usize) -> Result<Session, Error> {
+    if MACHINE.get().is_none() {
+        return Err(Error::Unavailable);
+    }
+    RECORDER.start_with_capacity(filter, capacity)
 }
 pub fn stop(session: Session) -> Result<(), Error> {
     RECORDER.stop(session)

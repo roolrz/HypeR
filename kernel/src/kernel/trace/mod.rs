@@ -3,7 +3,7 @@
 
 //! Static tracepoints with flag-based runtime admission. No instruction patching,
 //! timer polling, scheduler queries, formatting or output from producer context.
-//! Control and export are kernel-internal in this foundation patch.
+//! Control/export require explicit CPU inspector profiling authority.
 
 #[cfg(feature = "kernel-trace")]
 mod runtime;
@@ -11,3 +11,21 @@ mod runtime;
 pub use hyper::trace::{read, set_filter, start, stop};
 #[cfg(feature = "kernel-trace")]
 pub use runtime::initialize;
+
+#[cfg(feature = "kernel-trace")]
+mod control;
+#[cfg(feature = "kernel-trace")]
+pub(crate) use control::{query, start as capture_start, stop as capture_stop};
+pub(crate) type Result<T> = core::result::Result<T, hyper::abi::native::HyperNativeStatus>;
+#[cfg(not(feature = "kernel-trace"))]
+pub(crate) fn capture_start(_: &[u8; 56]) -> Result<u64> {
+    Err(hyper::abi::native::HYPER_NATIVE_STATUS_NOT_SUPPORTED)
+}
+#[cfg(not(feature = "kernel-trace"))]
+pub(crate) fn capture_stop(_: u64) -> Result<()> {
+    Err(hyper::abi::native::HYPER_NATIVE_STATUS_NOT_SUPPORTED)
+}
+#[cfg(not(feature = "kernel-trace"))]
+pub(crate) fn query(_: u64, _: u64, _: u64, _: &mut [u8]) -> Result<usize> {
+    Err(hyper::abi::native::HYPER_NATIVE_STATUS_NOT_SUPPORTED)
+}

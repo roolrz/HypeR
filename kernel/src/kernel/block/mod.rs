@@ -33,6 +33,8 @@ struct State {
 }
 
 pub(crate) struct Device {
+    #[cfg(feature = "kernel-trace")]
+    trace_id: u64,
     // Backend VM mappings independently retain this hardware lease. Disconnect
     // never recycles an in-flight slot: pages survive until VM/DMA retirement.
     memory: GuestMemoryBacking,

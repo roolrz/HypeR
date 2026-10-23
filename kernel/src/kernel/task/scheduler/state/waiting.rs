@@ -387,6 +387,12 @@ fn ready_waiter(
     local
         .local_enqueue_ready(id, false)
         .unwrap_or_else(|error| scheduler_invariant(error));
+    crate::tracepoint!(
+        Scheduler,
+        "sched_wakeup",
+        thread = id.get(),
+        target_cpu = local.index.get() as u64
+    );
     let candidate = local
         .thread_authority()
         .with_thread(id, |_thread, schedule| schedule.scheduling)

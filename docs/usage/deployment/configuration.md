@@ -371,6 +371,7 @@ derives the defaults from that graph, filtering capabilities by the manifest's
 architecture availability metadata. The product does not carry another default
 feature list. An explicit feature set replaces these defaults.
 `pmu-profiling` is opt-in; see [PMU sampling](../diagnostics/profiling.md).
+`kernel-trace` is opt-in; see [Perfetto tracing](../diagnostics/tracing.md).
 `heap-profiling` is opt-in; see [memory diagnostics](../diagnostics/memory-diagnostics.md).
 Memory ownership, capability checks, device isolation, IPC and the scheduler are
 not optional security switches. The architecture and limit configuration stays

@@ -67,7 +67,25 @@ pub(super) fn dispatch_operation(
             abi::HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         ));
     }
-    match operation {
+    #[cfg(feature = "kernel-trace")]
+    let trace_call = !matches!(
+        operation,
+        abi::NativeOperation::CpuInspectorTraceStart
+            | abi::NativeOperation::CpuInspectorTraceStop
+            | abi::NativeOperation::CpuInspectorTraceRead
+    );
+    #[cfg(feature = "kernel-trace")]
+    if trace_call {
+        crate::tracepoint!(
+            Syscall,
+            "syscall_enter",
+            thread = services.trace_thread_id(),
+            process = services.current_process_id(),
+            kind = receiver.kind().get() as u64,
+            operation = operation.operation()
+        );
+    }
+    let action = match operation {
         abi::NativeOperation::ThreadGetCurrentScheduling
         | abi::NativeOperation::ThreadGetScheduling
         | abi::NativeOperation::VirtualCpuGetScheduling => {
@@ -604,8 +622,36 @@ pub(super) fn dispatch_operation(
         abi::NativeOperation::CpuInspectorProfileRead => {
             handlers::sys_cpu_inspector_profile_read(services, receiver, arguments)
         }
+        abi::NativeOperation::CpuInspectorTraceStart => {
+            handlers::sys_cpu_inspector_trace_start(services, receiver, arguments)
+        }
+        abi::NativeOperation::CpuInspectorTraceStop => {
+            handlers::sys_cpu_inspector_trace_stop(services, receiver, arguments)
+        }
+        abi::NativeOperation::CpuInspectorTraceRead => {
+            handlers::sys_cpu_inspector_trace_read(services, receiver, arguments)
+        }
         abi::NativeOperation::CpuInspectorRead => {
             handlers::sys_cpu_inspector_read(services, receiver, arguments)
         }
+    };
+    #[cfg(feature = "kernel-trace")]
+    if trace_call {
+        crate::tracepoint!(
+            Syscall,
+            "syscall_exit",
+            thread = services.trace_thread_id(),
+            status = match &action {
+                NativeAction::Return(result) | NativeAction::Yield(result) =>
+                    result.status() as u64,
+                NativeAction::ExitThread { status } | NativeAction::ExitProcess { status } =>
+                    *status as u64,
+            },
+            returned = u64::from(matches!(
+                &action,
+                NativeAction::Return(_) | NativeAction::Yield(_)
+            ))
+        );
     }
+    action
 }

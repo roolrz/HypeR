@@ -11,6 +11,9 @@ unwinds bounded **kernel** frame-pointer chains, and labels Native-user and gues
 execution without reading their stacks. `perf` exports JSON-lines; the host tool
 produces folded stacks and a standalone SVG. This is not Linux perf-data format.
 
+For scheduler, syscall, IPC and I/O timelines, use the independent
+[`perf trace` / Perfetto interface](tracing.md). It does not need PMU hardware.
+
 ## Build and authority
 
 The production feature `pmu-profiling` is **off by default**, independently of

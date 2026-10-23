@@ -1042,6 +1042,197 @@ const SCHEDULING_PARAMETERS_FIELDS: &[Field] = &[
 ];
 
 pub const RECORDS: &[Record] = &[
+    // Static tracepoints expose fixed-size scalar records, never kernel pointers.
+    Record {
+        name: "trace_config",
+        minimum_size: 56,
+        size: 56,
+        alignment: 8,
+        fields: &[
+            Field {
+                name: "categories",
+                kind: FieldKind::U64,
+                offset: 0,
+            },
+            Field {
+                name: "duration_ms",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+            Field {
+                name: "capacity",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "cpu_mask",
+                kind: FieldKind::Bytes(32),
+                offset: 24,
+            },
+        ],
+    },
+    Record {
+        name: "trace_info",
+        minimum_size: 160,
+        size: 160,
+        alignment: 8,
+        fields: &[
+            Field {
+                name: "generation",
+                kind: FieldKind::U64,
+                offset: 0,
+            },
+            Field {
+                name: "started_ns",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+            Field {
+                name: "deadline_ns",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "categories",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+            Field {
+                name: "cpu_count",
+                kind: FieldKind::U64,
+                offset: 32,
+            },
+            Field {
+                name: "capacity",
+                kind: FieldKind::U64,
+                offset: 40,
+            },
+            Field {
+                name: "maximum_capacity",
+                kind: FieldKind::U64,
+                offset: 48,
+            },
+            Field {
+                name: "running",
+                kind: FieldKind::U64,
+                offset: 56,
+            },
+            Field {
+                name: "cpu_mask",
+                kind: FieldKind::Bytes(32),
+                offset: 64,
+            },
+            Field {
+                name: "revision",
+                kind: FieldKind::Bytes(64),
+                offset: 96,
+            },
+        ],
+    },
+    Record {
+        name: "trace_record",
+        minimum_size: 328,
+        size: 328,
+        alignment: 8,
+        fields: &[
+            Field {
+                name: "sequence",
+                kind: FieldKind::U64,
+                offset: 0,
+            },
+            Field {
+                name: "timestamp_ns",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+            Field {
+                name: "category",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "field_count",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+            Field {
+                name: "values",
+                kind: FieldKind::Bytes(32),
+                offset: 32,
+            },
+            Field {
+                name: "name",
+                kind: FieldKind::Bytes(64),
+                offset: 64,
+            },
+            Field {
+                name: "fields",
+                kind: FieldKind::Bytes(96),
+                offset: 128,
+            },
+            Field {
+                name: "source",
+                kind: FieldKind::Bytes(96),
+                offset: 224,
+            },
+            Field {
+                name: "line",
+                kind: FieldKind::U64,
+                offset: 320,
+            },
+        ],
+    },
+    Record {
+        name: "trace_batch",
+        minimum_size: 2656,
+        size: 2656,
+        alignment: 8,
+        fields: &[
+            Field {
+                name: "count",
+                kind: FieldKind::U64,
+                offset: 0,
+            },
+            Field {
+                name: "next",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+            Field {
+                name: "overwritten",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "incomplete",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+            Field {
+                name: "records",
+                kind: FieldKind::Bytes(2624),
+                offset: 32,
+            },
+        ],
+    },
+    Record {
+        name: "trace_thread",
+        minimum_size: 72,
+        size: 72,
+        alignment: 8,
+        fields: &[
+            Field {
+                name: "thread",
+                kind: FieldKind::U64,
+                offset: 0,
+            },
+            Field {
+                name: "name",
+                kind: FieldKind::Bytes(64),
+                offset: 8,
+            },
+        ],
+    },
     Record {
         name: "scheduling_parameters",
         fields: SCHEDULING_PARAMETERS_FIELDS,

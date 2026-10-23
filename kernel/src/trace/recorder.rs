@@ -4,7 +4,7 @@
 use super::{Category, Filter, Record, Site};
 use crate::sync::{
     SpinLock,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 const FILTER_BITS: u32 = 8;
@@ -55,6 +55,7 @@ struct Ring<const N: usize> {
     generation: u64,
     next: u64,
     records: [Option<Record>; N],
+    capacity: usize,
 }
 impl<const N: usize> Ring<N> {
     const fn new() -> Self {
@@ -62,6 +63,7 @@ impl<const N: usize> Ring<N> {
             generation: 0,
             next: 0,
             records: [None; N],
+            capacity: N,
         }
     }
 }
@@ -104,6 +106,7 @@ struct Control {
 /// pins producers to the CPU whose ring they select.
 pub struct Recorder<const CPUS: usize, const CAPACITY: usize> {
     requested: AtomicU64,
+    capacity: AtomicUsize,
     control: SpinLock<Control>,
     cpus: [Cpu<CAPACITY>; CPUS],
 }
@@ -119,6 +122,7 @@ impl<const CPUS: usize, const CAPACITY: usize> Recorder<CPUS, CAPACITY> {
         assert!(CPUS > 0 && CAPACITY > 0);
         Self {
             requested: AtomicU64::new(0),
+            capacity: AtomicUsize::new(CAPACITY),
             control: SpinLock::new(Control {
                 generation: 0,
                 stopped: true,
@@ -130,7 +134,12 @@ impl<const CPUS: usize, const CAPACITY: usize> Recorder<CPUS, CAPACITY> {
     /// Start explicitly discards the previous capture. Rings reset lazily on
     /// their first new event, avoiding a large clear in the control path.
     pub fn start(&self, filter: Filter) -> Result<Session, Error> {
-        if filter.0 == 0 {
+        self.start_with_capacity(filter, CAPACITY)
+    }
+
+    /// Selects a bounded overwrite window without allocating in producer context.
+    pub fn start_with_capacity(&self, filter: Filter, capacity: usize) -> Result<Session, Error> {
+        if filter.0 == 0 || capacity == 0 || capacity > CAPACITY {
             return Err(Error::InvalidFilter);
         }
         self.control
@@ -146,6 +155,7 @@ impl<const CPUS: usize, const CAPACITY: usize> Recorder<CPUS, CAPACITY> {
                 for cpu in &self.cpus {
                     cpu.loss.store(generation << 2, Ordering::Relaxed);
                 }
+                self.capacity.store(capacity, Ordering::Relaxed);
                 control.generation = generation;
                 control.stopped = false;
                 // Publishes the initialized loss stamps and the new filter together.
@@ -242,6 +252,7 @@ impl<const CPUS: usize, const CAPACITY: usize> Recorder<CPUS, CAPACITY> {
                 if ring.generation != generation {
                     ring.generation = generation;
                     ring.next = 0;
+                    ring.capacity = self.capacity.load(Ordering::Relaxed);
                 }
                 let Some(next) = ring.next.checked_add(1) else {
                     cpu.lost(generation);
@@ -253,7 +264,7 @@ impl<const CPUS: usize, const CAPACITY: usize> Recorder<CPUS, CAPACITY> {
                     site,
                     values: fields(),
                 };
-                ring.records[ring.next as usize % CAPACITY] = Some(record);
+                ring.records[ring.next as usize % ring.capacity] = Some(record);
                 ring.next = next;
             })
             .is_none()
@@ -284,14 +295,14 @@ impl<const CPUS: usize, const CAPACITY: usize> Recorder<CPUS, CAPACITY> {
                         } else {
                             0
                         };
-                        let oldest = end.saturating_sub(CAPACITY as u64);
+                        let oldest = end.saturating_sub(ring.capacity as u64);
                         let first = cursor.max(oldest);
                         let count = end
                             .saturating_sub(first)
                             .min(out.len().min(READ_BATCH) as u64)
                             as usize;
                         for (index, dst) in out.iter_mut().take(count).enumerate() {
-                            *dst = ring.records[(first as usize + index) % CAPACITY];
+                            *dst = ring.records[(first as usize + index) % ring.capacity];
                         }
                         Batch {
                             count,

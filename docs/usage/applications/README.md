@@ -20,7 +20,7 @@ The shell also has builtins, including `echo` and `printf`.
 | Watch CPU and process activity | [top](top.md) |
 | Read physical memory totals and cache accounting | [free](free.md) |
 | Compare allocation/cache snapshots | [memstat](../diagnostics/memory-diagnostics.md) |
-| Sample kernel CPU activity and generate flame graphs | [perf](../diagnostics/profiling.md) |
+| Sample CPU activity or record kernel event timelines | [perf / flame graphs](../diagnostics/profiling.md), [perf trace / Perfetto](../diagnostics/tracing.md) |
 | Inspect objects, handles and permissions | [handle](handle.md) |
 | Inspect executable/shared-library dependencies | [ldd](ldd.md) |
 | Start, stop, inspect or attach to a VM | [vmm](vmm.md) |

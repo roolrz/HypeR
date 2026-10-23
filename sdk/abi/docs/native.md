@@ -857,6 +857,9 @@ RISC-V ISA extensions accepted in guest configuration.
 - guest_interrupt_create borrows VirtualMachine WRITE and exclusively reserves an AArch64 device interrupt line, excluding built-in and physically assigned interrupts and all existing notification sources. It returns a GuestInterrupt with WRITE, TRANSFER and INSPECT. Creation is allowed while installed or running, serialized with VM stop. guest_interrupt_set_level accepts only 0 or 1 and fails once the VM begins retirement or the source closes. Closing the final active handle deasserts the line; its reservation persists until VM retirement. The source implements no UART, PCI or virtio device policy.
 - guest_notification_access requires frontend VirtualMachine WRITE and addresses an existing connection by original_base. Operation 0 reads pending interrupt status without acknowledgement, 1 reads and acknowledges that status atomically, and 2 submits a queue-index notification (value &lt; 32). For operations 0 and 1 value must be zero; unknown operations are rejected. It shares the direct MMIO source state and serialization. PCI bus-master disable suppresses notifications; PCI memory-decode disable does not suppress this explicit transport fallback. Closure rejects accesses. No backend identity, control operation, DMA lease or epoch can be changed through this call.
 - guest_notification_configure requires frontend VirtualMachine WRITE. original_base identifies an existing connection by its creation address; base is a page-aligned 4 KiB window wholly contained in an installed userspace MMIO reservation and, while decoding is enabled, may not overlap another enabled I/O route. Flags 0 select the original virtio-MMIO register layout; bit 0 selects modern virtio-PCI, bit 1 enables memory decoding, bit 2 masks INTx, and bit 3 enables queue notifications (bus master). Unknown flags or PCI flags without bit 0 are rejected. PCI uses a 16-bit queue-index write at BAR+0x50 and a read-to-clear 8-bit ISR at BAR+0x60. Relocation, decode, and IRQ-mask changes serialize with source state and VM retirement. The operation cannot change the admitted backend, IRQs, DMA ownership, or epoch; disabling decode is not proof of backend quiescence.
+- cpu_inspector_trace_start requires CpuInspector SET_ATTRIBUTES and an initialized trace_config. It starts one global generation, rejects an active/stopping capture, and replaces a stopped capture. Categories are bit flags 1 scheduler, 2 IPC, 4 Native syscall, 8 block I/O, 16 memory faults, 32 IRQ, 64 VM; zero and unknown bits fail. Duration is 1..300000 ms; capacity is 64..4096 retained events per CPU. cpu_mask is four little-endian u64 words; zero selects all online CPUs, and offline bits fail. The kernel closes capture at the deadline through an ordinary callout, independent of the collector lifetime; execution can be later if that worker is delayed. Feature-disabled kernels return NOT_SUPPORTED.
+- cpu_inspector_trace_stop requires SET_ATTRIBUTES and the exact generation. It closes producer admission before joining short in-flight writers; BUSY requires retry. Repeated successful stop is idempotent until another capture starts. Generation is an observation/control token, not a capability or private capture owner. Any appropriately authorized inspector may control the global session.
+- cpu_inspector_trace_read requires INSPECT_DETAILS. CPU UINT64_MAX selects trace_info (160 bytes, generation and cursor zero). CPU UINT64_MAX-1 selects trace_thread (72 bytes, exact generation, cursor is scheduler ThreadId); names are live best-effort observations, not authority. Ordinary online CPU indices select trace_batch (2656 bytes, eight trace_record entries) with exact generation and a per-CPU cursor. Returned value0 is the exact written size. next advances across overwritten and returned records; count zero while running is not EOF. incomplete is sticky per generation/CPU and means unquantified producer loss. Stop freezes records and loss metadata until next start. Strings are UTF-8 with NUL padding, truncated to fixed bounds; all reserved/unused bytes are zero. No kernel pointer, raw handle encoding or userspace payload is exported. Event vocabulary is diagnostic and identified by the included build revision, not a stable behavioral ABI.
 
 ## Invocations
 
@@ -1997,6 +2000,66 @@ Object-local method `cpu_inspector_profile_read`.
 | Results | `supported_size: byte_count` |
 | Capability effects | `inspector: Borrow, kind=cpu_inspector, rights=0x200000000` |
 | User memory | `output: Write, len=output_size bytes, max-bytes=192; order=0` |
+| Execution | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` |
+| Audit | `Object` |
+
+Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+
+Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+
+### `cpu_inspector_trace_start`
+
+Object-local method `cpu_inspector_trace_start`.
+
+| Property | Contract |
+| --- | --- |
+| Receiver | `inspector: Borrow, kind=cpu_inspector, rights=0x80000000` |
+| Operation | 260 |
+| Feature | `Core` |
+| Arguments | `configuration: user_address` |
+| Results | `generation: u64` |
+| Capability effects | `inspector: Borrow, kind=cpu_inspector, rights=0x80000000` |
+| User memory | `configuration: Read, fixed-bytes=56, record=trace_config; order=0` |
+| Execution | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` |
+| Audit | `Object` |
+
+Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+
+Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+
+### `cpu_inspector_trace_stop`
+
+Object-local method `cpu_inspector_trace_stop`.
+
+| Property | Contract |
+| --- | --- |
+| Receiver | `inspector: Borrow, kind=cpu_inspector, rights=0x80000000` |
+| Operation | 261 |
+| Feature | `Core` |
+| Arguments | `generation: u64` |
+| Results | — |
+| Capability effects | `inspector: Borrow, kind=cpu_inspector, rights=0x80000000` |
+| User memory | — |
+| Execution | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` |
+| Audit | `Object` |
+
+Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+
+Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+
+### `cpu_inspector_trace_read`
+
+Object-local method `cpu_inspector_trace_read`.
+
+| Property | Contract |
+| --- | --- |
+| Receiver | `inspector: Borrow, kind=cpu_inspector, rights=0x200000000` |
+| Operation | 262 |
+| Feature | `Core` |
+| Arguments | `generation: u64`, `cpu: u64`, `cursor: u64`, `output: user_address`, `output_size: byte_count` |
+| Results | `supported_size: byte_count` |
+| Capability effects | `inspector: Borrow, kind=cpu_inspector, rights=0x200000000` |
+| User memory | `output: Write, len=output_size bytes, max-bytes=2656; order=0` |
 | Execution | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` |
 | Audit | `Object` |
 
@@ -4685,6 +4748,71 @@ Arguments and auxiliary results follow the listed register order; neither list i
 Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
 
 ## Public records
+
+### `trace_config`
+
+Minimum prefix: 56 bytes; size: 56 bytes; alignment: 8 bytes.
+
+| Offset | Field | Type |
+| ---: | --- | --- |
+| 0 | `categories` | `u64` |
+| 8 | `duration_ms` | `u64` |
+| 16 | `capacity` | `u64` |
+| 24 | `cpu_mask` | `bytes[32]` |
+
+### `trace_info`
+
+Minimum prefix: 160 bytes; size: 160 bytes; alignment: 8 bytes.
+
+| Offset | Field | Type |
+| ---: | --- | --- |
+| 0 | `generation` | `u64` |
+| 8 | `started_ns` | `u64` |
+| 16 | `deadline_ns` | `u64` |
+| 24 | `categories` | `u64` |
+| 32 | `cpu_count` | `u64` |
+| 40 | `capacity` | `u64` |
+| 48 | `maximum_capacity` | `u64` |
+| 56 | `running` | `u64` |
+| 64 | `cpu_mask` | `bytes[32]` |
+| 96 | `revision` | `bytes[64]` |
+
+### `trace_record`
+
+Minimum prefix: 328 bytes; size: 328 bytes; alignment: 8 bytes.
+
+| Offset | Field | Type |
+| ---: | --- | --- |
+| 0 | `sequence` | `u64` |
+| 8 | `timestamp_ns` | `u64` |
+| 16 | `category` | `u64` |
+| 24 | `field_count` | `u64` |
+| 32 | `values` | `bytes[32]` |
+| 64 | `name` | `bytes[64]` |
+| 128 | `fields` | `bytes[96]` |
+| 224 | `source` | `bytes[96]` |
+| 320 | `line` | `u64` |
+
+### `trace_batch`
+
+Minimum prefix: 2656 bytes; size: 2656 bytes; alignment: 8 bytes.
+
+| Offset | Field | Type |
+| ---: | --- | --- |
+| 0 | `count` | `u64` |
+| 8 | `next` | `u64` |
+| 16 | `overwritten` | `u64` |
+| 24 | `incomplete` | `u64` |
+| 32 | `records` | `bytes[2624]` |
+
+### `trace_thread`
+
+Minimum prefix: 72 bytes; size: 72 bytes; alignment: 8 bytes.
+
+| Offset | Field | Type |
+| ---: | --- | --- |
+| 0 | `thread` | `u64` |
+| 8 | `name` | `bytes[64]` |
 
 ### `scheduling_parameters`
 

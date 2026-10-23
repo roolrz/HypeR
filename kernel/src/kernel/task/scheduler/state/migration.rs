@@ -288,6 +288,12 @@ impl Scheduler {
                     return Err(Error::InvalidThreadState);
                 }
                 self.enqueue_ready_or_defer(id, plan.target)?;
+                crate::tracepoint!(
+                    Scheduler,
+                    "sched_migrate",
+                    thread = id.get(),
+                    target_cpu = plan.target.get() as u64
+                );
                 Ok(Some(ReadyOutcome {
                     changed: true,
                     target_cpu: plan.target,
@@ -332,6 +338,12 @@ impl Scheduler {
             return Err(Error::InvalidThreadState);
         }
         self.enqueue_ready_or_defer(id, plan.target)?;
+        crate::tracepoint!(
+            Scheduler,
+            "sched_migrate",
+            thread = id.get(),
+            target_cpu = plan.target.get() as u64
+        );
         Ok(ReadyOutcome {
             changed: true,
             target_cpu: plan.target,

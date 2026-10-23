@@ -346,6 +346,20 @@ impl CpuScheduler {
                     "task::scheduler::state::prepare_local_switch invariant",
                 )
             });
+        crate::tracepoint!(
+            Scheduler,
+            "sched_switch",
+            prev = current.get(),
+            next = next.get(),
+            prev_state = self
+                .thread_authority()
+                .with_thread(current, |_thread, schedule| schedule.state as u64)
+                .unwrap_or(0),
+            next_class = self
+                .thread_authority()
+                .with_thread(next, |_thread, schedule| schedule.scheduling.class() as u64)
+                .unwrap_or(0)
+        );
         self.current = next;
         Ok(PreparedContextSwitch {
             previous,
