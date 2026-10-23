@@ -54,8 +54,10 @@ fstab syntax and the independent system-root handoff.
 The manager gives each worker its exclusive volume, bounded resource domain,
 parent-lifetime channel and transport rendezvous. It retains the child process
 and task group. Workers receive no task factory, device authority or mount-root
-capability. A worker validates its root and offers a byte-channel endpoint and
-shared VMO; the manager publishes that transport at the configured mountpoint.
+capability. A worker validates its root and offers a byte-channel endpoint,
+shared metadata VMO and, for a block-backed provider, a block queue. The manager
+binds that queue and its read-only source window when publishing the configured
+mountpoint. Providers without a block device use the buffered transport instead.
 The formal `hyper-fs-service` library owns this handshake and ordered RPC.
 Bootstrap workers include their manager-owned transport module instead of linking
 a general service library. Format adapters implement media operations. The manager is outside the file
@@ -89,8 +91,10 @@ explicit lock before being used on a path that serves their own filesystem.
 
 Each original worker completes its current request, flushes media state and
 stops consuming the request channel. It moves its exclusive `NativeBlock`, the
-same byte-channel server endpoint and shared VMO, and the last completed request
-sequence to the replacement. The manager's client endpoint and shared-buffer
+same byte-channel server endpoint, shared metadata VMO and logical block queue,
+and the last completed request sequence to the replacement. The replacement
+exports the same queue-owned read-only source window; it does not substitute
+a new queue for the live mount. The manager's client endpoint and shared-buffer
 owner also move; no unmount, remount, namespace replacement or block reactivation
 occurs. Requests queued during the brief transfer remain queued on that endpoint.
 Kernel file identities, open handles, content protection and cached pages remain
@@ -171,7 +175,8 @@ on the old root and does not launch the system graph.
 
 `hyper-filesystem` defines explicit little-endian messages for stat, batched
 directory enumeration, positioned reads and writes, create, remove, rename,
-resize, sync, timestamps and reading symbolic-link targets. It contains no FAT attributes
+resize, sync, timestamps, reading symbolic-link targets and physical read plans.
+It contains no FAT attributes
 or on-disk structures. Paths are bounded UTF-8 relative paths without dot, parent
 or empty components.
 Directory enumeration returns ordinary children; format adapters exclude
@@ -183,22 +188,47 @@ bytes. The common VFS performs bounded resolution, including absolute and parent
 components. Canonical paths remain the content identity contract; distinct
 on-disk hard-link paths do not yet share a kernel content identity.
 
-Each mount owns one ordered `ByteChannel` and one resident 512 KiB writable VMO.
-The kernel serializes requests under a sleepable mount mutex. Metadata travels
-in the channel; file bytes and directory batches travel in the shared range.
+Each mount owns one ordered `ByteChannel` and a resident 512 KiB writable
+metadata VMO. A block-backed mount additionally binds one logical block queue
+and its separate 512 KiB kernel-owned source window.
+The worker has only read-only mapping authority to the source window. The kernel
+serializes requests under a sleepable mount mutex. Requests travel in the channel;
+directory batches, read plans and buffered fallback reads use the writable VMO.
+Block-backed write payload uses the read-only window. A provider without a
+block queue uses this same buffered VMO for file payload; its write token is
+zero. Token zero never authorizes a block-queue source-window submission.
 Directory replies carry at most 4 KiB, with an exact starting checkpoint,
 record count, EOF indication, and validated variable-length names and attributes.
 A non-EOF reply must make progress; a batch cannot repeat a checkpoint or return
 to its starting checkpoint. The kernel copies and validates the complete
-batch before retaining it; it never caches a live shared-memory view. The kernel
-finishes writing an input range before publishing a write request. Receiving a request
-transfers ownership of that range to the sole worker. Publishing its reply gives
-ownership back. The kernel never treats shared bytes as borrowed Rust objects.
+batch before retaining it; it never caches a live shared-memory view.
+
+For block-backed writes, the kernel finishes copying application input into
+the source window before publishing a
+write request with an operation token. The worker submits only ranges belonging
+to that active token; kernel leases retain the source until completion. It must
+join all accepted writes before replying. Reply invalidates the token, and any
+remaining lease retires the mount rather than permitting source reuse. No
+writable source handle is exported, and a successful mount's source backing is
+never rebound to another mount. The kernel never treats shared bytes as borrowed
+Rust objects.
 The response must match the operation and increasing request identifier, fit the
 exact frame size, and contain valid lengths, names, kinds and timestamps.
 A valid media name longer than the Native 255-byte component limit fails that
 enumeration with `Unsupported`; it neither truncates the name nor retires the
 mount. The filesystem wire format permits up to 1,020 UTF-8 bytes for FAT names.
+
+`ReadExtents` returns a bounded prefix of a file read: at most 64 physical
+byte-offset/length pairs describing at most 512 KiB. The reply is at most 1,040
+bytes, including its total-length and count header. Zero-length plans mean EOF;
+nonempty extents must make progress. Byte offsets support EROFS inline tails.
+The kernel copies the entire plan out of shared memory, validates its lengths,
+arithmetic and mount-volume bounds, then performs the reads using the bound
+queue's volume authority while holding the filesystem transaction lock. The
+worker never receives writable cache-page mappings. Mounts without a block
+queue skip physical extent requests. Unsupported raw layouts can also fall back
+to positioned buffered reads; compressed or transformed formats are not implied
+by extent support.
 
 A request timeout, channel closure or malformed reply permanently
 retires the mount generation. Its shared range is never reused for another
@@ -244,10 +274,20 @@ name, attribute and directory hits use that mutex to serialize with mutations.
 The worker returns the canonical stored leaf name for every lookup. The kernel
 registry maps canonical paths to an in-memory, never-reused node incarnation.
 Aliases therefore converge on one content record and advisory-lock identity.
-All media access goes through the authoritative worker; independent out-of-band
-writers violate this contract. Live node leases prevent unlink. Rename updates
+The authoritative worker controls media layout and mutation ordering. The
+kernel executes its validated read plans but does not parse or independently
+modify the filesystem. Out-of-band writers violate this contract. Live node leases prevent unlink. Rename updates
 registered descendant paths after a successful backend mutation. Unlink removes
 the path binding, so recreating a name cannot see pages belonging to the old file.
+
+On cold bulk reads the kernel reserves private fill pages and copies directly
+from the I/O VM exchange pool into them. Pages enter the clean cache only after
+successful completion and revision validation; failed or stale fills are
+released rather than published. Warm reads copy cache bytes once to the caller.
+The exchange pool remains the sole device-visible data storage; neither the
+worker nor the I/O VM obtains writable access to cached pages. See
+[block I/O data paths](block-io.md#filesystem-integration) for copy boundaries and
+fallbacks.
 
 Cached pages pin the content record rather than an open capability. Closing the
 last handle leaves its identity available while cached pages survive; reopening

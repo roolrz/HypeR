@@ -153,3 +153,44 @@ pub(in crate::kernel::abi::native) fn sys_block_queue_wait_space(
     })();
     NativeAction::Return(status_only(result))
 }
+
+#[inline(never)]
+pub(in crate::kernel::abi::native) fn sys_block_queue_create_window(
+    services: &impl GuestIoServices,
+    receiver: &InvocationReceiver,
+    arguments: &Arguments,
+) -> NativeAction {
+    let result = (|| {
+        require_zero(arguments)?;
+        services.create_block_queue_window(receiver).map_err(status)
+    })();
+    NativeAction::Return(handle_result(result))
+}
+
+#[inline(never)]
+pub(in crate::kernel::abi::native) fn sys_block_queue_submit_window(
+    services: &impl GuestIoServices,
+    receiver: &InvocationReceiver,
+    arguments: &Arguments,
+) -> NativeAction {
+    let result = (|| {
+        require_zero(&arguments[4..])?;
+        let count = parse_u32(arguments[1])?;
+        if arguments[0] == 0
+            || count == 0
+            || u64::from(count) > HYPER_NATIVE_BLOCK_QUEUE_BATCH_MAX
+            || arguments[3] != u64::from(count) * HYPER_NATIVE_BLOCK_QUEUE_WINDOW_RANGE_BYTES
+        {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        let frame = optional_user_slice(arguments[2], arguments[3])?
+            .ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+        services
+            .submit_block_queue_window(receiver, arguments[0], count, frame)
+            .map_err(status)
+    })();
+    NativeAction::Return(match result {
+        Ok(ticket) => success([ticket, 0]),
+        Err(status) => failure(status),
+    })
+}

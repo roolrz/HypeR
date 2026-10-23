@@ -5,6 +5,7 @@ use hyper_filesystem::protocol::*;
 
 fn request() -> Request<'static> {
     Request {
+        window_token: 0,
         cursor: hyper_filesystem::protocol::DirectoryCursor::START,
         sequence: 17,
         operation: Operation::Rename,
@@ -235,5 +236,82 @@ fn compact_entry_round_trip_preserves_times_and_rejects_trailing_bytes() -> Resu
     assert_eq!(result.name(), "abc");
     assert_eq!(result.created, entry.created);
     assert!(entry_decode_into(&bytes[..length + 1], &mut result).is_none());
+    Ok(())
+}
+
+#[test]
+fn read_extent_plans_merge_prefixes_and_reject_malformed_ranges() -> Result<(), &'static str> {
+    let mut bytes = [0; 48];
+    let mut plan = ReadExtentPlanBuilder::new(&mut bytes).ok_or("builder")?;
+    assert_eq!(plan.push(4096, 512), Some(true));
+    assert_eq!(plan.push(4608, 512), Some(true));
+    assert_eq!(plan.push(8195, 7), Some(true));
+    assert_eq!(plan.push(16384, 512), Some(false));
+    let count = plan.finish();
+    let decoded = ReadExtentPlan::decode(&bytes[..count], 1031).ok_or("plan")?;
+    assert_eq!(decoded.length(), 1031);
+    assert_eq!(
+        decoded.extents().collect::<Vec<_>>(),
+        [
+            ReadExtent {
+                offset: 4096,
+                length: 1024
+            },
+            ReadExtent {
+                offset: 8195,
+                length: 7
+            },
+        ]
+    );
+    assert!(ReadExtentPlan::decode(&bytes[..count], 1030).is_none());
+    assert!(ReadExtentPlan::decode(&bytes[..count - 1], 1031).is_none());
+    bytes[24..32].copy_from_slice(&0u64.to_le_bytes());
+    assert!(ReadExtentPlan::decode(&bytes[..count], 1031).is_none());
+    bytes[24..32].copy_from_slice(&1024u64.to_le_bytes());
+    bytes[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
+    assert!(ReadExtentPlan::decode(&bytes[..count], 1031).is_none());
+    let length = ReadExtentPlanBuilder::new(&mut bytes)
+        .ok_or("empty builder")?
+        .finish();
+    assert_eq!(
+        ReadExtentPlan::decode(&bytes[..length], 512)
+            .ok_or("EOF")?
+            .length(),
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn write_accepts_buffered_or_window_modes_but_other_operations_reject_tokens()
+-> Result<(), &'static str> {
+    let mut bytes = [0; REQUEST_BYTES];
+    let mut write = Request {
+        operation: Operation::Write,
+        target: "",
+        length: 512,
+        window_token: 77,
+        ..request()
+    };
+    let length = write.encode(&mut bytes).ok_or("window write")?;
+    assert_eq!(
+        Request::decode(&bytes[..length])
+            .ok_or("decode")?
+            .window_token,
+        77
+    );
+    bytes[112..120].fill(0);
+    assert_eq!(
+        Request::decode(&bytes[..length])
+            .ok_or("buffered write")?
+            .window_token,
+        0
+    );
+    write.window_token = 0;
+    assert!(write.encode(&mut bytes).is_some());
+    write.operation = Operation::ReadExtents;
+    assert!(write.encode(&mut bytes).is_some());
+    write.window_token = 77;
+    assert!(write.encode(&mut bytes).is_none());
     Ok(())
 }

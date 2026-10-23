@@ -31,8 +31,8 @@ mod vm;
 mod wait;
 
 pub use block_queue::{
-    block_queue_create, block_queue_info, block_queue_reap, block_queue_submit, block_queue_wait,
-    block_queue_wait_space,
+    block_queue_create, block_queue_create_window, block_queue_info, block_queue_reap,
+    block_queue_submit, block_queue_submit_window, block_queue_wait, block_queue_wait_space,
 };
 pub use console::{
     console_discard_input, console_read, console_write, virtual_serial_acknowledge_output,

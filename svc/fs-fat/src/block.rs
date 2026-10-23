@@ -43,6 +43,20 @@ pub trait BlockDevice {
     }
     fn read_sectors(&mut self, first: u64, output: &mut [u8]) -> Result<(), Error>;
     fn write_sectors(&mut self, first: u64, input: &[u8]) -> Result<(), Error>;
+    /// Establish a readonly kernel-window input for this synchronous filesystem
+    /// operation. Generic devices retain the ordinary copying implementation.
+    fn begin_write_window(&mut self, _token: u64, _input: &[u8]) -> Result<(), Error> {
+        Ok(())
+    }
+    fn end_write_window(&mut self) {}
+    /// This is an optimization hint only; the kernel validates the operation
+    /// token and every submitted offset independently of this pointer check.
+    fn is_write_window(&self, _input: &[u8]) -> bool {
+        false
+    }
+    fn submit_write_window(&mut self, _first: u64, _input: &[u8]) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
     /// Complete disjoint writes, possibly in parallel and in any order. Check
     /// every range before submitting the first request. On error, any subset
     /// may have reached the medium; no borrowed input outlives this call.

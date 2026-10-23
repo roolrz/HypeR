@@ -60,7 +60,7 @@
  *
  * - Native block creation dedicates one fully resident 1048576-byte guest-memory grant permanently to one kernel virtio-scsi initiator; repeated creation from that grant fails. The backend VM must retain the matching mapping until execution and physical DMA are quiescent. Six standard split queues (control, event, and four request queues) have size 8, descriptor offsets n*4096, available offsets n*4096+256, and used offsets n*4096+512, relative to guest_base. Userspace negotiates VERSION_1 with the backend before activation. Activation enables notifications and issues READ CAPACITY(16), accepting only 512-byte sectors; capacity is never supplied by userspace. The activated block object survives filesystem worker handoff; a clean unmount returns that object rather than activating a replacement. Synchronous native_block_transfer calls use a persistent internal logical queue on the same device engine as explicit BlockQueue submissions, including their overlap ordering and flush fences. The transport has four independent command heads and a shared 512 KiB data pool. A command can use up to four contiguous 128 KiB data spans, so larger merged commands trade command concurrency for transfer size. Requests use shared queues and kernel completion notifications, not per-request userspace RPC. Unretired request failures permanently disconnect the initiator and never recycle its buffer. PEER_CLOSED reports disconnection. The physical pages remain retained by backend mappings until VM/DMA retirement; notification closure alone never proves DMA quiescence.
  *
- * - filesystem_mount borrows a READ|WRITE|WAIT ByteChannel, a READ|WRITE|MAP shared VMO and a WRITE|EXECUTE Directory. The kernel retains the transport and buffer, validates the worker root, and publishes a fresh mount and filesystem identity at the capability-relative path. The VMO must satisfy the published filesystem protocol capacity and pinning contract. read_only is exactly zero or one; read-only mounts reject mutating protocol operations in the kernel independently of worker policy. Media discovery, format selection and exclusive NativeBlock ownership belong to the userspace filesystem manager and format worker, not this syscall.
+ * - filesystem_mount borrows a READ|WRITE|WAIT ByteChannel, a READ|WRITE|MAP shared VMO, an optional READ|WAIT BlockQueue bound to the exact volume (also WRITE for writable mounts), and a WRITE|EXECUTE Directory. A zero queue handle selects buffered requests for a provider without block storage; a nonzero queue binds immutable write windows and direct read plans. The kernel retains the transport and buffer, validates the worker root, and publishes a fresh mount and filesystem identity at the capability-relative path. The VMO must satisfy the published filesystem protocol capacity and pinning contract. read_only is exactly zero or one; read-only mounts reject mutating protocol operations in the kernel independently of worker policy. Media discovery, format selection and exclusive NativeBlock ownership belong to the userspace filesystem manager and format worker, not this syscall.
  *
  * - filesystem_mount_ramfs and filesystem_switch_root require MANAGE_NAMESPACE|WRITE|EXECUTE on the live namespace-root Directory anchor. Ordinary directory opens never confer MANAGE_NAMESPACE; only explicit capability duplication, delegation or root-anchor scope creation preserves it. Ramfs mount does not create or configure block filesystems. switch_root copies its request, at most 16 mount moves and every bounded UTF-8 path before namespace mutation; zero moves requires a null moves pointer. new_root and move sources resolve in the old namespace, while put_old and move targets resolve inside new_root. The root and all requested moves publish atomically. Existing non-anchor Directory and File capabilities retain their opened locations; existing root anchors follow the published root. A rejected transaction preserves all mount edges and the current root. Paths are at most 4096 bytes, nonempty and contain no NUL bytes. Layout, boot stages and the choice of put_old are userspace policy.
  *
@@ -176,7 +176,7 @@
  *
  * - guest_notification_configure requires frontend VirtualMachine WRITE. original_base identifies an existing connection by its creation address; base is a page-aligned 4 KiB window wholly contained in an installed userspace MMIO reservation and, while decoding is enabled, may not overlap another enabled I/O route. Flags 0 select the original virtio-MMIO register layout; bit 0 selects modern virtio-PCI, bit 1 enables memory decoding, bit 2 masks INTx, and bit 3 enables queue notifications (bus master). Unknown flags or PCI flags without bit 0 are rejected. PCI uses a 16-bit queue-index write at BAR+0x50 and a read-to-clear 8-bit ISR at BAR+0x60. Relocation, decode, and IRQ-mask changes serialize with source state and VM retirement. The operation cannot change the admitted backend, IRQs, DMA ownership, or epoch; disabling decode is not proof of backend quiescence.
  *
- * - block_queue_create derives a logical queue from an activated NativeBlock with READ or WRITE authority. The resulting rights are the source rights intersected with READ|WRITE|WAIT|INSPECT|TRANSFER. Capacity, byte limit and in-flight limit are bounded by queue and device ceilings; more queues do not bypass device admission. The initial device limit is 64 retained requests and 8 MiB of payload. Of these, one request and 512 KiB are reserved for the kernel-owned synchronous queue so a file-backed user copy can refill its pages while public queues retain completions. Public queues therefore share at most 63 requests and 7.5 MiB, also subject to remaining total capacity; userspace cannot select the reserved admission class. Queue attribution is fixed by the kernel resource domain at creation and survives capability transfer. NativeBlock and BlockQueue may move through capability rendezvous or staged process startup; buffered transfer is forbidden. Closing the parent NativeBlock closes its internal synchronous queue but does not close independently held derived queues. Priority adjustment and caller-selected attribution are not implemented.
+ * - block_queue_create derives a logical queue from an activated NativeBlock with READ or WRITE authority. The resulting rights include DUPLICATE plus the source rights intersected with READ|WRITE|WAIT|INSPECT|TRANSFER. Capacity, byte limit and in-flight limit are bounded by queue and device ceilings; more queues do not bypass device admission. The initial device limit is 64 retained requests and 8 MiB of payload. Of these, one request and 512 KiB are reserved for the kernel-owned synchronous queue so a file-backed user copy can refill its pages while public queues retain completions. Public queues therefore share at most 63 requests and 7.5 MiB, also subject to remaining total capacity; userspace cannot select the reserved admission class. Queue attribution is fixed by the kernel resource domain at creation and survives capability transfer. NativeBlock and BlockQueue may move through capability rendezvous or staged process startup; buffered transfer is forbidden. Closing the parent NativeBlock closes its internal synchronous queue but does not close independently held derived queues. Priority adjustment and caller-selected attribution are not implemented.
  *
  * - block_queue_submit atomically accepts one batch or returns an error with no submitted ranges. Read and write require READ and WRITE respectively; flush requires WRITE. The frame contains count pairs of little-endian u64 first_sector and byte_length, followed by concatenated write data only. Data lengths are nonzero complete sectors; ranges within one batch do not overlap. Reads carry no input payload. Flush has zero count and an empty frame. User bytes are copied before publication; no user pointer or writable user mapping remains a DMA source or destination after return. One nonzero ticket identifies aggregate completion; failed batches may have partial device effects.
  *
@@ -189,6 +189,10 @@
  * - block_queue_reap requires READ for read requests and WRITE for write or flush requests. It consumes a completed ticket only after a successful result copy. Successful reads require an exact-length output buffer in submitted-range order; failed reads and write or flush completions use an empty output. An invalid or faulting output leaves completion available for retry. Concurrent reaping is serialized; a losing caller receives busy or not_found rather than consuming another ticket generation.
  *
  * - Block queue ordering applies across logical queues on the same device: overlapping ranges preserve submission order whenever at least one request writes. Flush fences wait for earlier commands and prevent later commands from passing until the device flush completes. Closing a queue cancels pending work and discards unclaimed results, but in-flight DMA memory remains owned until completion or proven backend retirement. Completed, in-flight and pending requests remain bounded and charged, including a reaped request still retained by a concurrent waiter.
+ *
+ * - block_queue_create_window returns a fixed-size read-only VMO for the queue's Native staging window. Its handle permits READ|MAP|DUPLICATE|TRANSFER|INSPECT, never WRITE or EXECUTE. The kernel owns filling and lifetime; this is distinct from the exchange grant mapped into the I/O VM. Repeated calls identify the same queue-owned backing. A mapping exposes no general permission to submit its contents.
+ *
+ * - block_queue_submit_window accepts at most sixteen little-endian triples (first_sector, window_offset, byte_length). The nonzero operation token must identify an active filesystem write on this exact queue; stale tokens, invalid ranges and another queue's token fail. The queue retains immutable request ownership until all accepted batches finish. Ordinary applications retain the normal copying write ABI and never obtain these tokens. Metadata and unaligned sector updates may still use copied submissions. Window registration and queue binding survive filesystem worker handoff without reassigning authority to another device.
  */
 #ifndef HYPER_NATIVE_H
 #define HYPER_NATIVE_H
@@ -2642,6 +2646,24 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
  */
 #define HYPER_NATIVE_BLOCK_QUEUE_RANGE_BYTES UINT64_C(16)
 /**
+ * `block_queue_window_range_bytes` in the `block_queue_limits` constants domain.
+ *
+ * Bounded submission and completion storage. Completed entries remain charged until reaped.
+ * Numeric parameter or sentinel, not an enum discriminant.
+ *
+ * Bytes in one window write record: first sector, window offset, length.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_WINDOW_RANGE_BYTES UINT64_C(24)
+/**
+ * `block_queue_window_bytes` in the `block_queue_limits` constants domain.
+ *
+ * Bounded submission and completion storage. Completed entries remain charged until reaped.
+ * Numeric parameter or sentinel, not an enum discriminant.
+ *
+ * Read-only Native write staging window, distinct from the I/O VM grant.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_WINDOW_BYTES UINT64_C(524288)
+/**
  * `block_queue_transfer_bytes` in the `block_queue_limits` constants domain.
  *
  * Bounded submission and completion storage. Completed entries remain charged until reaped.
@@ -2682,7 +2704,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
  * Bounded submission and completion storage. Completed entries remain charged until reaped.
  * Numeric parameter or sentinel, not an enum discriminant.
  *
- * Zero selects any completed ticket in block_queue_wait; it is never a valid ticket.
+ * Zero selects any completed ticket in `block_queue_wait`; it is never a valid ticket.
  */
 #define HYPER_NATIVE_BLOCK_QUEUE_ANY_TICKET UINT64_C(0)
 /** @} */
@@ -6146,9 +6168,9 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
  * | Receiver | `directory: Borrow, kind=directory, rights=0xa0` |
  * | Operation | 274 |
  * | Feature | `Core` |
- * | Arguments | `channel: handle`, `buffer: handle`, `path: user_address`, `path_length: byte_count`, `read_only: u64` |
+ * | Arguments | `channel: handle`, `buffer: handle`, `path: user_address`, `path_length: byte_count`, `read_only: u64`, `queue: handle` |
  * | Results | — |
- * | Capability effects | `directory: Borrow, kind=directory, rights=0xa0`, `channel: Borrow, kind=byte_channel, rights=0x34`, `buffer: Borrow, kind=vmo, rights=0x70` |
+ * | Capability effects | `directory: Borrow, kind=directory, rights=0xa0`, `channel: Borrow, kind=byte_channel, rights=0x34`, `buffer: Borrow, kind=vmo, rights=0x70`, `queue: Borrow, kind=block_queue, rights=0x14` |
  * | User memory | `path: Read, len=path_length bytes, max-bytes=4096; order=0` |
  * | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
  * | Audit | `Capability` |
@@ -7282,7 +7304,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
  * | Feature | `Core` |
  * | Arguments | `capacity: u32`, `byte_limit: u64`, `inflight_limit: u32` |
  * | Results | `queue: handle` |
- * | Capability effects | `receiver: Borrow, kind=native_block, rights=0x0`, `queue: produce, kind=block_queue, inherited-from(receiver), mask=0x3e` |
+ * | Capability effects | `receiver: Borrow, kind=native_block, rights=0x0`, `queue: produce, kind=block_queue, fixed=0x1, inherited-from(receiver), mask=0x3e` |
  * | User memory | — |
  * | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
  * | Audit | `Capability` |
@@ -7397,6 +7419,48 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
  * Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
  */
 #define HYPER_NATIVE_OP_BLOCK_QUEUE_WAIT_SPACE UINT64_C(260)
+
+/**
+ * Object-local method `block_queue_create_window`.
+ *
+ * | Property | Contract |
+ * | --- | --- |
+ * | Receiver | `receiver: Borrow, kind=block_queue, rights=0x10` |
+ * | Operation | 261 |
+ * | Feature | `Core` |
+ * | Arguments | — |
+ * | Results | `window: handle` |
+ * | Capability effects | `receiver: Borrow, kind=block_queue, rights=0x10`, `window: produce, kind=vmo, fixed=0x5b` |
+ * | User memory | — |
+ * | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
+ * | Audit | `Capability` |
+ *
+ * Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+ *
+ * Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+ */
+#define HYPER_NATIVE_OP_BLOCK_QUEUE_CREATE_WINDOW UINT64_C(261)
+
+/**
+ * Object-local method `block_queue_submit_window`.
+ *
+ * | Property | Contract |
+ * | --- | --- |
+ * | Receiver | `receiver: Borrow, kind=block_queue, rights=0x20` |
+ * | Operation | 262 |
+ * | Feature | `Core` |
+ * | Arguments | `token: u64`, `count: u32`, `frame: user_address`, `frame_bytes: byte_count` |
+ * | Results | `ticket: u64` |
+ * | Capability effects | `receiver: Borrow, kind=block_queue, rights=0x20` |
+ * | User memory | `frame: Read, len=frame_bytes bytes, max-bytes=384; order=0` |
+ * | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
+ * | Audit | `Capability` |
+ *
+ * Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+ *
+ * Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+ */
+#define HYPER_NATIVE_OP_BLOCK_QUEUE_SUBMIT_WINDOW UINT64_C(262)
 
 /**
  * Return the auxiliary-result registers defined on a failure status.

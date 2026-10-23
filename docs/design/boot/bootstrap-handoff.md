@@ -226,8 +226,8 @@ mappings. System-startup must establish replacement owners before stopping them:
   For the I/O VM implementation, the VM, vCPUs, physical assignments, mailbox identities and DMA leases
   must survive the old runtime. Hardware consumers quiesce at completed request
   boundaries; transferring ownership must not reset the VM or device.
-- Filesystem replacements preserve the mounted transport, shared buffer and
-  request sequence. They complete accepted requests and flush format state
+- Filesystem replacements preserve the mounted transport, shared metadata buffer,
+  logical block queue, read-only source-window backing and request sequence. They complete accepted requests and flush format state
   before transferring exclusive block access. Unmounting and remounting is not
   an equivalent handoff for open files or protected executable mappings.
 - No formal interactive session exists before handoff. The new raw console
@@ -356,8 +356,9 @@ format/target state and kernel mount IDs with `HYPER-FS-DESCRIBE/1` (64 KiB maxi
 manager validates each mount ID against the live namespace, translating only
 the exact current root mount to `/`. It prepares all resident workers before sending `HYPER-FS-PREPARED/1`.
 Each old worker finishes accepted requests, synchronizes format state and
-transfers its exclusive NativeBlock, unchanged server endpoint, shared VMO and
-request sequence. The new worker reopens that volume and resumes the same
+transfers its exclusive NativeBlock, unchanged server endpoint, shared metadata
+VMO, logical block queue and request sequence. The new worker maps the same
+queue-owned read-only source window, reopens that volume and resumes the same
 transport; the kernel mount and open-file identities do not change. Directory
 continuation cookies remain tied to media identity, not process-local handles.
 Unserved volumes and the existing mount-administration endpoint transfer too.

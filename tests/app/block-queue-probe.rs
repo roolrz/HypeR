@@ -5,8 +5,10 @@
 //! Writes preserve existing sector bytes; normal filesystem acceptance tests
 //! subsequently exercise changed payloads and cold-restart durability.
 
-use hyper_os::block::{BlockQueue, NativeBlock, QueueConfig, ReadRequest, WriteRequest};
-use hyper_os::handle::Rights;
+use hyper_os::block::{
+    BlockQueue, NativeBlock, QueueConfig, ReadRequest, WindowWrite, WriteRequest,
+};
+use hyper_os::handle::{HandleRef, Rights, VmarObject};
 use hyper_os::{Error, Status};
 use std::time::Duration;
 
@@ -129,8 +131,67 @@ fn admission_wait(block: &NativeBlock) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn run(block: &NativeBlock, sectors: u64, readonly: bool) -> Result<(), String> {
+fn readonly_window(block: &NativeBlock, root: HandleRef<'_, VmarObject>) -> Result<(), String> {
+    use hyper_os::filesystem::SharedBuffer;
+    let queue = block.create_queue(QueueConfig::default()).map_err(show)?;
+    let window = queue.create_window().map_err(show)?;
+    let rights = window.info().map_err(show)?.rights;
+    require(
+        rights.contains(Rights::READ.union(Rights::MAP)) && !rights.contains(Rights::WRITE),
+        "window exported write authority",
+    )?;
+    require(
+        window.duplicate(rights.union(Rights::WRITE)).is_err(),
+        "window duplicate escalated write authority",
+    )?;
+    let second = queue.create_window().map_err(show)?;
+    require(
+        matches!(
+            SharedBuffer::from_memory(root, second, 512 * 1024),
+            Err(Error::Status(Status::ACCESS_DENIED))
+        ),
+        "window accepted writable mapping",
+    )?;
+    let mapping = SharedBuffer::from_readonly_memory(root, window, 512 * 1024).map_err(show)?;
+    let before = queue.info().map_err(show)?;
+    for token in [1, u64::MAX] {
+        require(
+            matches!(
+                queue.submit_window(
+                    token,
+                    &[WindowWrite {
+                        first: 0,
+                        offset: 0,
+                        bytes: 512
+                    }]
+                ),
+                Err(Error::Status(Status::INVALID_ARGUMENT))
+            ),
+            "unissued window token admitted I/O",
+        )?;
+    }
+    let after = queue.info().map_err(show)?;
+    require(
+        before.submitted_ranges == after.submitted_ranges && after.outstanding_requests == 0,
+        "invalid token changed queue admission",
+    )?;
+    // No filesystem binds this window, so no producer can modify its zeroed
+    // contents. A retained read mapping must outlive its original queue handle.
+    drop(queue);
+    require(
+        unsafe { mapping.bytes() }.iter().all(|byte| *byte == 0),
+        "closed queue invalidated readonly backing",
+    )
+}
+
+pub(super) fn run(
+    block: &NativeBlock,
+    sectors: u64,
+    readonly: bool,
+    root: HandleRef<'_, VmarObject>,
+) -> Result<(), String> {
     require(sectors >= 1024, "fixture volume too small")?;
+    readonly_window(block, root)?;
     admission_wait(block)?;
     let queue = block
         .create_queue(QueueConfig {

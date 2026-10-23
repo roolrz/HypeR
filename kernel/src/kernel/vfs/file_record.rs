@@ -13,6 +13,8 @@ use super::file_data::FileContent;
 use super::instance::Error;
 
 pub(crate) type CachePage = crate::kernel::io_cache::FilePage<FallibleArc<FileRecord>>;
+/// One bounded read whose immutable page pins outlive the content gate.
+pub(super) type ReadPages = crate::kernel::io_cache::PageRead<FallibleArc<FileRecord>>;
 
 /// Active nodes and cached pages share this exact content incarnation.
 ///

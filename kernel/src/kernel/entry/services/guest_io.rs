@@ -119,6 +119,27 @@ impl crate::kernel::abi::native::GuestIoServices for ProcessServices<'_> {
     ) -> Result<u64, crate::kernel::block::service::TransferError> {
         crate::kernel::block::async_service::submit(self.process, receiver, operation, count, frame)
     }
+    fn create_block_queue_window(
+        &self,
+        receiver: &InvocationReceiver,
+    ) -> Result<HandleValue, crate::kernel::block::service::TransferError> {
+        crate::kernel::block::async_service::create_window(self.process, receiver)
+    }
+    fn submit_block_queue_window(
+        &self,
+        receiver: &InvocationReceiver,
+        token: u64,
+        count: u32,
+        frame: UserSlice,
+    ) -> Result<u64, crate::kernel::block::service::TransferError> {
+        crate::kernel::block::async_service::submit_window(
+            self.process,
+            receiver,
+            token,
+            count,
+            frame,
+        )
+    }
     fn wait_block_queue(
         &self,
         receiver: &InvocationReceiver,
@@ -157,6 +178,7 @@ impl crate::kernel::abi::native::GuestIoServices for ProcessServices<'_> {
         &self,
         channel: HandleValue,
         buffer: HandleValue,
+        queue: Option<HandleValue>,
         directory: &InvocationReceiver,
         path: UserSlice,
         read_only: bool,
@@ -165,6 +187,7 @@ impl crate::kernel::abi::native::GuestIoServices for ProcessServices<'_> {
             self.process,
             channel,
             buffer,
+            queue,
             directory,
             path,
             read_only,

@@ -3356,6 +3356,16 @@ pub const INVOCATIONS: &[Invocation] = &[
             },
             scalar_argument("path_length", ValueKind::ByteCount),
             scalar_argument("read_only", ValueKind::U64),
+            Argument {
+                name: "queue",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("block_queue"),
+                    required_rights: RIGHT_READ | RIGHT_WAIT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
         ],
         results: &[],
         blocking: BlockingClass::MayBlock,
@@ -4983,9 +4993,10 @@ pub const INVOCATIONS: &[Invocation] = &[
             kind: ValueKind::Handle,
             handle: Some(ProducedHandle {
                 object: ProducedObject::Kind("block_queue"),
-                rights: ProducedRights::InheritedSubset {
+                rights: ProducedRights::FixedAndInherited {
+                    fixed_rights: RIGHT_DUPLICATE,
                     authority_source: "receiver",
-                    allowed_rights: RIGHT_READ
+                    inherited_rights: RIGHT_READ
                         | RIGHT_WRITE
                         | RIGHT_WAIT
                         | RIGHT_INSPECT
@@ -5154,6 +5165,68 @@ pub const INVOCATIONS: &[Invocation] = &[
             scalar_argument("deadline", ValueKind::U64),
         ],
         results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::Explicit,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Invocation {
+        operation: 261,
+        name: "block_queue_create_window",
+        feature: FeatureGate::Core,
+        receiver: invocation_receiver("block_queue", RIGHT_READ),
+        arguments: &[],
+        results: &[ResultValue {
+            name: "window",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("vmo"),
+                rights: ProducedRights::Fixed(
+                    RIGHT_READ | RIGHT_MAP | RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT,
+                ),
+            }),
+        }],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::Explicit,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Invocation {
+        operation: 262,
+        name: "block_queue_submit_window",
+        feature: FeatureGate::Core,
+        receiver: invocation_receiver("block_queue", RIGHT_WRITE),
+        arguments: &[
+            scalar_argument("token", ValueKind::U64),
+            scalar_argument("count", ValueKind::U32),
+            Argument {
+                name: "frame",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "frame_bytes",
+                        maximum_bytes: 384,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("frame_bytes", ValueKind::ByteCount),
+        ],
+        results: &[ResultValue {
+            name: "ticket",
+            kind: ValueKind::U64,
+            handle: None,
+        }],
         blocking: BlockingClass::MayBlock,
         cancellation: CancellationClass::Explicit,
         restart: RestartClass::Never,

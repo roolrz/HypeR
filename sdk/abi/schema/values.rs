@@ -465,12 +465,16 @@ constant_groups! {
     constants block_queue_limits {
         block_queue_batch_max = 16,
         block_queue_range_bytes = 16,
+        /// Bytes in one window write record: first sector, window offset, length.
+        block_queue_window_range_bytes = 24,
+        /// Read-only Native write staging window, distinct from the I/O VM grant.
+        block_queue_window_bytes = 524288,
         block_queue_transfer_bytes = 524288,
         block_queue_frame_bytes = 524544,
         block_queue_capacity_max = 32,
         block_queue_byte_limit_max = 8388608,
         block_queue_inflight_max = 4,
-        /// Zero selects any completed ticket in block_queue_wait; it is never a valid ticket.
+        /// Zero selects any completed ticket in `block_queue_wait`; it is never a valid ticket.
         block_queue_any_ticket = 0,
     }
 

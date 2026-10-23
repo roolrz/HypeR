@@ -34,7 +34,9 @@ userspace cannot claim the internal admission class. Synchronous `NativeBlock`
 calls use a persistent internal queue on the same engine, so they obey the same
 overlap ordering and device flush fences.
 
-Only the rights delegated from the parent capability are available on a queue.
+Queue I/O rights cannot exceed the parent block capability. A derived queue also
+supports duplication so a filesystem transport and its media adapter can retain
+the same logical producer; this does not create another exclusive block owner.
 Observing completion does not grant access to read data. A request ticket names
 an operation inside that queue; it is neither a global identifier nor an
 independent authority. A recycled slot cannot reinterpret an older ticket as a
@@ -54,12 +56,34 @@ A batch is validated in full before publication. Validation covers the selected
 operation, sector alignment, geometry, range overlap, total size, available
 quota and all frame lengths. Failed admission publishes no partial request.
 
-Writes take a private kernel-owned copy before submission returns. Reads retain
-kernel-owned result storage until collection. The caller can therefore reuse its
-original write buffer after successful admission, and no borrowed userspace
-pointer outlives a syscall. The existing transport still copies data to or from
-its dedicated device-visible buffers; the interface does not claim zero-copy
-DMA or scatter/gather directly from arbitrary application mappings.
+Ordinary public write submissions take a private kernel-owned copy before
+returning. Ordinary public reads retain kernel-owned result storage until
+collection. The caller can reuse its original write buffer after successful
+admission; no borrowed userspace pointer outlives a syscall.
+
+Block-backed filesystem writes use a separate source-window submission. Each
+such mount binds one
+queue and its 512 KiB kernel-owned window. The worker can map that window only
+read-only: the exported VMO itself rejects writable mappings, independently of
+handle attenuation. The kernel copies application bytes into it, then publishes
+a nonzero operation token. `submit_window` accepts only that queue's active token
+and bounded `(first_sector, source_offset, byte_length)` descriptors. It copies
+descriptors, not payload. The source offsets may be unaligned; device ranges
+must still contain complete sectors.
+
+Each accepted request retains a window lease until terminal device completion.
+A filesystem reply invalidates the token; a reply with outstanding leases fails
+the mount instead of allowing the next write to reuse live source bytes. Failed
+transactions retire the window. Successful mounts never recycle its backing
+for another mount or provider, even if an old read-only mapping remains alive.
+Clean provider adoption transfers the same queue/window authority after draining
+its work.
+
+Kernel-only scatter reads retain exclusive destination slices until all submitted
+work has joined, including failure and cancellation paths. These destinations
+are not mapped into the filesystem worker. Both paths still copy through the
+dedicated I/O VM exchange pool. Application, source-window and file-cache pages
+are never granted to the I/O VM for DMA.
 
 Requests progress through pending, executing, completed and collected states.
 Completion releases physical slots independently of userspace collection.
@@ -137,8 +161,10 @@ VM/DMA retirement even when the waiting process has exited. The implementation
 must not use a caller's continued execution to drive completion.
 
 Filesystem handoff and clean unmount drain their work before returning the
-exclusive block capability. A new worker creates its own logical queue; a
-partially submitted operation is not transferred as an implicit clean mount.
+exclusive block capability. Online provider adoption transfers the original
+queue and window alongside the live filesystem transport; recreating a window
+on that queue returns the same backing. A new mount creates a new queue/window.
+A partially submitted operation is not transferred as an implicit clean mount.
 
 ## Policy boundary
 
@@ -158,11 +184,34 @@ export.
 
 ## Filesystem integration
 
-The FAT adapter can submit complete data windows and evicted dirty runs while
-continuing its current operation. Read-after-write hazards are ordered by the
-same block queue. Every operation boundary still waits for its submitted work,
-including cleanup after a recoverable filesystem error. Explicit sync then
-issues and waits for the durable device flush.
+For aligned bulk file writes, the FAT adapter translates the read-only source
+window into sector ranges and coalesces adjacent disk and source offsets. It can
+submit these references while continuing FAT traversal. Metadata, partial-sector
+read-modify-write and other copied writes retain the existing bounded buffers.
+Read-after-write hazards are ordered by the same queue. Every operation boundary
+waits for all accepted work, including cleanup after a recoverable filesystem
+error. Explicit sync then issues and waits for the durable device flush.
+
+For bulk reads, FAT and uncompressed EROFS return bounded physical extent plans,
+not payload. The kernel validates the complete plan against the mount-bound
+volume before issuing I/O. Cold file-cache pages are private fill destinations;
+the exchange pool copies directly into them before cache publication. Warm cache
+reads copy cached bytes directly to the application. Partial sectors and EROFS
+inline tails can require a small bounce buffer; workers which cannot describe
+raw extents can use the buffered RPC fallback.
+
+The bulk data paths have these boundary copies, excluding backend/device work:
+
+| Operation | Data copies |
+| --- | --- |
+| Aligned file write | Application → kernel source window → I/O VM exchange pool |
+| Page-aligned cold cached read | I/O VM exchange pool → private cache pages → application |
+| Page-aligned warm cached read | Existing cache pages → application |
+
+There is no intermediate FAT payload window, SDK payload packing buffer or
+kernel read-result buffer on these bulk paths. Metadata, read-modify-write and
+format transforms can still use copied fallbacks. This is not end-to-end
+zero-copy I/O and does not expose Native memory to device DMA.
 
 Sequential reads can submit multiple block commands through the same engine.
 A single-threaded application issuing synchronous 128 KiB writes still cannot
@@ -182,7 +231,9 @@ The opt-in `block-queue-probe` runs inside the exclusive FAT worker before mount
 It exercises the installed SDK and real backend: aggregate merging, 512 KiB
 commands, four concurrently published command heads, exact and concurrent
 waits, retained-completion quota, failed reap retry, stale tickets, rights
-attenuation, flush ordering and queue abandonment.
+attenuation, flush ordering and queue abandonment. It also verifies source-window
+read-only authority, denial of writable mappings, rejection of unissued tokens
+without request admission, and mapping lifetime after the queue handle closes.
 Its pressure case retains the full 7.5 MiB public allowance, verifies that an
 internal synchronous 512 KiB read can still complete, then releases only 64 KiB
 and checks exact-size admission while a 512 KiB wait still cannot proceed.

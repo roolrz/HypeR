@@ -9,7 +9,7 @@ use hyper_filesystem::{
 };
 use hyper_fs_erofs::{Device as ReadDevice, Error as MediaError, Kind};
 use hyper_fs_service::Volume;
-use hyper_os::block::NativeBlock;
+use hyper_os::block::{BlockQueue, NativeBlock, QueueConfig};
 
 struct Device {
     block: NativeBlock,
@@ -67,6 +67,18 @@ impl Volume for Erofs {
     ) -> Result<usize, Error> {
         self.0
             .read_directory(path, cursor, output)
+            .map_err(map_error)
+    }
+
+    fn read_extents(
+        &mut self,
+        path: &str,
+        offset: u64,
+        length: usize,
+        output: &mut [u8],
+    ) -> Result<usize, Error> {
+        self.0
+            .read_extents(path, offset, length, output)
             .map_err(map_error)
     }
 
@@ -159,11 +171,22 @@ fn run() -> Result<(), String> {
         )
     };
 
+    let queue = match adopted.as_ref() {
+        Some(state) => BlockQueue::from_handle(
+            state
+                .queue()
+                .ok_or("adopted filesystem has no block queue")?
+                .duplicate(hyper_service::filesystem::QUEUE_RIGHTS)
+                .map_err(show)?,
+        ),
+        None => block.create_queue(QueueConfig::default()).map_err(show)?,
+    };
+
     let bytes = sectors.checked_mul(512).ok_or("invalid volume geometry")?;
     let mut volume = Erofs(hyper_fs_erofs::Volume::mount(Device { block, bytes }).map_err(show)?);
     let completion = match adopted {
         Some(state) => hyper_fs_service::resume(state, &mut volume)?,
-        None => hyper_fs_service::serve(&mut startup, &mut volume)?,
+        None => hyper_fs_service::serve(&mut startup, &mut volume, queue)?,
     };
     hyper_fs_service::return_block(completion, volume.0.into_device().block)
 }

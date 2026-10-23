@@ -7,7 +7,9 @@ use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
 use super::WriteRequest;
-use crate::handle::{BlockQueueObject, HandleRef, NativeBlockObject, OwnedHandle, Rights};
+use crate::handle::{
+    BlockQueueObject, HandleRef, NativeBlockObject, OwnedHandle, Rights, VmoObject,
+};
 use crate::{Error, Result, Status};
 
 /// Limits shared by every submitting thread holding this logical queue.
@@ -41,6 +43,14 @@ impl Default for QueueConfig {
 pub struct ReadRequest {
     pub first: u64,
     pub length: usize,
+}
+
+/// One complete-sector write referencing an active read-only staging window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowWrite {
+    pub first: u64,
+    pub offset: u64,
+    pub bytes: u64,
 }
 
 /// Queue-local generation-qualified completion identity; it is not a capability.
@@ -77,7 +87,8 @@ pub type QueueInfo = hyper_abi::HyperNativeBlockQueueInfo;
 
 /// A logical queue with independently owned completions and bounded admission.
 ///
-/// Successful submission copies all write data before returning. Dropping a
+/// Ordinary write submission copies data before returning; window submissions
+/// retain a validated kernel-owned source lease instead. Dropping a
 /// ticket does not cancel I/O or release completion storage: reap it or close
 /// the queue. Closing the queue never prematurely releases device DMA backing.
 /// Queue and device credits are bounded independently of physical command slots.
@@ -116,7 +127,8 @@ impl BlockQueue {
             .union(Rights::INSPECT)
             .union(Rights::TRANSFER);
         if result.value1 != 0
-            || handle.info()?.rights.bits() != block.info()?.rights.bits() & allowed.bits()
+            || handle.info()?.rights.bits()
+                != (block.info()?.rights.bits() & allowed.bits()) | Rights::DUPLICATE.bits()
         {
             return Err(Error::InvalidResponse);
         }
@@ -131,6 +143,37 @@ impl BlockQueue {
     }
     pub fn as_handle_ref(&self) -> HandleRef<'_, BlockQueueObject> {
         self.handle.as_handle_ref()
+    }
+
+    /// Map this queue's staging window read-only in a filesystem worker.
+    pub fn create_window(&self) -> Result<OwnedHandle<VmoObject>> {
+        self.as_handle_ref().create_window()
+    }
+
+    /// Submit ranges from a kernel-owned write lease. No payload bytes are
+    /// serialized here; the kernel validates token identity and range bounds.
+    pub fn submit_window(&self, token: u64, requests: &[WindowWrite]) -> Result<Ticket> {
+        let invalid = || Error::Status(Status::INVALID_ARGUMENT);
+        if token == 0 || requests.is_empty() || requests.len() > 16 {
+            return Err(invalid());
+        }
+        let mut frame = [0u8; 384];
+        let bytes = encode_window(requests, &mut frame)?;
+        // SAFETY: The bounded initialized metadata frame and queue outlive the call.
+        let result = unsafe {
+            hyper_sys::block_queue_submit_window(
+                self.handle.as_handle_ref().raw().get(),
+                token,
+                requests.len() as u32,
+                frame.as_ptr(),
+                bytes,
+            )
+        };
+        Status::from_raw(result.status).into_result()?;
+        if result.value1 != 0 {
+            return Err(Error::InvalidResponse);
+        }
+        Ticket::decode(result.value0)
     }
 
     /// Submits a read whose storage is owned by the queue until reap.
@@ -342,6 +385,34 @@ fn decode_completion_status(raw: u64) -> Result<Status> {
     Ok(Status::from_raw(status))
 }
 
+/// Validate the metadata frame independently of syscall dispatch. It never
+/// reads bytes from the mapping or creates a second payload allocation.
+fn encode_window(requests: &[WindowWrite], frame: &mut [u8; 384]) -> Result<usize> {
+    let invalid = || Error::Status(Status::INVALID_ARGUMENT);
+    if requests.is_empty() || requests.len() > 16 {
+        return Err(invalid());
+    }
+    let mut total = 0usize;
+    for (index, request) in requests.iter().enumerate() {
+        let length = usize::try_from(request.bytes).map_err(|_| invalid())?;
+        validate_range(request.first, length)?;
+        request
+            .offset
+            .checked_add(request.bytes)
+            .filter(|end| *end <= hyper_abi::HYPER_NATIVE_BLOCK_QUEUE_WINDOW_BYTES)
+            .ok_or_else(invalid)?;
+        total = total
+            .checked_add(length)
+            .filter(|total| *total <= hyper_abi::HYPER_NATIVE_BLOCK_QUEUE_TRANSFER_BYTES as usize)
+            .ok_or_else(invalid)?;
+        let at = index * 24;
+        frame[at..at + 8].copy_from_slice(&request.first.to_le_bytes());
+        frame[at + 8..at + 16].copy_from_slice(&request.offset.to_le_bytes());
+        frame[at + 16..at + 24].copy_from_slice(&request.bytes.to_le_bytes());
+    }
+    Ok(requests.len() * 24)
+}
+
 fn validate_config(config: QueueConfig) -> Result<()> {
     if config.capacity == 0
         || u64::from(config.capacity) > hyper_abi::HYPER_NATIVE_BLOCK_QUEUE_CAPACITY_MAX
@@ -402,6 +473,31 @@ fn encode_writes(requests: &[WriteRequest<'_>]) -> Result<Vec<u8>> {
     Ok(frame)
 }
 
+impl HandleRef<'_, BlockQueueObject> {
+    /// Obtain a read-only VMO for the queue-owned Native staging window.
+    pub fn create_window(self) -> Result<OwnedHandle<VmoObject>> {
+        // SAFETY: This handle is borrowed for the complete call.
+        let result = unsafe { hyper_sys::block_queue_create_window(self.raw().get()) };
+        Status::from_raw(result.status).into_result()?;
+        // SAFETY: Successful creation returns one owned capability.
+        let handle = unsafe {
+            crate::handle::adopt_produced_handle_excluding::<VmoObject>(
+                result.value0,
+                &[self.raw()],
+            )?
+        };
+        let expected = Rights::READ
+            .union(Rights::MAP)
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER)
+            .union(Rights::INSPECT);
+        if result.value1 != 0 || handle.info()?.rights != expected {
+            return Err(Error::InvalidResponse);
+        }
+        Ok(handle)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,6 +548,53 @@ mod tests {
             }])
             .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn window_frames_carry_only_bounds_checked_metadata() -> Result<()> {
+        let mut frame = [0xa5; 384];
+        let request = WindowWrite {
+            first: 71,
+            offset: 17,
+            bytes: 1024,
+        };
+        assert_eq!(encode_window(&[request], &mut frame)?, 24);
+        assert_eq!(&frame[..8], &71u64.to_le_bytes());
+        assert_eq!(&frame[8..16], &17u64.to_le_bytes());
+        assert_eq!(&frame[16..24], &1024u64.to_le_bytes());
+        assert!(frame[24..].iter().all(|byte| *byte == 0xa5));
+        assert!(
+            encode_window(
+                &[WindowWrite {
+                    offset: u64::MAX,
+                    ..request
+                }],
+                &mut frame
+            )
+            .is_err()
+        );
+        assert!(
+            encode_window(
+                &[WindowWrite {
+                    bytes: 513,
+                    ..request
+                }],
+                &mut frame
+            )
+            .is_err()
+        );
+        assert!(
+            encode_window(
+                &[WindowWrite {
+                    offset: hyper_abi::HYPER_NATIVE_BLOCK_QUEUE_WINDOW_BYTES,
+                    ..request
+                }],
+                &mut frame
+            )
+            .is_err()
+        );
+        assert!(encode_window(&[request; 17], &mut frame).is_err());
         Ok(())
     }
 

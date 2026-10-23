@@ -45,7 +45,10 @@ pub(crate) fn create(
             .map_err(|_| TransferError::Status(HYPER_NATIVE_STATUS_NO_MEMORY))?;
         PreparedHandle::try_from_new_object(
             publication,
-            source.rights().intersection(BlockQueue::SUPPORTED_RIGHTS),
+            source
+                .rights()
+                .intersection(BlockQueue::SUPPORTED_RIGHTS)
+                .union(Rights::DUPLICATE),
             HandleFlags::NONE,
         )
         .map_err(|_| TransferError::Status(HYPER_NATIVE_STATUS_NO_MEMORY))
@@ -276,4 +279,87 @@ fn queue_error(error: QueueError) -> TransferError {
         QueueError::Busy => HYPER_NATIVE_STATUS_BUSY,
     };
     TransferError::Status(status)
+}
+
+/// Export only read authority to the queue's dedicated Native source storage.
+pub(crate) fn create_window(
+    process: &Process,
+    receiver: &InvocationReceiver,
+) -> Result<HandleValue, TransferError> {
+    let queue = receiver
+        .resolve::<BlockQueue>(Rights::READ)
+        .map_err(capability)?;
+    let object = queue.object().create_window().map_err(queue_error)?;
+    process
+        .create_object(
+            object,
+            Rights::READ
+                .union(Rights::MAP)
+                .union(Rights::DUPLICATE)
+                .union(Rights::TRANSFER)
+                .union(Rights::INSPECT),
+        )
+        .map_err(capability)
+}
+
+/// Source authority comes from an active kernel-issued window generation, never
+/// from a user pointer or an arbitrary VMO supplied with the request.
+pub(crate) fn submit_window(
+    process: &Process,
+    receiver: &InvocationReceiver,
+    token: u64,
+    count: u32,
+    frame: UserSlice,
+) -> Result<u64, TransferError> {
+    let queue = receiver
+        .resolve::<BlockQueue>(Rights::WRITE)
+        .map_err(capability)?;
+    if count == 0
+        || count as usize > super::plan::MAX_RANGES
+        || frame.length() != u64::from(count) * 24
+    {
+        return Err(queue_error(QueueError::Invalid));
+    }
+    let mut records = [0u8; super::plan::MAX_RANGES * 24];
+    process
+        .copy_from_user(frame, &mut records[..count as usize * 24])
+        .map_err(capability)?;
+    let mut disk = Vec::new();
+    let mut source = Vec::new();
+    disk.try_reserve_exact(count as usize)
+        .map_err(|_| queue_error(QueueError::NoMemory))?;
+    source
+        .try_reserve_exact(count as usize)
+        .map_err(|_| queue_error(QueueError::NoMemory))?;
+    for record in records[..count as usize * 24].chunks_exact(24) {
+        let word = |at: usize| -> Result<u64, TransferError> {
+            Ok(u64::from_le_bytes(
+                record[at..at + 8]
+                    .try_into()
+                    .map_err(|_| queue_error(QueueError::Invalid))?,
+            ))
+        };
+        let first = word(0)?;
+        let offset = usize::try_from(word(8)?).map_err(|_| queue_error(QueueError::Invalid))?;
+        let bytes = usize::try_from(word(16)?).map_err(|_| queue_error(QueueError::Invalid))?;
+        disk.push(Range { first, bytes });
+        source.push((offset, bytes));
+    }
+    let lease = queue
+        .object()
+        .window_lease(token, &source)
+        .map_err(queue_error)?;
+    queue
+        .object()
+        .prepare_payload(
+            1,
+            disk,
+            Some(super::payload::Payload::Window {
+                lease,
+                ranges: source,
+            }),
+        )
+        .map_err(queue_error)?
+        .commit()
+        .map_err(queue_error)
 }

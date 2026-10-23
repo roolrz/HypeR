@@ -7,7 +7,7 @@
 //! engine as explicit [`BlockQueue`] submissions and share device ordering.
 
 mod queue;
-pub use queue::{BlockQueue, Completion, QueueConfig, QueueInfo, ReadRequest, Ticket};
+pub use queue::{BlockQueue, Completion, QueueConfig, QueueInfo, ReadRequest, Ticket, WindowWrite};
 
 use crate::handle::{
     AnyObject, GuestMemoryObject, HandleRef, NativeBlockObject, OwnedHandle, Rights,

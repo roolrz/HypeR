@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! One logical queue owns the FAT operation's outstanding block writes. The
-//! kernel copies submissions and orders overlapping ranges; no userspace buffer
-//! remains DMA-visible after the submitting call returns.
+//! kernel owns submitted data and orders overlapping ranges. File payloads use
+//! scoped readonly windows; metadata uses copy-on-submit. Neither userspace
+//! source is directly visible to device DMA.
 
 use hyper_fs_fat::block::{self, BlockDevice, Error, WriteRequest};
-use hyper_os::block::{BlockQueue, NativeBlock, QueueConfig, Ticket};
+use hyper_os::block::{BlockQueue, NativeBlock, Ticket, WindowWrite};
 
 const REQUESTS: usize = 16;
 const TRANSFER_BYTES: usize = block::WRITE_BATCH_BYTES;
@@ -17,23 +18,47 @@ pub(super) struct Device {
     pending: [Option<Ticket>; REQUESTS],
     sectors: u64,
     readonly: bool,
+    window: Option<Source>,
+    ranges: [WindowWrite; block::WRITE_BATCH_REQUESTS],
+    range_count: usize,
+    range_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct Source {
+    token: u64,
+    address: usize,
+    length: usize,
+}
+
+impl Source {
+    fn offset(self, input: &[u8]) -> Option<usize> {
+        let offset = (input.as_ptr() as usize).checked_sub(self.address)?;
+        (offset.checked_add(input.len())? <= self.length).then_some(offset)
+    }
 }
 
 impl Device {
-    pub(super) fn new(block: NativeBlock, sectors: u64, readonly: bool) -> Result<Self, Error> {
-        let queue = block
-            .create_queue(QueueConfig {
-                capacity: REQUESTS as u32,
-                byte_limit: 2 * 1024 * 1024,
-                inflight_limit: 4,
-            })
-            .map_err(block_error)?;
+    pub(super) fn new(
+        block: NativeBlock,
+        sectors: u64,
+        readonly: bool,
+        queue: BlockQueue,
+    ) -> Result<Self, Error> {
         Ok(Self {
             block,
             queue: Some(queue),
             pending: [None; REQUESTS],
             sectors,
             readonly,
+            window: None,
+            ranges: [WindowWrite {
+                first: 0,
+                offset: 0,
+                bytes: 0,
+            }; block::WRITE_BATCH_REQUESTS],
+            range_count: 0,
+            range_bytes: 0,
         })
     }
 
@@ -49,12 +74,42 @@ impl Device {
         self.queue.as_ref().ok_or(Error::Disconnected)
     }
 
+    fn submit_window_ranges(&mut self) -> Result<(), Error> {
+        if self.range_count == 0 {
+            return Ok(());
+        }
+        let token = self.window.ok_or(Error::InvalidRange)?.token;
+        if self.pending.iter().all(Option::is_some) {
+            self.complete_one()?;
+        }
+        let index = self
+            .pending
+            .iter()
+            .position(Option::is_none)
+            .ok_or(Error::Exhausted)?;
+        let count = self.range_count;
+        let ranges = self.ranges;
+        let payload = self.range_bytes;
+        // Clear before admission: an error is terminal for this volume, and
+        // completion cleanup must never resubmit a possibly accepted range.
+        self.range_count = 0;
+        self.range_bytes = 0;
+        let ticket = self.admit(payload, |queue| {
+            queue.submit_window(token, &ranges[..count])
+        })?;
+        self.pending[index] = Some(ticket);
+        Ok(())
+    }
+
     fn abandon(&mut self, error: hyper_os::Error) -> Error {
-        // A failed wait/reap syscall cannot prove physical completion. Closing
-        // the queue cancels undispatched work; the kernel retains DMA ownership
-        // for submissions that may still be in use by the backend.
+        // A failed wait/reap syscall cannot prove physical completion. Relinquish
+        // this consumer; the transport may retain another queue capability.
+        // Kernel request leases retain backing and prevent window reuse until
+        // outstanding submissions finish, even after this worker fails.
         drop(self.queue.take());
         self.pending.fill(None);
+        self.range_count = 0;
+        self.range_bytes = 0;
         block_error(error)
     }
 
@@ -128,6 +183,72 @@ impl Device {
 }
 
 impl BlockDevice for Device {
+    fn begin_write_window(&mut self, token: u64, input: &[u8]) -> Result<(), Error> {
+        if token == 0
+            || self.window.is_some()
+            || self.pending.iter().any(Option::is_some)
+            || self.range_count != 0
+        {
+            return Err(Error::InvalidRange);
+        }
+        self.window = Some(Source {
+            token,
+            address: input.as_ptr() as usize,
+            length: input.len(),
+        });
+        Ok(())
+    }
+
+    fn end_write_window(&mut self) {
+        self.window = None;
+    }
+
+    fn is_write_window(&self, input: &[u8]) -> bool {
+        self.window
+            .is_some_and(|source| source.offset(input).is_some())
+    }
+
+    fn submit_write_window(&mut self, first: u64, input: &[u8]) -> Result<(), Error> {
+        block::validate_range(self.sectors, first, input.len())?;
+        if self.readonly {
+            return Err(Error::ReadOnly);
+        }
+        let source = self.window.ok_or(Error::InvalidRange)?;
+        let offset = source.offset(input).ok_or(Error::InvalidRange)?;
+        if input.len() > TRANSFER_BYTES {
+            return Err(Error::InvalidRange);
+        }
+        if self.range_count != 0 && self.range_bytes + input.len() > TRANSFER_BYTES {
+            self.submit_window_ranges()?;
+        }
+        let range = WindowWrite {
+            first,
+            offset: offset as u64,
+            bytes: input.len() as u64,
+        };
+        let previous = self
+            .range_count
+            .checked_sub(1)
+            .and_then(|index| self.ranges.get_mut(index));
+        if let Some(previous) = previous.filter(|previous| {
+            previous.first + previous.bytes / block::SECTOR_SIZE as u64 == first
+                && previous.offset + previous.bytes == offset as u64
+        }) {
+            previous.bytes += range.bytes;
+        } else {
+            if self.range_count == self.ranges.len() {
+                self.submit_window_ranges()?;
+            }
+            self.ranges[self.range_count] = range;
+            self.range_count += 1;
+        }
+        self.range_bytes += input.len();
+        if self.range_bytes >= 64 * 1024 {
+            self.submit_window_ranges()?;
+        }
+        Ok(())
+    }
+
     fn is_read_only(&self) -> bool {
         self.readonly
     }
@@ -137,6 +258,7 @@ impl BlockDevice for Device {
     }
 
     fn read_sectors(&mut self, first: u64, output: &mut [u8]) -> Result<(), Error> {
+        self.submit_window_ranges()?;
         block::validate_range(self.sectors, first, output.len())?;
         for (index, bytes) in output.chunks_mut(TRANSFER_BYTES).enumerate() {
             let sector = first + (index * TRANSFER_BYTES / block::SECTOR_SIZE) as u64;
@@ -163,6 +285,7 @@ impl BlockDevice for Device {
     }
 
     fn submit_writes(&mut self, requests: &[WriteRequest<'_>]) -> Result<(), Error> {
+        self.submit_window_ranges()?;
         block::validate_writes(self.sectors, requests)?;
         if requests.is_empty() {
             return Ok(());
@@ -207,7 +330,7 @@ impl BlockDevice for Device {
     }
 
     fn complete_writes(&mut self) -> Result<(), Error> {
-        let mut failure = None;
+        let mut failure = self.submit_window_ranges().err();
         while self.pending.iter().any(Option::is_some) {
             if let Err(error) = self.complete_one() {
                 failure.get_or_insert(error);

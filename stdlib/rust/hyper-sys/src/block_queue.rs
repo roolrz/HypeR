@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Raw asynchronous block queue invocations. Submission never retains user pointers.
+//! Window submissions reference only an active kernel-owned filesystem lease.
 
 use crate::ffi::ffi_native_invoke6;
 use crate::{CallResult, abi};
@@ -142,6 +143,53 @@ pub unsafe fn block_queue_wait_space(queue: u64, bytes: usize, deadline: u64) ->
             deadline,
             0,
             0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Returns a read-only mapping capability for this queue's Native staging window.
+///
+/// # Safety
+/// The queue capability remains valid during the call.
+pub unsafe fn block_queue_create_window(queue: u64) -> CallResult {
+    // SAFETY: The caller retains the borrowed capability.
+    unsafe {
+        ffi_native_invoke6(
+            queue,
+            abi::HYPER_NATIVE_OP_BLOCK_QUEUE_CREATE_WINDOW,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Submits metadata referencing an active kernel-owned filesystem write window.
+///
+/// # Safety
+/// The frame is readable for `length` bytes and the queue remains valid until
+/// return. The kernel validates the token and every referenced byte range.
+pub unsafe fn block_queue_submit_window(
+    queue: u64,
+    token: u64,
+    count: u32,
+    frame: *const u8,
+    length: usize,
+) -> CallResult {
+    // SAFETY: The caller retains the frame and queue through the call.
+    unsafe {
+        ffi_native_invoke6(
+            queue,
+            abi::HYPER_NATIVE_OP_BLOCK_QUEUE_SUBMIT_WINDOW,
+            token,
+            u64::from(count),
+            frame as u64,
+            length as u64,
             0,
             0,
         )

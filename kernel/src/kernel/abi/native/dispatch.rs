@@ -443,6 +443,12 @@ pub(super) fn dispatch_operation(
         abi::NativeOperation::BlockQueueSubmit => {
             handlers::sys_block_queue_submit(services, receiver, arguments)
         }
+        abi::NativeOperation::BlockQueueCreateWindow => {
+            handlers::sys_block_queue_create_window(services, receiver, arguments)
+        }
+        abi::NativeOperation::BlockQueueSubmitWindow => {
+            handlers::sys_block_queue_submit_window(services, receiver, arguments)
+        }
         abi::NativeOperation::BlockQueueWait => {
             handlers::sys_block_queue_wait(services, receiver, arguments)
         }

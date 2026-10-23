@@ -370,6 +370,10 @@ mod native_block_wire;
 mod native_block_plan;
 
 #[cfg(test)]
+#[path = "../../../src/kernel/block/window_state.rs"]
+mod native_block_window_state;
+
+#[cfg(test)]
 #[path = "../../../src/kernel/vm/memory/extent_index.rs"]
 mod guest_extent_index;
 

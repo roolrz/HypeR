@@ -4,7 +4,8 @@
 //! Operation-scoped sector coalescing. The owning Disk supplies complete sectors
 //! and joins submitted writes before the volume operation returns. Dirty sectors
 //! form the authoritative read view before submission; the device queue orders
-//! later overlapping accesses after copied submissions.
+//! later overlapping accesses after copied submissions. Readonly request-window
+//! payloads bypass these buffers and retain kernel-owned source references.
 
 use super::{BlockDevice, BlockError, DeviceSlot, Error, SECTOR_SIZE};
 use crate::block::{WRITE_BATCH_BYTES, WRITE_BATCH_REQUESTS, WriteRequest};
@@ -114,6 +115,13 @@ impl Buffer {
         mut input: &[u8],
     ) -> Result<(), BlockError> {
         super::super::block::validate_range(device.sectors, first, input.len())?;
+        if !input.is_empty() && device.access(|d| Ok(d.is_write_window(input)))? {
+            // Earlier sparse metadata must precede a directly referenced data
+            // range if their physical addresses overlap. No payload borrow
+            // escapes: the kernel owns the immutable window until completion.
+            self.drain(device)?;
+            return device.access(|d| d.submit_write_window(first, input));
+        }
         while !input.is_empty() {
             let base = first / WINDOW_SECTORS as u64 * WINDOW_SECTORS as u64;
             let index = match self

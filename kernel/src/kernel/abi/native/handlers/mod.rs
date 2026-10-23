@@ -32,7 +32,8 @@ mod vfs;
 mod vm;
 
 pub(super) use block_queue::{
-    sys_block_queue_create, sys_block_queue_info, sys_block_queue_reap, sys_block_queue_submit,
+    sys_block_queue_create, sys_block_queue_create_window, sys_block_queue_info,
+    sys_block_queue_reap, sys_block_queue_submit, sys_block_queue_submit_window,
     sys_block_queue_wait, sys_block_queue_wait_space,
 };
 pub(super) use console::{sys_console_discard_input, sys_console_read, sys_console_write};

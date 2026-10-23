@@ -8,14 +8,18 @@
 use crate::Timestamp;
 
 mod directory;
+mod extents;
 pub use directory::{
     DIRECTORY_BATCH_BYTES, DIRECTORY_MIN_BYTES, DirectoryBatch, DirectoryBatchBuilder,
     DirectoryCursor, DirectoryRecord,
 };
+pub use extents::{
+    EXTENT_PLAN_BYTES, MAX_READ_EXTENTS, ReadExtent, ReadExtentPlan, ReadExtentPlanBuilder,
+};
 pub const DATA_BYTES: usize = 512 * 1024;
 pub const PATH_BYTES: usize = 4096;
 pub const NAME_BYTES: usize = 1020;
-pub const HEADER_BYTES: usize = 112;
+pub const HEADER_BYTES: usize = 120;
 pub const REQUEST_BYTES: usize = HEADER_BYTES + PATH_BYTES * 2;
 pub const RESPONSE_BYTES: usize = 1152;
 pub const FILE: u32 = 1;
@@ -36,6 +40,7 @@ pub enum Operation {
     Sync,
     SetMetadata,
     ReadLink,
+    ReadExtents,
 }
 impl Operation {
     pub fn decode(value: u64) -> Option<Self> {
@@ -51,6 +56,7 @@ impl Operation {
             9 => Self::Sync,
             10 => Self::SetMetadata,
             11 => Self::ReadLink,
+            12 => Self::ReadExtents,
             _ => return None,
         })
     }
@@ -132,6 +138,10 @@ impl Entry {
 }
 #[derive(Clone, Copy)]
 pub struct Request<'a> {
+    /// Queue-scoped generation authorizing this operation's readonly write
+    /// window. Only Write may carry a nonzero token; it grants no read access.
+    /// Zero selects the ordinary shared buffer on a blockless transport.
+    pub window_token: u64,
     pub cursor: DirectoryCursor,
     pub sequence: u64,
     pub operation: Operation,
@@ -148,6 +158,7 @@ impl<'a> Request<'a> {
             || !valid_path(self.path)
             || !valid_path(self.target)
             || (self.operation != Operation::ReadDirectory && !self.cursor.is_start())
+            || self.operation != Operation::Write && self.window_token != 0
         {
             return None;
         }
@@ -165,6 +176,7 @@ impl<'a> Request<'a> {
         put_time(output, 48, self.accessed);
         put_time(output, 64, self.modified);
         self.cursor.encode(&mut output[80..112]);
+        put(output, 112, self.window_token);
         output[HEADER_BYTES..HEADER_BYTES + self.path.len()].copy_from_slice(self.path.as_bytes());
         output[HEADER_BYTES + self.path.len()..].copy_from_slice(self.target.as_bytes());
         Some(length)
@@ -180,6 +192,7 @@ impl<'a> Request<'a> {
             return None;
         }
         let request = Self {
+            window_token: get(input, 112)?,
             cursor: DirectoryCursor::decode(input.get(80..112)?)?,
             sequence: get(input, 0)?,
             operation: Operation::decode(get(input, 8)?)?,
@@ -194,6 +207,7 @@ impl<'a> Request<'a> {
             || !valid_path(request.path)
             || !valid_path(request.target)
             || (request.operation != Operation::ReadDirectory && !request.cursor.is_start())
+            || request.operation != Operation::Write && request.window_token != 0
         {
             return None;
         }
@@ -283,6 +297,7 @@ fn valid_result(operation: Operation, result: Result<u64, Error>) -> bool {
     match operation {
         Operation::Read | Operation::Write => value <= DATA_BYTES as u64,
         Operation::ReadLink => value <= PATH_BYTES as u64,
+        Operation::ReadExtents => (16..=EXTENT_PLAN_BYTES as u64).contains(&value),
         Operation::ReadDirectory => {
             value >= directory::BATCH_HEADER_BYTES as u64 && value <= DIRECTORY_BATCH_BYTES as u64
         }

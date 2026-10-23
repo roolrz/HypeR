@@ -5,13 +5,18 @@
 //! Userspace negotiates the backend; one device pump owns its physical rings.
 
 pub(crate) mod async_service;
+mod payload;
 mod plan;
 mod pump;
 mod queue;
 mod request;
+mod scatter;
 pub(crate) mod service;
 mod transfer;
+mod window;
 mod wire;
+
+pub(crate) use window::{IoWindow, WindowBinding};
 
 use crate::kernel::accounting::{CommittedCharge, ResourceDomain};
 use crate::kernel::authority::Rights;

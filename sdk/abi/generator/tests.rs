@@ -1344,9 +1344,10 @@ fn block_queues_bound_frames_and_separate_completion_from_wait_failure() -> Resu
     let create = call("block_queue_create")?;
     assert_eq!(
         create.results[0].handle.map(|handle| handle.rights),
-        Some(ProducedRights::InheritedSubset {
+        Some(ProducedRights::FixedAndInherited {
+            fixed_rights: schema::RIGHT_DUPLICATE,
             authority_source: "receiver",
-            allowed_rights: schema::RIGHT_READ
+            inherited_rights: schema::RIGHT_READ
                 | schema::RIGHT_WRITE
                 | schema::RIGHT_WAIT
                 | schema::RIGHT_INSPECT
@@ -1386,6 +1387,38 @@ fn block_queues_bound_frames_and_separate_completion_from_wait_failure() -> Resu
     assert_eq!(
         reap.arguments[1].memory.map(|memory| memory.direction),
         Some(MemoryDirection::Write)
+    );
+    let window = call("block_queue_create_window")?;
+    assert_eq!(
+        window.receiver.handle.map(|handle| handle.required_rights),
+        Some(schema::RIGHT_READ)
+    );
+    assert_eq!(
+        window.results[0].handle.map(|handle| handle.rights),
+        Some(ProducedRights::Fixed(
+            schema::RIGHT_READ
+                | schema::RIGHT_MAP
+                | schema::RIGHT_INSPECT
+                | schema::RIGHT_DUPLICATE
+                | schema::RIGHT_TRANSFER
+        ))
+    );
+    let submit_window = call("block_queue_submit_window")?;
+    assert_eq!(
+        submit_window
+            .receiver
+            .handle
+            .map(|handle| handle.required_rights),
+        Some(schema::RIGHT_WRITE)
+    );
+    assert_eq!(
+        submit_window.arguments[2]
+            .memory
+            .map(|memory| memory.length),
+        Some(MemoryLength::Bytes {
+            argument: "frame_bytes",
+            maximum_bytes: 384,
+        })
     );
     Ok(())
 }
