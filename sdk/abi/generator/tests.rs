@@ -971,6 +971,7 @@ fn object_transfer_classes_match_the_audited_contract() {
         ("execution_context", TransferClass::Forbidden),
         ("object_factory", TransferClass::Forbidden),
         ("system_info", TransferClass::General),
+        ("block_queue", TransferClass::RendezvousOnly),
     ];
     assert_eq!(schema::OBJECT_KINDS.len(), expected.len());
     for (kind, expected) in schema::OBJECT_KINDS.iter().zip(expected) {
@@ -1330,4 +1331,61 @@ fn rejects_duplicate_constant_names_across_groups() {
     assert!(
         matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("declared more than once"))
     );
+}
+
+#[test]
+fn block_queues_bound_frames_and_separate_completion_from_wait_failure() -> Result<(), String> {
+    let call = |name| {
+        schema::INVOCATIONS
+            .iter()
+            .find(|call| call.name == name)
+            .ok_or_else(|| format!("missing operation {name}"))
+    };
+    let create = call("block_queue_create")?;
+    assert_eq!(
+        create.results[0].handle.map(|handle| handle.rights),
+        Some(ProducedRights::InheritedSubset {
+            authority_source: "receiver",
+            allowed_rights: schema::RIGHT_READ
+                | schema::RIGHT_WRITE
+                | schema::RIGHT_WAIT
+                | schema::RIGHT_INSPECT
+                | schema::RIGHT_TRANSFER,
+        })
+    );
+    let submit = call("block_queue_submit")?;
+    assert_eq!(submit.results.len(), 1);
+    assert_eq!(submit.results[0].name, "ticket");
+    let memory = submit.arguments[2].memory.ok_or("missing frame contract")?;
+    assert_eq!(memory.direction, MemoryDirection::Read);
+    assert_eq!(
+        memory.length,
+        MemoryLength::Bytes {
+            argument: "frame_bytes",
+            maximum_bytes: 524544
+        }
+    );
+    let wait = call("block_queue_wait")?;
+    assert_eq!(
+        wait.receiver.handle.map(|handle| handle.required_rights),
+        Some(schema::RIGHT_WAIT)
+    );
+    assert_eq!(wait.results[1].kind, ValueKind::I64);
+    assert!(wait.failure_results.is_empty());
+    let space = call("block_queue_wait_space")?;
+    assert_eq!(space.operation, 260);
+    assert_eq!(
+        space.receiver.handle.map(|handle| handle.required_rights),
+        Some(schema::RIGHT_WAIT)
+    );
+    assert!(space.results.is_empty());
+    assert_eq!(space.arguments[0].kind, ValueKind::ByteCount);
+    assert_eq!(space.cancellation, schema::CancellationClass::Explicit);
+    let reap = call("block_queue_reap")?;
+    assert_eq!(reap.results[0].kind, ValueKind::I64);
+    assert_eq!(
+        reap.arguments[1].memory.map(|memory| memory.direction),
+        Some(MemoryDirection::Write)
+    );
+    Ok(())
 }

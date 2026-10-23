@@ -111,6 +111,23 @@ impl<D: BlockDevice> DeviceSlot<D> {
         }
         Ok(())
     }
+    /// Retirement must remain reachable after the operation budget or device
+    /// has failed. It never submits new media writes and cannot use `access`,
+    /// whose admission guard intentionally rejects a poisoned volume.
+    fn complete_writes(&self) -> Result<(), BlockError> {
+        let mut device = self
+            .device
+            .try_borrow_mut()
+            .map_err(|_| BlockError::Io)?
+            .take()
+            .ok_or(BlockError::Io)?;
+        let result = device.complete_writes();
+        *self.device.try_borrow_mut().map_err(|_| BlockError::Io)? = Some(device);
+        if let Err(error) = result {
+            self.fail(error);
+        }
+        result
+    }
     fn fail(&self, error: BlockError) {
         let code = match error {
             BlockError::InvalidRange => 1,
@@ -241,8 +258,9 @@ impl<D: BlockDevice> Write for Disk<D> {
         Ok(n)
     }
     fn flush(&mut self) -> Result<(), BlockError> {
-        // Complete buffered transfers, without a physical durability barrier.
-        // Upstream also calls this from read-only directory destructors.
+        // Submit buffered transfers, without a physical durability barrier.
+        // Operation exit joins them. Upstream also calls this from read-only
+        // directory destructors, which must not serialize independent writes.
         self.owner.charge()?;
         self.writes.drain(&self.owner)
     }
@@ -360,9 +378,11 @@ impl<D: BlockDevice> FatVolume<D> {
                 sector,
             },
             fatfs::FsOptions::new().strict(true).time_provider(clock),
-        )
-        .map_err(Error::from)?;
+        );
+        let completed = owner.complete_writes();
         owner.enabled.store(false, Ordering::Relaxed);
+        completed.map_err(Error::Block)?;
+        let fs = fs.map_err(Error::from)?;
         // Bounds repeated FAT traversal on corrupt media. Count seeks as well
         // as transfers, so cache additions cannot defeat this limit.
         let budget = sectors.saturating_mul(32).max(4096);
@@ -423,6 +443,9 @@ impl<D: BlockDevice> FatVolume<D> {
         // A poisoned device rejects this drain without any further transfers.
         if let Err(error) = fs.flush_storage() {
             result = Err(Error::from(error));
+        }
+        if let Err(error) = self.device.complete_writes() {
+            result = Err(Error::Block(error));
         }
         self.device.enabled.store(false, Ordering::Relaxed);
         match self.device.failure() {
@@ -758,14 +781,20 @@ impl<D: BlockDevice> FatVolume<D> {
         let fs = self.fs.as_mut().ok_or(Error::Closed)?;
         self.device.remaining.store(self.budget, Ordering::Relaxed);
         self.device.enabled.store(true, Ordering::Relaxed);
-        let result = (|| {
+        let mut result = (|| {
             // No upstream file/editor escapes a volume operation. All edits
             // have been flushed before this filesystem-wide synchronization.
             fs.sync().map_err(Error::from)?;
+            self.device.complete_writes().map_err(Error::Block)?;
             // Disk::flush intentionally avoids barriers for ordinary file
             // drops. Only an explicit volume sync flushes the actual medium.
             self.device.access(BlockDevice::flush).map_err(Error::Block)
         })();
+        // Even failed metadata work can have submitted earlier independent
+        // writes. Retire those before poisoning/closing this generation.
+        if let Err(error) = self.device.complete_writes() {
+            result = Err(Error::Block(error));
+        }
         match &result {
             Err(Error::Corrupt) => self.device.fail(BlockError::Corrupt),
             Err(Error::Block(error)) => self.device.fail(*error),

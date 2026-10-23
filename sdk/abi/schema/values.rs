@@ -454,6 +454,26 @@ constant_groups! {
         native_block_used_offset = 512,
     }
 
+    /// Asynchronous block submission directions. A flush carries no ranges or payload.
+    enum block_queue_operation {
+        block_queue_read = 0,
+        block_queue_write = 1,
+        block_queue_flush = 2,
+    }
+
+    /// Bounded submission and completion storage. Completed entries remain charged until reaped.
+    constants block_queue_limits {
+        block_queue_batch_max = 16,
+        block_queue_range_bytes = 16,
+        block_queue_transfer_bytes = 524288,
+        block_queue_frame_bytes = 524544,
+        block_queue_capacity_max = 32,
+        block_queue_byte_limit_max = 8388608,
+        block_queue_inflight_max = 4,
+        /// Zero selects any completed ticket in block_queue_wait; it is never a valid ticket.
+        block_queue_any_ticket = 0,
+    }
+
     /// Guest notification control operations.
     enum guest_notification {
         guest_notification_disable = 0,

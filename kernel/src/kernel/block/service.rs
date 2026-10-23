@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capability-bound block setup and bounded exclusive volume transfers.
+//! Capability-bound block setup and bounded synchronous compatibility transfers.
 
 use super::*;
 use crate::kernel::accounting::{ResourceAmount, ResourceKind};
@@ -50,24 +50,15 @@ pub(crate) fn create(
         .commit();
     let owner = backend.object().owner();
     let notification = Notification::prepare_native(&owner, notify_base, notify_irq, &domain)?;
-    let device = FallibleArc::try_new(Device {
-        memory: backing,
-        guest_base,
-        notification,
-        domain,
-        state: InterruptSpinLock::new(State {
-            busy: false,
-            failed: false,
-            sectors: 0,
-            indices: [0; wire::REQUEST_QUEUES],
-            tag: 0,
-            readonly: false,
-            capability_alive: true,
-        }),
-        available: SignalState::new(),
-
-        _charge: charge,
-    })
+    let device = FallibleArc::try_new(
+        Device::new(backing, guest_base, notification, domain, charge).map_err(
+            |error| match error {
+                super::QueueError::NoMemory => ServiceError::NoMemory,
+                super::QueueError::ResourceLimit => ServiceError::ResourceLimit,
+                _ => ServiceError::BadState,
+            },
+        )?,
+    )
     .map_err(|_| ServiceError::NoMemory)?;
     let reservation = process.reserve_handles::<1>()?;
     let prepare = || {
@@ -123,7 +114,6 @@ pub(crate) fn activate(
         .map_err(ActivationError::Capability)?;
     block
         .object()
-        .device
         .activate(readonly)
         .map(|sectors| (sectors, readonly))
         .map_err(ActivationError::Device)

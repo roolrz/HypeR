@@ -58,7 +58,7 @@
  *
  * - Guest mapping creation borrows backend VirtualMachine WRITE and GuestMemory MAP, populates the full stable grant, and returns an owned mapping handle plus a backend-VM-local non-reused token. The backend IPA envelope must contain all sparse aliases: alias = 64 GiB + host physical address, with host addresses below 256 GiB. Unadmitted envelope holes have no RAM or page bitmap entries. The kernel constructs immutable frontend-ordered, coalesced physical extents; neither Native policy nor Linux may replace their addresses. Backend notification write64 0x28 admits one token exactly once to that unique notification route; read64 0x30/0x38/0x40/0x48 return frontend base, total bytes, status, extent count. Write64 0x50 selects an extent index; read64 0x58/0x60/0x68/0x70 return alias, frontend-relative offset, byte length, and query status. Rejection clears the old reply. Extents cover the entire frontend range without holes or overlapping physical pages. After draining vhost and releasing all page pins, only that backend route may write64 the token at 0x20 to certify quiescence. Mapping release accepts never-admitted or quiescent tokens, withdraws lookup, clears leaves, waits for every CPU translation acknowledgement and, for an IOMMU-bound backend, completed DMA invalidation, then releases backing. Closing a mapping handle alone quarantines its pages until backend VM retirement. Notification control operation 3 permanently disconnects both routes, only when no admitted mapping remains; a disconnected route never affects an address or IRQ reused by a subsequent connection.
  *
- * - Native block creation dedicates one fully resident 1048576-byte guest-memory grant permanently to one kernel virtio-scsi initiator; repeated creation from that grant fails. The backend VM must retain the matching mapping until execution and physical DMA are quiescent. Six standard split queues (control, event, and four request queues) have size 8, descriptor offsets n*4096, available offsets n*4096+256, and used offsets n*4096+512, relative to guest_base. Userspace negotiates VERSION_1 with the backend before activation. Activation enables notifications and issues READ CAPACITY(16), accepting only 512-byte sectors; capacity is never supplied by userspace. The block capability remains the data-plane owner across filesystem worker handoff; a clean unmount returns the same activated object rather than creating or activating a replacement. Reads use bounded batches across the four request queues; writes and flushes remain ordered. Requests use shared queues and blocking kernel notifications, not per-request userspace RPC. Unretired request failures permanently disconnect the initiator and never recycle its buffer. PEER_CLOSED reports disconnection. The physical pages remain retained by backend mappings until VM/DMA retirement; notification closure alone never proves DMA quiescence.
+ * - Native block creation dedicates one fully resident 1048576-byte guest-memory grant permanently to one kernel virtio-scsi initiator; repeated creation from that grant fails. The backend VM must retain the matching mapping until execution and physical DMA are quiescent. Six standard split queues (control, event, and four request queues) have size 8, descriptor offsets n*4096, available offsets n*4096+256, and used offsets n*4096+512, relative to guest_base. Userspace negotiates VERSION_1 with the backend before activation. Activation enables notifications and issues READ CAPACITY(16), accepting only 512-byte sectors; capacity is never supplied by userspace. The activated block object survives filesystem worker handoff; a clean unmount returns that object rather than activating a replacement. Synchronous native_block_transfer calls use a persistent internal logical queue on the same device engine as explicit BlockQueue submissions, including their overlap ordering and flush fences. The transport has four independent command heads and a shared 512 KiB data pool. A command can use up to four contiguous 128 KiB data spans, so larger merged commands trade command concurrency for transfer size. Requests use shared queues and kernel completion notifications, not per-request userspace RPC. Unretired request failures permanently disconnect the initiator and never recycle its buffer. PEER_CLOSED reports disconnection. The physical pages remain retained by backend mappings until VM/DMA retirement; notification closure alone never proves DMA quiescence.
  *
  * - filesystem_mount borrows a READ|WRITE|WAIT ByteChannel, a READ|WRITE|MAP shared VMO and a WRITE|EXECUTE Directory. The kernel retains the transport and buffer, validates the worker root, and publishes a fresh mount and filesystem identity at the capability-relative path. The VMO must satisfy the published filesystem protocol capacity and pinning contract. read_only is exactly zero or one; read-only mounts reject mutating protocol operations in the kernel independently of worker policy. Media discovery, format selection and exclusive NativeBlock ownership belong to the userspace filesystem manager and format worker, not this syscall.
  *
@@ -175,6 +175,20 @@
  * - guest_notification_access requires frontend VirtualMachine WRITE and addresses an existing connection by original_base. Operation 0 reads pending interrupt status without acknowledgement, 1 reads and acknowledges that status atomically, and 2 submits a queue-index notification (value &lt; 32). For operations 0 and 1 value must be zero; unknown operations are rejected. It shares the direct MMIO source state and serialization. PCI bus-master disable suppresses notifications; PCI memory-decode disable does not suppress this explicit transport fallback. Closure rejects accesses. No backend identity, control operation, DMA lease or epoch can be changed through this call.
  *
  * - guest_notification_configure requires frontend VirtualMachine WRITE. original_base identifies an existing connection by its creation address; base is a page-aligned 4 KiB window wholly contained in an installed userspace MMIO reservation and, while decoding is enabled, may not overlap another enabled I/O route. Flags 0 select the original virtio-MMIO register layout; bit 0 selects modern virtio-PCI, bit 1 enables memory decoding, bit 2 masks INTx, and bit 3 enables queue notifications (bus master). Unknown flags or PCI flags without bit 0 are rejected. PCI uses a 16-bit queue-index write at BAR+0x50 and a read-to-clear 8-bit ISR at BAR+0x60. Relocation, decode, and IRQ-mask changes serialize with source state and VM retirement. The operation cannot change the admitted backend, IRQs, DMA ownership, or epoch; disabling decode is not proof of backend quiescence.
+ *
+ * - block_queue_create derives a logical queue from an activated NativeBlock with READ or WRITE authority. The resulting rights are the source rights intersected with READ|WRITE|WAIT|INSPECT|TRANSFER. Capacity, byte limit and in-flight limit are bounded by queue and device ceilings; more queues do not bypass device admission. The initial device limit is 64 retained requests and 8 MiB of payload. Of these, one request and 512 KiB are reserved for the kernel-owned synchronous queue so a file-backed user copy can refill its pages while public queues retain completions. Public queues therefore share at most 63 requests and 7.5 MiB, also subject to remaining total capacity; userspace cannot select the reserved admission class. Queue attribution is fixed by the kernel resource domain at creation and survives capability transfer. NativeBlock and BlockQueue may move through capability rendezvous or staged process startup; buffered transfer is forbidden. Closing the parent NativeBlock closes its internal synchronous queue but does not close independently held derived queues. Priority adjustment and caller-selected attribution are not implemented.
+ *
+ * - block_queue_submit atomically accepts one batch or returns an error with no submitted ranges. Read and write require READ and WRITE respectively; flush requires WRITE. The frame contains count pairs of little-endian u64 first_sector and byte_length, followed by concatenated write data only. Data lengths are nonzero complete sectors; ranges within one batch do not overlap. Reads carry no input payload. Flush has zero count and an empty frame. User bytes are copied before publication; no user pointer or writable user mapping remains a DMA source or destination after return. One nonzero ticket identifies aggregate completion; failed batches may have partial device effects.
+ *
+ * - block_queue_wait requires WAIT and does not consume completion. Ticket zero selects any completed request; other tickets wait for that exact request. It returns syscall success plus a signed completion status for a finished I/O, including failed I/O. A wait timeout or cancellation does not cancel device work. Completed results persist until reap or queue closure. Concurrent waiters observe stable request owners across ticket-slot reuse.
+ *
+ * - BlockQueue COMPLETED reports at least one finished result not claimed by a concurrent reaper. WRITABLE conservatively reports one available request slot and at least min(block_queue_transfer_bytes, configured byte_limit) free payload bytes in both queue and device admission budgets. Smaller submissions or a flush may succeed while WRITABLE is clear; an observed signal does not reserve credits or bypass resource-domain limits. Completed results retain credits until reap, so a producer awaiting more space must also collect its completions. PEER_CLOSED reports closed admission or a failed device; already completed results remain reapable. These are level signals usable with WAIT and WaitSet.
+ *
+ * - block_queue_wait_space requires WAIT and observes admission for one request with the supplied payload byte count across both queue and device budgets. Zero bytes supports a flush; nonzero bytes must be sector aligned and at most both block_queue_transfer_bytes and the configured queue byte limit. Success reserves no credits and submits no work; callers retry submission and handle competing producers. The absolute monotonic deadline uses zero for polling and UINT64_MAX for an indefinite wait. Timeout returns timed_out, cancellation returns cancelled, and closed admission or device failure returns peer_closed. Completed results still hold credits, so the caller must reap its own completions before waiting when they prevent admission. This operation waits for the requested size rather than the conservative WRITABLE threshold and does not promise resource-domain quota or allocation success.
+ *
+ * - block_queue_reap requires READ for read requests and WRITE for write or flush requests. It consumes a completed ticket only after a successful result copy. Successful reads require an exact-length output buffer in submitted-range order; failed reads and write or flush completions use an empty output. An invalid or faulting output leaves completion available for retry. Concurrent reaping is serialized; a losing caller receives busy or not_found rather than consuming another ticket generation.
+ *
+ * - Block queue ordering applies across logical queues on the same device: overlapping ranges preserve submission order whenever at least one request writes. Flush fences wait for earlier commands and prevent later commands from passing until the device flush completes. Closing a queue cancels pending work and discards unclaimed results, but in-flight DMA memory remains owned until completion or proven backend retirement. Completed, in-flight and pending requests remain bounded and charged, including a reaped request still retained by a concurrent waiter.
  */
 #ifndef HYPER_NATIVE_H
 #define HYPER_NATIVE_H
@@ -498,6 +512,10 @@ typedef int64_t hyper_native_status_t;
  * Object-kind tag `system_info` used with an object-local operation number.
  */
 #define HYPER_NATIVE_OBJECT_SYSTEM_INFO UINT32_C(43)
+/**
+ * Object-kind tag `block_queue` used with an object-local operation number.
+ */
+#define HYPER_NATIVE_OBJECT_BLOCK_QUEUE UINT32_C(44)
 
 /**
  * Handle transport is forbidden for this object kind.
@@ -562,6 +580,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
         case HYPER_NATIVE_OBJECT_EXECUTION_CONTEXT: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
         case HYPER_NATIVE_OBJECT_OBJECT_FACTORY: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
         case HYPER_NATIVE_OBJECT_SYSTEM_INFO: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
+        case HYPER_NATIVE_OBJECT_BLOCK_QUEUE: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         default: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
     }
 }
@@ -864,6 +883,18 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
  * Wait signal `peer_closed` for `guest_mailbox` objects; bit positions are object-local.
  */
 #define HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_PEER_CLOSED (UINT64_C(1) << 2)
+/**
+ * Wait signal `completed` for `block_queue` objects; bit positions are object-local.
+ */
+#define HYPER_NATIVE_SIGNAL_BLOCK_QUEUE_COMPLETED (UINT64_C(1) << 0)
+/**
+ * Wait signal `writable` for `block_queue` objects; bit positions are object-local.
+ */
+#define HYPER_NATIVE_SIGNAL_BLOCK_QUEUE_WRITABLE (UINT64_C(1) << 1)
+/**
+ * Wait signal `peer_closed` for `block_queue` objects; bit positions are object-local.
+ */
+#define HYPER_NATIVE_SIGNAL_BLOCK_QUEUE_PEER_CLOSED (UINT64_C(1) << 2)
 
 /**
  * @defgroup hyper_native_handle_encoding handle_encoding (constants)
@@ -2559,6 +2590,101 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
  * Numeric parameter or sentinel, not an enum discriminant.
  */
 #define HYPER_NATIVE_NATIVE_BLOCK_USED_OFFSET UINT64_C(512)
+/** @} */
+
+/**
+ * @defgroup hyper_native_block_queue_operation block_queue_operation (enum)
+ * @ingroup hyper_native
+ * Asynchronous block submission directions. A flush carries no ranges or payload.
+ * @{
+ */
+/**
+ * `block_queue_read` in the `block_queue_operation` enum domain.
+ *
+ * Asynchronous block submission directions. A flush carries no ranges or payload.
+ * Select one value; this is not a bit mask.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_READ UINT64_C(0)
+/**
+ * `block_queue_write` in the `block_queue_operation` enum domain.
+ *
+ * Asynchronous block submission directions. A flush carries no ranges or payload.
+ * Select one value; this is not a bit mask.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_WRITE UINT64_C(1)
+/**
+ * `block_queue_flush` in the `block_queue_operation` enum domain.
+ *
+ * Asynchronous block submission directions. A flush carries no ranges or payload.
+ * Select one value; this is not a bit mask.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_FLUSH UINT64_C(2)
+/** @} */
+
+/**
+ * @defgroup hyper_native_block_queue_limits block_queue_limits (constants)
+ * @ingroup hyper_native
+ * Bounded submission and completion storage. Completed entries remain charged until reaped.
+ * @{
+ */
+/**
+ * `block_queue_batch_max` in the `block_queue_limits` constants domain.
+ *
+ * Bounded submission and completion storage. Completed entries remain charged until reaped.
+ * Numeric parameter or sentinel, not an enum discriminant.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_BATCH_MAX UINT64_C(16)
+/**
+ * `block_queue_range_bytes` in the `block_queue_limits` constants domain.
+ *
+ * Bounded submission and completion storage. Completed entries remain charged until reaped.
+ * Numeric parameter or sentinel, not an enum discriminant.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_RANGE_BYTES UINT64_C(16)
+/**
+ * `block_queue_transfer_bytes` in the `block_queue_limits` constants domain.
+ *
+ * Bounded submission and completion storage. Completed entries remain charged until reaped.
+ * Numeric parameter or sentinel, not an enum discriminant.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_TRANSFER_BYTES UINT64_C(524288)
+/**
+ * `block_queue_frame_bytes` in the `block_queue_limits` constants domain.
+ *
+ * Bounded submission and completion storage. Completed entries remain charged until reaped.
+ * Numeric parameter or sentinel, not an enum discriminant.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_FRAME_BYTES UINT64_C(524544)
+/**
+ * `block_queue_capacity_max` in the `block_queue_limits` constants domain.
+ *
+ * Bounded submission and completion storage. Completed entries remain charged until reaped.
+ * Numeric parameter or sentinel, not an enum discriminant.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_CAPACITY_MAX UINT64_C(32)
+/**
+ * `block_queue_byte_limit_max` in the `block_queue_limits` constants domain.
+ *
+ * Bounded submission and completion storage. Completed entries remain charged until reaped.
+ * Numeric parameter or sentinel, not an enum discriminant.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_BYTE_LIMIT_MAX UINT64_C(8388608)
+/**
+ * `block_queue_inflight_max` in the `block_queue_limits` constants domain.
+ *
+ * Bounded submission and completion storage. Completed entries remain charged until reaped.
+ * Numeric parameter or sentinel, not an enum discriminant.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_INFLIGHT_MAX UINT64_C(4)
+/**
+ * `block_queue_any_ticket` in the `block_queue_limits` constants domain.
+ *
+ * Bounded submission and completion storage. Completed entries remain charged until reaped.
+ * Numeric parameter or sentinel, not an enum discriminant.
+ *
+ * Zero selects any completed ticket in block_queue_wait; it is never a valid ticket.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_ANY_TICKET UINT64_C(0)
 /** @} */
 
 /**
@@ -7147,6 +7273,132 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_OP_PROCESS_BUILDER_SET_SCHEDULING UINT64_C(265)
 
 /**
+ * Object-local method `block_queue_create`.
+ *
+ * | Property | Contract |
+ * | --- | --- |
+ * | Receiver | `receiver: Borrow, kind=native_block, rights=0x0` |
+ * | Operation | 258 |
+ * | Feature | `Core` |
+ * | Arguments | `capacity: u32`, `byte_limit: u64`, `inflight_limit: u32` |
+ * | Results | `queue: handle` |
+ * | Capability effects | `receiver: Borrow, kind=native_block, rights=0x0`, `queue: produce, kind=block_queue, inherited-from(receiver), mask=0x3e` |
+ * | User memory | — |
+ * | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
+ * | Audit | `Capability` |
+ *
+ * Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+ *
+ * Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+ */
+#define HYPER_NATIVE_OP_BLOCK_QUEUE_CREATE UINT64_C(258)
+
+/**
+ * Object-local method `block_queue_submit`.
+ *
+ * | Property | Contract |
+ * | --- | --- |
+ * | Receiver | `receiver: Borrow, kind=block_queue, rights=0x0` |
+ * | Operation | 256 |
+ * | Feature | `Core` |
+ * | Arguments | `operation: u32`, `count: u32`, `frame: user_address`, `frame_bytes: byte_count` |
+ * | Results | `ticket: u64` |
+ * | Capability effects | `receiver: Borrow, kind=block_queue, rights=0x0` |
+ * | User memory | `frame: Read, len=frame_bytes bytes, max-bytes=524544; order=0` |
+ * | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
+ * | Audit | `Capability` |
+ *
+ * Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+ *
+ * Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+ */
+#define HYPER_NATIVE_OP_BLOCK_QUEUE_SUBMIT UINT64_C(256)
+
+/**
+ * Object-local method `block_queue_wait`.
+ *
+ * | Property | Contract |
+ * | --- | --- |
+ * | Receiver | `receiver: Borrow, kind=block_queue, rights=0x4` |
+ * | Operation | 257 |
+ * | Feature | `Core` |
+ * | Arguments | `ticket: u64`, `deadline: u64` |
+ * | Results | `ticket: u64`, `completion_status: i64` |
+ * | Capability effects | `receiver: Borrow, kind=block_queue, rights=0x4` |
+ * | User memory | — |
+ * | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
+ * | Audit | `Capability` |
+ *
+ * Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+ *
+ * Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+ */
+#define HYPER_NATIVE_OP_BLOCK_QUEUE_WAIT UINT64_C(257)
+
+/**
+ * Object-local method `block_queue_reap`.
+ *
+ * | Property | Contract |
+ * | --- | --- |
+ * | Receiver | `receiver: Borrow, kind=block_queue, rights=0x0` |
+ * | Operation | 258 |
+ * | Feature | `Core` |
+ * | Arguments | `ticket: u64`, `output: user_address`, `output_bytes: byte_count` |
+ * | Results | `completion_status: i64`, `bytes: byte_count` |
+ * | Capability effects | `receiver: Borrow, kind=block_queue, rights=0x0` |
+ * | User memory | `output: Write, len=output_bytes bytes, max-bytes=524288; order=0` |
+ * | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
+ * | Audit | `Capability` |
+ *
+ * Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+ *
+ * Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+ */
+#define HYPER_NATIVE_OP_BLOCK_QUEUE_REAP UINT64_C(258)
+
+/**
+ * Object-local method `block_queue_info`.
+ *
+ * | Property | Contract |
+ * | --- | --- |
+ * | Receiver | `receiver: Borrow, kind=block_queue, rights=0x8` |
+ * | Operation | 259 |
+ * | Feature | `Core` |
+ * | Arguments | `output: user_address`, `output_size: byte_count` |
+ * | Results | `supported_size: byte_count` |
+ * | Capability effects | `receiver: Borrow, kind=block_queue, rights=0x8` |
+ * | User memory | `output: Write, len=output_size bytes, max-bytes=4096, record=block_queue_info; order=0` |
+ * | Execution | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` |
+ * | Audit | `Capability` |
+ *
+ * Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+ *
+ * Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+ */
+#define HYPER_NATIVE_OP_BLOCK_QUEUE_INFO UINT64_C(259)
+
+/**
+ * Object-local method `block_queue_wait_space`.
+ *
+ * | Property | Contract |
+ * | --- | --- |
+ * | Receiver | `receiver: Borrow, kind=block_queue, rights=0x4` |
+ * | Operation | 260 |
+ * | Feature | `Core` |
+ * | Arguments | `bytes: byte_count`, `deadline: u64` |
+ * | Results | — |
+ * | Capability effects | `receiver: Borrow, kind=block_queue, rights=0x4` |
+ * | User memory | — |
+ * | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
+ * | Audit | `Capability` |
+ *
+ * Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+ *
+ * Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+ */
+#define HYPER_NATIVE_OP_BLOCK_QUEUE_WAIT_SPACE UINT64_C(260)
+
+/**
  * Return the auxiliary-result registers defined on a failure status.
  * Bit N denotes auxiliary result N, excluding the separate signed status register.
  * Zero means no defined failure results (also returned for unknown methods and OK).
@@ -10183,6 +10435,105 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, dma_mappings) =
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, user_address_spaces) == 136, "resource_limits.user_address_spaces offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, user_mappings) == 144, "resource_limits.user_mappings offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, reserved) == 152, "resource_limits.reserved offset");
+
+/**
+ * Minimum supported prefix of `block_queue_info`, in bytes; individual calls define their buffer lengths.
+ */
+#define HYPER_NATIVE_BLOCK_QUEUE_INFO_MIN_SIZE UINT64_C(128)
+/**
+ * Wire layout for `block_queue_info`.
+ *
+ * Size: 128 bytes; alignment: 8 bytes; supported minimum prefix: 128 bytes.
+ * Scalar widths and member offsets are fixed across supported architectures.
+ * The minimum prefix describes extensibility, not permission to truncate every call's buffer;
+ * the consuming operation defines its accepted length.
+ *
+ * Used by: `block_queue_info`.
+ */
+typedef struct hyper_native_block_queue_info_t {
+    /**
+     * Wire offset 0 bytes; width 8 bytes.
+     */
+    uint64_t capacity;
+    /**
+     * Wire offset 8 bytes; width 8 bytes.
+     */
+    uint64_t byte_limit;
+    /**
+     * Wire offset 16 bytes; width 8 bytes.
+     */
+    uint64_t inflight_limit;
+    /**
+     * Wire offset 24 bytes; width 8 bytes.
+     */
+    uint64_t outstanding_requests;
+    /**
+     * Wire offset 32 bytes; width 8 bytes.
+     */
+    uint64_t outstanding_bytes;
+    /**
+     * Wire offset 40 bytes; width 8 bytes.
+     */
+    uint64_t pending_requests;
+    /**
+     * Wire offset 48 bytes; width 8 bytes.
+     */
+    uint64_t inflight_commands;
+    /**
+     * Wire offset 56 bytes; width 8 bytes.
+     */
+    uint64_t completed_requests;
+    /**
+     * Wire offset 64 bytes; width 8 bytes.
+     */
+    uint64_t submitted_batches;
+    /**
+     * Wire offset 72 bytes; width 8 bytes.
+     */
+    uint64_t submitted_ranges;
+    /**
+     * Wire offset 80 bytes; width 8 bytes.
+     */
+    uint64_t dispatched_commands;
+    /**
+     * Wire offset 88 bytes; width 8 bytes.
+     */
+    uint64_t merged_ranges;
+    /**
+     * Wire offset 96 bytes; width 8 bytes.
+     */
+    uint64_t completed_batches;
+    /**
+     * Wire offset 104 bytes; width 8 bytes.
+     */
+    uint64_t peak_inflight;
+    /**
+     * Wire offset 112 bytes; width 8 bytes.
+     */
+    uint64_t device_inflight_limit;
+    /**
+     * Wire offset 120 bytes; width 8 bytes.
+     */
+    uint64_t reserved;
+} hyper_native_block_queue_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_block_queue_info_t) == 128, "block_queue_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_block_queue_info_t) == 8, "block_queue_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, capacity) == 0, "block_queue_info.capacity offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, byte_limit) == 8, "block_queue_info.byte_limit offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, inflight_limit) == 16, "block_queue_info.inflight_limit offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, outstanding_requests) == 24, "block_queue_info.outstanding_requests offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, outstanding_bytes) == 32, "block_queue_info.outstanding_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, pending_requests) == 40, "block_queue_info.pending_requests offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, inflight_commands) == 48, "block_queue_info.inflight_commands offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, completed_requests) == 56, "block_queue_info.completed_requests offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, submitted_batches) == 64, "block_queue_info.submitted_batches offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, submitted_ranges) == 72, "block_queue_info.submitted_ranges offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, dispatched_commands) == 80, "block_queue_info.dispatched_commands offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, merged_ranges) == 88, "block_queue_info.merged_ranges offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, completed_batches) == 96, "block_queue_info.completed_batches offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, peak_inflight) == 104, "block_queue_info.peak_inflight offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, device_inflight_limit) == 112, "block_queue_info.device_inflight_limit offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_block_queue_info_t, reserved) == 120, "block_queue_info.reserved offset");
 
 #undef HYPER_ABI_ALIGNOF
 #undef HYPER_ABI_STATIC_ASSERT

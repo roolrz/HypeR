@@ -95,6 +95,64 @@ impl crate::kernel::abi::native::GuestIoServices for ProcessServices<'_> {
     ) -> Result<(), crate::kernel::block::service::TransferError> {
         crate::kernel::block::service::transfer(self.process, block, operation, first, buffer)
     }
+    fn create_block_queue(
+        &self,
+        receiver: &InvocationReceiver,
+        capacity: u32,
+        byte_limit: u64,
+        inflight_limit: u32,
+    ) -> Result<HandleValue, crate::kernel::block::service::TransferError> {
+        crate::kernel::block::async_service::create(
+            self.process,
+            receiver,
+            capacity,
+            byte_limit,
+            inflight_limit,
+        )
+    }
+    fn submit_block_queue(
+        &self,
+        receiver: &InvocationReceiver,
+        operation: u32,
+        count: u32,
+        frame: Option<UserSlice>,
+    ) -> Result<u64, crate::kernel::block::service::TransferError> {
+        crate::kernel::block::async_service::submit(self.process, receiver, operation, count, frame)
+    }
+    fn wait_block_queue(
+        &self,
+        receiver: &InvocationReceiver,
+        ticket: u64,
+        deadline: u64,
+    ) -> Result<(u64, i64), crate::kernel::block::service::TransferError> {
+        crate::kernel::block::async_service::wait(receiver, ticket, deadline, || {
+            self.thread.stop_requested()
+        })
+    }
+    fn wait_block_queue_space(
+        &self,
+        receiver: &InvocationReceiver,
+        bytes: u64,
+        deadline: u64,
+    ) -> Result<(), crate::kernel::block::service::TransferError> {
+        crate::kernel::block::async_service::wait_space(receiver, bytes, deadline, || {
+            self.thread.stop_requested()
+        })
+    }
+    fn reap_block_queue(
+        &self,
+        receiver: &InvocationReceiver,
+        ticket: u64,
+        output: Option<UserSlice>,
+    ) -> Result<(i64, usize), crate::kernel::block::service::TransferError> {
+        crate::kernel::block::async_service::reap(self.process, receiver, ticket, output)
+    }
+    fn block_queue_info(
+        &self,
+        receiver: &InvocationReceiver,
+    ) -> Result<[u8; 128], crate::kernel::block::service::TransferError> {
+        crate::kernel::block::async_service::info(receiver)
+    }
     fn mount_filesystem(
         &self,
         channel: HandleValue,

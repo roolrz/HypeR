@@ -160,6 +160,8 @@ pub const HYPER_NATIVE_OBJECT_EXECUTION_CONTEXT: u32 = 41;
 pub const HYPER_NATIVE_OBJECT_OBJECT_FACTORY: u32 = 42;
 /// Object-kind tag `system_info` used with an object-local operation number.
 pub const HYPER_NATIVE_OBJECT_SYSTEM_INFO: u32 = 43;
+/// Object-kind tag `block_queue` used with an object-local operation number.
+pub const HYPER_NATIVE_OBJECT_BLOCK_QUEUE: u32 = 44;
 
 /// Handle transport is forbidden for this object kind.
 pub const HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN: u32 = 0;
@@ -220,6 +222,7 @@ pub const fn hyper_native_object_transfer_class(object_kind: u32) -> u32 {
         HYPER_NATIVE_OBJECT_EXECUTION_CONTEXT => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
         HYPER_NATIVE_OBJECT_OBJECT_FACTORY => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
         HYPER_NATIVE_OBJECT_SYSTEM_INFO => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_BLOCK_QUEUE => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
         _ => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
     }
 }
@@ -374,6 +377,12 @@ pub const HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_WRITABLE: u64 = 1_u64 << 1;
 /// Wait signal `peer_closed` for `guest_mailbox` objects; bit positions are object-local.
 pub const HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_PEER_CLOSED: u64 = 1_u64 << 2;
+/// Wait signal `completed` for `block_queue` objects; bit positions are object-local.
+pub const HYPER_NATIVE_SIGNAL_BLOCK_QUEUE_COMPLETED: u64 = 1_u64 << 0;
+/// Wait signal `writable` for `block_queue` objects; bit positions are object-local.
+pub const HYPER_NATIVE_SIGNAL_BLOCK_QUEUE_WRITABLE: u64 = 1_u64 << 1;
+/// Wait signal `peer_closed` for `block_queue` objects; bit positions are object-local.
+pub const HYPER_NATIVE_SIGNAL_BLOCK_QUEUE_PEER_CLOSED: u64 = 1_u64 << 2;
 
 /// `handle_invalid` in the `handle_encoding` constants domain.
 ///
@@ -1392,6 +1401,65 @@ pub const HYPER_NATIVE_NATIVE_BLOCK_AVAILABLE_OFFSET: u64 = 256;
 /// Shared-memory geometry and transfer bounds for the Native block initiator.
 /// Numeric parameter or sentinel, not an enum discriminant.
 pub const HYPER_NATIVE_NATIVE_BLOCK_USED_OFFSET: u64 = 512;
+
+/// `block_queue_read` in the `block_queue_operation` enum domain.
+///
+/// Asynchronous block submission directions. A flush carries no ranges or payload.
+/// Select one value; this is not a bit mask.
+pub const HYPER_NATIVE_BLOCK_QUEUE_READ: u64 = 0;
+/// `block_queue_write` in the `block_queue_operation` enum domain.
+///
+/// Asynchronous block submission directions. A flush carries no ranges or payload.
+/// Select one value; this is not a bit mask.
+pub const HYPER_NATIVE_BLOCK_QUEUE_WRITE: u64 = 1;
+/// `block_queue_flush` in the `block_queue_operation` enum domain.
+///
+/// Asynchronous block submission directions. A flush carries no ranges or payload.
+/// Select one value; this is not a bit mask.
+pub const HYPER_NATIVE_BLOCK_QUEUE_FLUSH: u64 = 2;
+
+/// `block_queue_batch_max` in the `block_queue_limits` constants domain.
+///
+/// Bounded submission and completion storage. Completed entries remain charged until reaped.
+/// Numeric parameter or sentinel, not an enum discriminant.
+pub const HYPER_NATIVE_BLOCK_QUEUE_BATCH_MAX: u64 = 16;
+/// `block_queue_range_bytes` in the `block_queue_limits` constants domain.
+///
+/// Bounded submission and completion storage. Completed entries remain charged until reaped.
+/// Numeric parameter or sentinel, not an enum discriminant.
+pub const HYPER_NATIVE_BLOCK_QUEUE_RANGE_BYTES: u64 = 16;
+/// `block_queue_transfer_bytes` in the `block_queue_limits` constants domain.
+///
+/// Bounded submission and completion storage. Completed entries remain charged until reaped.
+/// Numeric parameter or sentinel, not an enum discriminant.
+pub const HYPER_NATIVE_BLOCK_QUEUE_TRANSFER_BYTES: u64 = 524288;
+/// `block_queue_frame_bytes` in the `block_queue_limits` constants domain.
+///
+/// Bounded submission and completion storage. Completed entries remain charged until reaped.
+/// Numeric parameter or sentinel, not an enum discriminant.
+pub const HYPER_NATIVE_BLOCK_QUEUE_FRAME_BYTES: u64 = 524544;
+/// `block_queue_capacity_max` in the `block_queue_limits` constants domain.
+///
+/// Bounded submission and completion storage. Completed entries remain charged until reaped.
+/// Numeric parameter or sentinel, not an enum discriminant.
+pub const HYPER_NATIVE_BLOCK_QUEUE_CAPACITY_MAX: u64 = 32;
+/// `block_queue_byte_limit_max` in the `block_queue_limits` constants domain.
+///
+/// Bounded submission and completion storage. Completed entries remain charged until reaped.
+/// Numeric parameter or sentinel, not an enum discriminant.
+pub const HYPER_NATIVE_BLOCK_QUEUE_BYTE_LIMIT_MAX: u64 = 8388608;
+/// `block_queue_inflight_max` in the `block_queue_limits` constants domain.
+///
+/// Bounded submission and completion storage. Completed entries remain charged until reaped.
+/// Numeric parameter or sentinel, not an enum discriminant.
+pub const HYPER_NATIVE_BLOCK_QUEUE_INFLIGHT_MAX: u64 = 4;
+/// `block_queue_any_ticket` in the `block_queue_limits` constants domain.
+///
+/// Bounded submission and completion storage. Completed entries remain charged until reaped.
+/// Numeric parameter or sentinel, not an enum discriminant.
+///
+/// Zero selects any completed ticket in block_queue_wait; it is never a valid ticket.
+pub const HYPER_NATIVE_BLOCK_QUEUE_ANY_TICKET: u64 = 0;
 
 /// `guest_notification_disable` in the `guest_notification` enum domain.
 ///
@@ -5376,6 +5444,120 @@ pub const HYPER_NATIVE_OP_VIRTUAL_CPU_SET_SCHEDULING: u64 = 262;
 /// Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
 pub const HYPER_NATIVE_OP_PROCESS_BUILDER_SET_SCHEDULING: u64 = 265;
 
+/// Object-local method `block_queue_create`.
+///
+/// | Property | Contract |
+/// | --- | --- |
+/// | Receiver | `receiver: Borrow, kind=native_block, rights=0x0` |
+/// | Operation | 258 |
+/// | Feature | `Core` |
+/// | Arguments | `capacity: u32`, `byte_limit: u64`, `inflight_limit: u32` |
+/// | Results | `queue: handle` |
+/// | Capability effects | `receiver: Borrow, kind=native_block, rights=0x0`, `queue: produce, kind=block_queue, inherited-from(receiver), mask=0x3e` |
+/// | User memory | — |
+/// | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
+/// | Audit | `Capability` |
+///
+/// Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+///
+/// Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+pub const HYPER_NATIVE_OP_BLOCK_QUEUE_CREATE: u64 = 258;
+
+/// Object-local method `block_queue_submit`.
+///
+/// | Property | Contract |
+/// | --- | --- |
+/// | Receiver | `receiver: Borrow, kind=block_queue, rights=0x0` |
+/// | Operation | 256 |
+/// | Feature | `Core` |
+/// | Arguments | `operation: u32`, `count: u32`, `frame: user_address`, `frame_bytes: byte_count` |
+/// | Results | `ticket: u64` |
+/// | Capability effects | `receiver: Borrow, kind=block_queue, rights=0x0` |
+/// | User memory | `frame: Read, len=frame_bytes bytes, max-bytes=524544; order=0` |
+/// | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
+/// | Audit | `Capability` |
+///
+/// Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+///
+/// Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+pub const HYPER_NATIVE_OP_BLOCK_QUEUE_SUBMIT: u64 = 256;
+
+/// Object-local method `block_queue_wait`.
+///
+/// | Property | Contract |
+/// | --- | --- |
+/// | Receiver | `receiver: Borrow, kind=block_queue, rights=0x4` |
+/// | Operation | 257 |
+/// | Feature | `Core` |
+/// | Arguments | `ticket: u64`, `deadline: u64` |
+/// | Results | `ticket: u64`, `completion_status: i64` |
+/// | Capability effects | `receiver: Borrow, kind=block_queue, rights=0x4` |
+/// | User memory | — |
+/// | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
+/// | Audit | `Capability` |
+///
+/// Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+///
+/// Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+pub const HYPER_NATIVE_OP_BLOCK_QUEUE_WAIT: u64 = 257;
+
+/// Object-local method `block_queue_reap`.
+///
+/// | Property | Contract |
+/// | --- | --- |
+/// | Receiver | `receiver: Borrow, kind=block_queue, rights=0x0` |
+/// | Operation | 258 |
+/// | Feature | `Core` |
+/// | Arguments | `ticket: u64`, `output: user_address`, `output_bytes: byte_count` |
+/// | Results | `completion_status: i64`, `bytes: byte_count` |
+/// | Capability effects | `receiver: Borrow, kind=block_queue, rights=0x0` |
+/// | User memory | `output: Write, len=output_bytes bytes, max-bytes=524288; order=0` |
+/// | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
+/// | Audit | `Capability` |
+///
+/// Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+///
+/// Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+pub const HYPER_NATIVE_OP_BLOCK_QUEUE_REAP: u64 = 258;
+
+/// Object-local method `block_queue_info`.
+///
+/// | Property | Contract |
+/// | --- | --- |
+/// | Receiver | `receiver: Borrow, kind=block_queue, rights=0x8` |
+/// | Operation | 259 |
+/// | Feature | `Core` |
+/// | Arguments | `output: user_address`, `output_size: byte_count` |
+/// | Results | `supported_size: byte_count` |
+/// | Capability effects | `receiver: Borrow, kind=block_queue, rights=0x8` |
+/// | User memory | `output: Write, len=output_size bytes, max-bytes=4096, record=block_queue_info; order=0` |
+/// | Execution | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` |
+/// | Audit | `Capability` |
+///
+/// Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+///
+/// Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+pub const HYPER_NATIVE_OP_BLOCK_QUEUE_INFO: u64 = 259;
+
+/// Object-local method `block_queue_wait_space`.
+///
+/// | Property | Contract |
+/// | --- | --- |
+/// | Receiver | `receiver: Borrow, kind=block_queue, rights=0x4` |
+/// | Operation | 260 |
+/// | Feature | `Core` |
+/// | Arguments | `bytes: byte_count`, `deadline: u64` |
+/// | Results | — |
+/// | Capability effects | `receiver: Borrow, kind=block_queue, rights=0x4` |
+/// | User memory | — |
+/// | Execution | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` |
+/// | Audit | `Capability` |
+///
+/// Arguments and auxiliary results follow the listed register order; neither list includes the receiver or signed status.
+///
+/// Auxiliary results are valid only on `ok`, except for the explicitly listed failure statuses.
+pub const HYPER_NATIVE_OP_BLOCK_QUEUE_WAIT_SPACE: u64 = 260;
+
 /// A decoded object method; enum discriminants are not a machine ABI.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeOperation {
@@ -5761,6 +5943,18 @@ pub enum NativeOperation {
     VirtualCpuSetScheduling,
     /// Decoded method; see [`HYPER_NATIVE_OP_PROCESS_BUILDER_SET_SCHEDULING`] for its contract.
     ProcessBuilderSetScheduling,
+    /// Decoded method; see [`HYPER_NATIVE_OP_BLOCK_QUEUE_CREATE`] for its contract.
+    BlockQueueCreate,
+    /// Decoded method; see [`HYPER_NATIVE_OP_BLOCK_QUEUE_SUBMIT`] for its contract.
+    BlockQueueSubmit,
+    /// Decoded method; see [`HYPER_NATIVE_OP_BLOCK_QUEUE_WAIT`] for its contract.
+    BlockQueueWait,
+    /// Decoded method; see [`HYPER_NATIVE_OP_BLOCK_QUEUE_REAP`] for its contract.
+    BlockQueueReap,
+    /// Decoded method; see [`HYPER_NATIVE_OP_BLOCK_QUEUE_INFO`] for its contract.
+    BlockQueueInfo,
+    /// Decoded method; see [`HYPER_NATIVE_OP_BLOCK_QUEUE_WAIT_SPACE`] for its contract.
+    BlockQueueWaitSpace,
 }
 
 #[rustfmt::skip]
@@ -5812,6 +6006,7 @@ impl NativeOperation {
             HYPER_NATIVE_OBJECT_EXECUTION_CONTEXT => {},
             HYPER_NATIVE_OBJECT_OBJECT_FACTORY => {},
             HYPER_NATIVE_OBJECT_SYSTEM_INFO => {},
+            HYPER_NATIVE_OBJECT_BLOCK_QUEUE => {},
             _ => return None,
         }
         match (object_kind, operation) {
@@ -6006,6 +6201,12 @@ impl NativeOperation {
             (HYPER_NATIVE_OBJECT_VIRTUAL_CPU, HYPER_NATIVE_OP_VIRTUAL_CPU_GET_SCHEDULING) => Some(Self::VirtualCpuGetScheduling),
             (HYPER_NATIVE_OBJECT_VIRTUAL_CPU, HYPER_NATIVE_OP_VIRTUAL_CPU_SET_SCHEDULING) => Some(Self::VirtualCpuSetScheduling),
             (HYPER_NATIVE_OBJECT_PROCESS_BUILDER, HYPER_NATIVE_OP_PROCESS_BUILDER_SET_SCHEDULING) => Some(Self::ProcessBuilderSetScheduling),
+            (HYPER_NATIVE_OBJECT_NATIVE_BLOCK, HYPER_NATIVE_OP_BLOCK_QUEUE_CREATE) => Some(Self::BlockQueueCreate),
+            (HYPER_NATIVE_OBJECT_BLOCK_QUEUE, HYPER_NATIVE_OP_BLOCK_QUEUE_SUBMIT) => Some(Self::BlockQueueSubmit),
+            (HYPER_NATIVE_OBJECT_BLOCK_QUEUE, HYPER_NATIVE_OP_BLOCK_QUEUE_WAIT) => Some(Self::BlockQueueWait),
+            (HYPER_NATIVE_OBJECT_BLOCK_QUEUE, HYPER_NATIVE_OP_BLOCK_QUEUE_REAP) => Some(Self::BlockQueueReap),
+            (HYPER_NATIVE_OBJECT_BLOCK_QUEUE, HYPER_NATIVE_OP_BLOCK_QUEUE_INFO) => Some(Self::BlockQueueInfo),
+            (HYPER_NATIVE_OBJECT_BLOCK_QUEUE, HYPER_NATIVE_OP_BLOCK_QUEUE_WAIT_SPACE) => Some(Self::BlockQueueWaitSpace),
             _ => None,
         }
     }
@@ -6204,6 +6405,12 @@ impl NativeOperation {
             Self::VirtualCpuGetScheduling => HYPER_NATIVE_OP_VIRTUAL_CPU_GET_SCHEDULING,
             Self::VirtualCpuSetScheduling => HYPER_NATIVE_OP_VIRTUAL_CPU_SET_SCHEDULING,
             Self::ProcessBuilderSetScheduling => HYPER_NATIVE_OP_PROCESS_BUILDER_SET_SCHEDULING,
+            Self::BlockQueueCreate => HYPER_NATIVE_OP_BLOCK_QUEUE_CREATE,
+            Self::BlockQueueSubmit => HYPER_NATIVE_OP_BLOCK_QUEUE_SUBMIT,
+            Self::BlockQueueWait => HYPER_NATIVE_OP_BLOCK_QUEUE_WAIT,
+            Self::BlockQueueReap => HYPER_NATIVE_OP_BLOCK_QUEUE_REAP,
+            Self::BlockQueueInfo => HYPER_NATIVE_OP_BLOCK_QUEUE_INFO,
+            Self::BlockQueueWaitSpace => HYPER_NATIVE_OP_BLOCK_QUEUE_WAIT_SPACE,
         }
     }
 
@@ -6401,6 +6608,12 @@ impl NativeOperation {
             Self::VirtualCpuGetScheduling => Some(HYPER_NATIVE_OBJECT_VIRTUAL_CPU),
             Self::VirtualCpuSetScheduling => Some(HYPER_NATIVE_OBJECT_VIRTUAL_CPU),
             Self::ProcessBuilderSetScheduling => Some(HYPER_NATIVE_OBJECT_PROCESS_BUILDER),
+            Self::BlockQueueCreate => Some(HYPER_NATIVE_OBJECT_NATIVE_BLOCK),
+            Self::BlockQueueSubmit => Some(HYPER_NATIVE_OBJECT_BLOCK_QUEUE),
+            Self::BlockQueueWait => Some(HYPER_NATIVE_OBJECT_BLOCK_QUEUE),
+            Self::BlockQueueReap => Some(HYPER_NATIVE_OBJECT_BLOCK_QUEUE),
+            Self::BlockQueueInfo => Some(HYPER_NATIVE_OBJECT_BLOCK_QUEUE),
+            Self::BlockQueueWaitSpace => Some(HYPER_NATIVE_OBJECT_BLOCK_QUEUE),
         }
     }
 
@@ -6598,6 +6811,12 @@ impl NativeOperation {
             Self::VirtualCpuGetScheduling => 1,
             Self::VirtualCpuSetScheduling => 1,
             Self::ProcessBuilderSetScheduling => 2,
+            Self::BlockQueueCreate => 3,
+            Self::BlockQueueSubmit => 4,
+            Self::BlockQueueWait => 2,
+            Self::BlockQueueReap => 3,
+            Self::BlockQueueInfo => 2,
+            Self::BlockQueueWaitSpace => 2,
         }
     }
 
@@ -6795,6 +7014,12 @@ impl NativeOperation {
             Self::VirtualCpuGetScheduling => 8,
             Self::VirtualCpuSetScheduling => 0,
             Self::ProcessBuilderSetScheduling => 0,
+            Self::BlockQueueCreate => 0,
+            Self::BlockQueueSubmit => 0,
+            Self::BlockQueueWait => 4,
+            Self::BlockQueueReap => 0,
+            Self::BlockQueueInfo => 8,
+            Self::BlockQueueWaitSpace => 4,
         }
     }
 
@@ -8986,3 +9211,69 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, dma_mappi
 const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, user_address_spaces) == 136);
 const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, user_mappings) == 144);
 const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, reserved) == 152);
+
+/// Minimum supported prefix of `block_queue_info`, in bytes; individual calls define their buffer lengths.
+pub const HYPER_NATIVE_BLOCK_QUEUE_INFO_MIN_SIZE: usize = 128;
+/// Wire layout for `block_queue_info`.
+///
+/// Size: 128 bytes; alignment: 8 bytes; supported minimum prefix: 128 bytes.
+/// Scalar widths and member offsets are fixed across supported architectures.
+/// The minimum prefix describes extensibility, not permission to truncate every call's buffer;
+/// the consuming operation defines its accepted length.
+///
+/// Used by: `block_queue_info`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeBlockQueueInfo {
+    /// Wire offset 0 bytes; width 8 bytes.
+    pub capacity: u64,
+    /// Wire offset 8 bytes; width 8 bytes.
+    pub byte_limit: u64,
+    /// Wire offset 16 bytes; width 8 bytes.
+    pub inflight_limit: u64,
+    /// Wire offset 24 bytes; width 8 bytes.
+    pub outstanding_requests: u64,
+    /// Wire offset 32 bytes; width 8 bytes.
+    pub outstanding_bytes: u64,
+    /// Wire offset 40 bytes; width 8 bytes.
+    pub pending_requests: u64,
+    /// Wire offset 48 bytes; width 8 bytes.
+    pub inflight_commands: u64,
+    /// Wire offset 56 bytes; width 8 bytes.
+    pub completed_requests: u64,
+    /// Wire offset 64 bytes; width 8 bytes.
+    pub submitted_batches: u64,
+    /// Wire offset 72 bytes; width 8 bytes.
+    pub submitted_ranges: u64,
+    /// Wire offset 80 bytes; width 8 bytes.
+    pub dispatched_commands: u64,
+    /// Wire offset 88 bytes; width 8 bytes.
+    pub merged_ranges: u64,
+    /// Wire offset 96 bytes; width 8 bytes.
+    pub completed_batches: u64,
+    /// Wire offset 104 bytes; width 8 bytes.
+    pub peak_inflight: u64,
+    /// Wire offset 112 bytes; width 8 bytes.
+    pub device_inflight_limit: u64,
+    /// Wire offset 120 bytes; width 8 bytes.
+    pub reserved: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeBlockQueueInfo>() == 128);
+const _: () = assert!(core::mem::align_of::<HyperNativeBlockQueueInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, capacity) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, byte_limit) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, inflight_limit) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, outstanding_requests) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, outstanding_bytes) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, pending_requests) == 40);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, inflight_commands) == 48);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, completed_requests) == 56);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, submitted_batches) == 64);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, submitted_ranges) == 72);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, dispatched_commands) == 80);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, merged_ranges) == 88);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, completed_batches) == 96);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, peak_inflight) == 104);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, device_inflight_limit) == 112);
+const _: () = assert!(core::mem::offset_of!(HyperNativeBlockQueueInfo, reserved) == 120);

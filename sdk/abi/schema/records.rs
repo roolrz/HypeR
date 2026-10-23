@@ -16,6 +16,92 @@
 use super::model::*;
 use super::values::*;
 
+/// Limits, live occupancy and monotonic command counters for one logical block queue.
+/// Counts are batch requests unless explicitly named ranges or commands. Byte limits
+/// include completed but unreaped data. Reserved is zero; counters are observations.
+const BLOCK_QUEUE_INFO_FIELDS: &[Field] = &[
+    Field {
+        name: "capacity",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "byte_limit",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "inflight_limit",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "outstanding_requests",
+        kind: FieldKind::U64,
+        offset: 24,
+    },
+    Field {
+        name: "outstanding_bytes",
+        kind: FieldKind::U64,
+        offset: 32,
+    },
+    Field {
+        name: "pending_requests",
+        kind: FieldKind::U64,
+        offset: 40,
+    },
+    Field {
+        name: "inflight_commands",
+        kind: FieldKind::U64,
+        offset: 48,
+    },
+    Field {
+        name: "completed_requests",
+        kind: FieldKind::U64,
+        offset: 56,
+    },
+    Field {
+        name: "submitted_batches",
+        kind: FieldKind::U64,
+        offset: 64,
+    },
+    Field {
+        name: "submitted_ranges",
+        kind: FieldKind::U64,
+        offset: 72,
+    },
+    Field {
+        name: "dispatched_commands",
+        kind: FieldKind::U64,
+        offset: 80,
+    },
+    Field {
+        name: "merged_ranges",
+        kind: FieldKind::U64,
+        offset: 88,
+    },
+    Field {
+        name: "completed_batches",
+        kind: FieldKind::U64,
+        offset: 96,
+    },
+    Field {
+        name: "peak_inflight",
+        kind: FieldKind::U64,
+        offset: 104,
+    },
+    Field {
+        name: "device_inflight_limit",
+        kind: FieldKind::U64,
+        offset: 112,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U64,
+        offset: 120,
+    },
+];
+
 /// Kind and rights of one process-local handle, without a global object lookup.
 const HANDLE_INFO_FIELDS: &[Field] = &[
     Field {
@@ -2582,6 +2668,13 @@ pub const RECORDS: &[Record] = &[
         fields: RESOURCE_LIMITS_FIELDS,
         minimum_size: 160,
         size: 160,
+        alignment: 8,
+    },
+    Record {
+        name: "block_queue_info",
+        fields: BLOCK_QUEUE_INFO_FIELDS,
+        minimum_size: 128,
+        size: 128,
         alignment: 8,
     },
 ];

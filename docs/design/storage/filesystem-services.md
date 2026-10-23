@@ -215,8 +215,18 @@ and 3 (disjoint write batch). For a batch, the sector argument is the record
 count (1–4); the byte frame contains that many little-endian `(first_sector,
 byte_length)` u64 pairs followed by their payloads in order. Total payload is
 at most 512 KiB. Every complete-sector range, overlap and exact frame length is
-validated before any write. The kernel's existing multi-request submission and
-flight-retirement rules therefore continue to apply to the userspace engine.
+validated before any write. These synchronous operations use the same device
+engine as derived asynchronous queues, so their overlaps and durable flushes
+cannot bypass ordering against queued work.
+
+The FAT adapter derives a bounded `BlockQueue` from its volume capability. It
+submits up to sixteen disjoint ranges per batch and can continue preparing its
+current filesystem operation before waiting for each completion. The engine
+merges adjacent compatible ranges, consumes independently completed commands
+and refills available transport slots. The adapter collects all accepted writes
+before replying to a filesystem request and drains its queue before handoff.
+See [asynchronous block I/O](block-io.md) for admission, DMA lifetime, ordering
+and failure semantics; this does not add asynchronous dirty file-cache writeback.
 
 The worker waits for both requests and parent-channel closure. Parent death
 closes the worker service after any already executing bounded block operation

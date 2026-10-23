@@ -480,11 +480,14 @@ or network device. Both devices share one grant and Linux mapping.
 Each Native volume client uses a dedicated 1 MiB shared I/O pool, including
 separate pools for the default configuration and system volumes.
 Bridge protocol version 3 retains six storage
-split queues: control, event, and four request queues. The Native client submits
-up to four 128 KiB reads before issuing one combined notification. Each request
-queue owns its descriptor chain and data buffer until completion. Writes and
-flushes remain ordered by the device session. Unretired requests poison the
-session on failure; their memory lease remains retained until backend quiescence.
+split queues: control, event, and four request queues. The Native client batches
+notifications for newly published commands and refills slots as individual
+commands complete. Its 512 KiB data pool supports up to four small concurrent
+commands or one merged 512 KiB command. Each command owns its descriptor chain
+and allocated data span until completion. Overlapping writes and flushes remain
+ordered by the device engine; independent logical producers use bounded
+[Native block queues](../storage/block-io.md). Unretired requests disconnect the
+device on failure; their memory lease remains retained until backend quiescence.
 The rest of HypeR memory is not exported.
 
 ### Allocation and zero-copy scope

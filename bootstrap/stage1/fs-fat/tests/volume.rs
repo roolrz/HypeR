@@ -118,6 +118,246 @@ impl BlockDevice for Disk {
         }
     }
 }
+
+#[derive(Default)]
+struct DeferredState {
+    submitted: usize,
+    outstanding: usize,
+    peak: usize,
+    joins: usize,
+    reads_with_writes: usize,
+    fail_read_after_submission: bool,
+}
+
+/// Delays media writes until an overlapping read, queue backpressure or the
+/// explicit completion boundary. This detects accidental dependence on the
+/// old synchronous `write_batch` contract in real FAT operations.
+struct DeferredDisk {
+    disk: Disk,
+    state: Arc<Mutex<DeferredState>>,
+    pending: Vec<(u64, Vec<u8>)>,
+}
+
+impl DeferredDisk {
+    fn new(disk: Disk) -> (Self, Arc<Mutex<DeferredState>>) {
+        let state = Arc::new(Mutex::new(DeferredState::default()));
+        (
+            Self {
+                disk,
+                state: state.clone(),
+                pending: Vec::new(),
+            },
+            state,
+        )
+    }
+
+    fn complete_one(&mut self, index: usize) -> Result<(), BlockError> {
+        let (first, bytes) = self.pending.remove(index);
+        require_ok(self.state.lock()).outstanding -= 1;
+        self.disk.write_sectors(first, &bytes)
+    }
+}
+
+impl BlockDevice for DeferredDisk {
+    fn sector_count(&self) -> u64 {
+        self.disk.sector_count()
+    }
+
+    fn read_sectors(&mut self, first: u64, output: &mut [u8]) -> Result<(), BlockError> {
+        validate_range(self.sector_count(), first, output.len())?;
+        {
+            let mut state = require_ok(self.state.lock());
+            if !self.pending.is_empty() {
+                state.reads_with_writes += 1;
+            }
+            if state.submitted != 0 && state.fail_read_after_submission {
+                return Err(BlockError::Io);
+            }
+        }
+        let end = first + (output.len() / SECTOR_SIZE) as u64;
+        let mut index = 0;
+        while index < self.pending.len() {
+            let (start, bytes) = &self.pending[index];
+            let stop = start + (bytes.len() / SECTOR_SIZE) as u64;
+            if *start < end && first < stop {
+                self.complete_one(index)?;
+            } else {
+                index += 1;
+            }
+        }
+        self.disk.read_sectors(first, output)
+    }
+
+    fn write_sectors(&mut self, first: u64, input: &[u8]) -> Result<(), BlockError> {
+        self.submit_writes(&[WriteRequest {
+            first,
+            bytes: input,
+        }])?;
+        self.complete_writes()
+    }
+
+    fn submit_writes(&mut self, requests: &[WriteRequest<'_>]) -> Result<(), BlockError> {
+        crate::block::validate_writes(self.sector_count(), requests)?;
+        for request in requests {
+            if request.bytes.is_empty() {
+                continue;
+            }
+            if self.pending.len() == 4 {
+                self.complete_one(0)?;
+            }
+            self.pending.push((request.first, request.bytes.to_vec()));
+            let mut state = require_ok(self.state.lock());
+            state.submitted += 1;
+            state.outstanding += 1;
+            state.peak = state.peak.max(state.outstanding);
+        }
+        Ok(())
+    }
+
+    fn complete_writes(&mut self) -> Result<(), BlockError> {
+        require_ok(self.state.lock()).joins += 1;
+        let mut failure = None;
+        while !self.pending.is_empty() {
+            if let Err(error) = self.complete_one(0) {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        self.complete_writes()?;
+        self.disk.flush()
+    }
+}
+
+#[test]
+fn asynchronous_fat_128k_write_overlaps_with_an_unaligned_data_region() {
+    let disk = Disk::fresh();
+    // The first data sector is 32 + 2 * 600 = 1232, deliberately not aligned
+    // to the adapter's 256-sector windows. Ordinary IPC writes are only 128KiB;
+    // testing a multi-MiB call would conceal an aligned-full-window trigger.
+    let (device, deferred) = DeferredDisk::new(disk.clone());
+    let mut fs = require_ok(FatVolume::mount(device));
+    // Leave the next allocation near a FAT read-window boundary. Its refill
+    // happens after the first 64KiB of new data, making real overlap observable
+    // even though most metadata accesses are served by the sector cache.
+    require_ok(fs.create("prefix", false));
+    require_ok(fs.write_at("prefix", 0, &vec![0x6d; 853 * SECTOR_SIZE]));
+    require_ok(fs.create("unaligned", false));
+    *require_ok(deferred.lock()) = DeferredState::default();
+    let contents: Vec<u8> = (0..128 * 1024).map(|i| (i % 251) as u8).collect();
+    require_ok(fs.write_at("unaligned", 0, &contents));
+    {
+        let state = require_ok(deferred.lock());
+        assert!(
+            state.reads_with_writes > 0,
+            "128KiB write did not submit before the FAT traversal finished"
+        );
+        assert_eq!(state.outstanding, 0);
+    }
+    drop(fs);
+    let mut fs = require_ok(FatVolume::mount(disk));
+    let mut output = vec![0; contents.len()];
+    assert_eq!(
+        require_ok(fs.read_at("unaligned", 0, &mut output)),
+        output.len()
+    );
+    assert_eq!(output, contents);
+}
+
+#[test]
+fn asynchronous_fat_writes_overlap_work_and_join_before_reply() {
+    let disk = Disk::fresh();
+    let (device, deferred) = DeferredDisk::new(disk.clone());
+    let mut fs = require_ok(FatVolume::mount(device));
+    require_ok(fs.create("stream", false));
+    let contents: Vec<u8> = (0..2 * 1024 * 1024 + 37).map(|i| (i % 251) as u8).collect();
+    require_ok(fs.write_at("stream", 0, &contents));
+    {
+        let state = require_ok(deferred.lock());
+        assert!(state.peak > 1, "writes remained synchronous");
+        assert!(
+            state.reads_with_writes > 0,
+            "no FAT work overlapped submissions"
+        );
+        assert_eq!(
+            state.outstanding, 0,
+            "successful reply leaked pending writes"
+        );
+    }
+    assert_eq!(require_ok(disk.0.lock()).flushes, 0);
+    // Reopen the physical view without an explicit durability flush: operation
+    // completion alone must have made all data/metadata available to readers.
+    drop(fs);
+    let mut fs = require_ok(FatVolume::mount(disk));
+    let mut output = vec![0; contents.len()];
+    assert_eq!(
+        require_ok(fs.read_at("stream", 0, &mut output)),
+        output.len()
+    );
+    assert_eq!(output, contents);
+}
+
+#[test]
+fn asynchronous_fat_completion_failure_is_latched_and_joined() {
+    let disk = Disk::fresh();
+    let (device, deferred) = DeferredDisk::new(disk.clone());
+    let mut fs = require_ok(FatVolume::mount(device));
+    require_ok(fs.create("failure", false));
+    require_ok(disk.0.lock()).fail_writes = true;
+    assert!(fs.write_at("failure", 0, &vec![0xa5; 512 * 1024]).is_err());
+    assert_eq!(require_ok(deferred.lock()).outstanding, 0);
+    let submitted = require_ok(deferred.lock()).submitted;
+    assert!(fs.write_at("failure", 0, &[0x55; 512]).is_err());
+    assert_eq!(require_ok(deferred.lock()).submitted, submitted);
+}
+
+#[test]
+fn asynchronous_fat_read_failure_still_joins_earlier_writes() {
+    let disk = Disk::fresh();
+    let (device, deferred) = DeferredDisk::new(disk);
+    let mut fs = require_ok(FatVolume::mount(device));
+    require_ok(fs.create("failure", false));
+    {
+        let mut state = require_ok(deferred.lock());
+        state.submitted = 0;
+        state.fail_read_after_submission = true;
+    }
+    assert!(
+        fs.write_at("failure", 0, &vec![0x39; 2 * 1024 * 1024])
+            .is_err()
+    );
+    let state = require_ok(deferred.lock());
+    assert!(
+        state.submitted > 0,
+        "test failed before exercising queued writes"
+    );
+    assert_eq!(state.outstanding, 0, "failure bypassed completion cleanup");
+}
+
+#[test]
+fn asynchronous_fat_window_reuse_observes_prior_partial_writes() {
+    let disk = Disk::fresh();
+    let (device, deferred) = DeferredDisk::new(disk);
+    let mut fs = require_ok(FatVolume::mount(device));
+    require_ok(fs.create("reuse", false));
+    let mut contents = vec![0x5a; 2 * 1024 * 1024 + 37];
+    require_ok(fs.write_at("reuse", 0, &contents));
+    for offset in [511, 128 * 1024 - 7, 1024 * 1024 + 511] {
+        let replacement = [0xa7; 1031];
+        require_ok(fs.write_at("reuse", offset as u64, &replacement));
+        contents[offset..offset + replacement.len()].copy_from_slice(&replacement);
+    }
+    let mut output = vec![0; contents.len()];
+    assert_eq!(
+        require_ok(fs.read_at("reuse", 0, &mut output)),
+        output.len()
+    );
+    assert_eq!(output, contents);
+    assert_eq!(require_ok(deferred.lock()).outstanding, 0);
+    require_ok(fs.sync());
+}
 #[test]
 fn fat_first_read_builds_the_allocation_map_without_an_eof_seek() {
     let disk = Disk::fresh();

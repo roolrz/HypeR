@@ -358,6 +358,11 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
         name: "system_info",
         transfer: TransferClass::General,
     },
+    ObjectKind {
+        value: 44,
+        name: "block_queue",
+        transfer: TransferClass::RendezvousOnly,
+    },
 ];
 
 /// Read-only authority returned for a stateful directory enumeration stream.
@@ -663,6 +668,21 @@ pub const SIGNALS: &[Signal] = &[
     },
     Signal {
         object: "guest_mailbox",
+        bit: 2,
+        name: "peer_closed",
+    },
+    Signal {
+        object: "block_queue",
+        bit: 0,
+        name: "completed",
+    },
+    Signal {
+        object: "block_queue",
+        bit: 1,
+        name: "writable",
+    },
+    Signal {
+        object: "block_queue",
         bit: 2,
         name: "peer_closed",
     },

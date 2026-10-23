@@ -6,6 +6,7 @@
 //! Keep each syscall as a distinct machine frame: routing must not inherit
 //! the largest handler stack, and crash traces must identify the active call.
 
+mod block_queue;
 mod console;
 mod device;
 mod guest_io;
@@ -30,6 +31,10 @@ mod task;
 mod vfs;
 mod vm;
 
+pub(super) use block_queue::{
+    sys_block_queue_create, sys_block_queue_info, sys_block_queue_reap, sys_block_queue_submit,
+    sys_block_queue_wait, sys_block_queue_wait_space,
+};
 pub(super) use console::{sys_console_discard_input, sys_console_read, sys_console_write};
 pub(super) use device::{
     sys_device_claim, sys_device_claim_bundle, sys_device_claim_matching,

@@ -15,80 +15,16 @@ use hyper_filesystem::{
     Timestamp,
     protocol::{self, Entry, Error},
 };
-use hyper_fs_fat::{
-    FatVolume,
-    block::{BlockDevice, Error as BlockError},
-};
+use hyper_fs_fat::{FatVolume, block::Error as BlockError};
 use hyper_os::block::NativeBlock;
 use worker_transport::Volume;
 
-struct Device {
-    block: NativeBlock,
-    sectors: u64,
-    readonly: bool,
-}
+mod device;
+use device::Device;
 
-impl BlockDevice for Device {
-    fn is_read_only(&self) -> bool {
-        self.readonly
-    }
-
-    fn sector_count(&self) -> u64 {
-        self.sectors
-    }
-
-    fn read_sectors(&mut self, first: u64, output: &mut [u8]) -> Result<(), BlockError> {
-        hyper_fs_fat::block::validate_range(self.sectors, first, output.len())?;
-        for (index, bytes) in output.chunks_mut(protocol::DATA_BYTES).enumerate() {
-            self.block
-                .read_sectors(first + (index * protocol::DATA_BYTES / 512) as u64, bytes)
-                .map_err(block_error)?;
-        }
-        Ok(())
-    }
-
-    fn write_sectors(&mut self, first: u64, input: &[u8]) -> Result<(), BlockError> {
-        hyper_fs_fat::block::validate_range(self.sectors, first, input.len())?;
-        for (index, bytes) in input.chunks(protocol::DATA_BYTES).enumerate() {
-            self.block
-                .write_sectors(first + (index * protocol::DATA_BYTES / 512) as u64, bytes)
-                .map_err(block_error)?;
-        }
-        Ok(())
-    }
-
-    fn write_batch(
-        &mut self,
-        requests: &[hyper_fs_fat::block::WriteRequest<'_>],
-    ) -> Result<(), BlockError> {
-        hyper_fs_fat::block::validate_writes(self.sectors, requests)?;
-        let mut batch = [hyper_os::block::WriteRequest {
-            first: 0,
-            bytes: &[],
-        }; 4];
-        if requests.is_empty() {
-            return Ok(());
-        }
-        if requests.len() > batch.len() {
-            return Err(BlockError::InvalidRange);
-        }
-
-        for (target, source) in batch.iter_mut().zip(requests) {
-            *target = hyper_os::block::WriteRequest {
-                first: source.first,
-                bytes: source.bytes,
-            };
-        }
-
-        self.block
-            .write_batch(&batch[..requests.len()])
-            .map_err(block_error)
-    }
-
-    fn flush(&mut self) -> Result<(), BlockError> {
-        self.block.flush().map_err(block_error)
-    }
-}
+#[cfg(feature = "block-queue-test")]
+#[path = "../../../../tests/app/block-queue-probe.rs"]
+mod queue_probe;
 
 struct Fat(FatVolume<Device>);
 
@@ -163,14 +99,6 @@ fn metadata(value: hyper_fs_fat::Entry) -> Entry {
     }
 }
 
-fn block_error(error: hyper_os::Error) -> BlockError {
-    match error {
-        hyper_os::Error::Status(hyper_os::Status::READ_ONLY) => BlockError::ReadOnly,
-        hyper_os::Error::Status(hyper_os::Status::INVALID_ARGUMENT) => BlockError::InvalidRange,
-        _ => BlockError::Io,
-    }
-}
-
 fn map_error(error: hyper_fs_fat::Error) -> Error {
     use hyper_fs_fat::Error as E;
 
@@ -224,12 +152,11 @@ fn run() -> Result<(), String> {
             .take(crate::contracts::filesystem::BLOCK)
             .map_err(show)?,
     );
+    #[cfg(feature = "block-queue-test")]
+    queue_probe::run(&block, sectors, readonly)?;
+
     let volume = FatVolume::mount_with_clock(
-        Device {
-            block,
-            sectors,
-            readonly,
-        },
+        Device::new(block, sectors, readonly).map_err(show)?,
         realtime,
     )
     .map_err(show)?;
@@ -237,7 +164,7 @@ fn run() -> Result<(), String> {
     let mut volume = Fat(volume);
     let completion = worker_transport::serve(&mut startup, &mut volume)?;
     let device = volume.0.into_device().map_err(show)?;
-    worker_transport::return_block(completion, device.block)
+    worker_transport::return_block(completion, device.into_block().map_err(show)?)
 }
 
 fn show(error: impl core::fmt::Debug) -> String {

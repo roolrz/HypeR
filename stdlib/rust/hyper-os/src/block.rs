@@ -3,6 +3,11 @@
 
 //! Native filesystem block initiator setup. Runtime policy negotiates the
 //! Linux backend; the kernel owns subsequent virtio-scsi requests and waits.
+//! Synchronous transfers use a persistent internal logical queue on the same
+//! engine as explicit [`BlockQueue`] submissions and share device ordering.
+
+mod queue;
+pub use queue::{BlockQueue, Completion, QueueConfig, QueueInfo, ReadRequest, Ticket};
 
 use crate::handle::{
     AnyObject, GuestMemoryObject, HandleRef, NativeBlockObject, OwnedHandle, Rights,
@@ -24,7 +29,7 @@ pub const QUEUE_STRIDE: u64 = hyper_abi::HYPER_NATIVE_NATIVE_BLOCK_QUEUE_STRIDE;
 pub const AVAILABLE_OFFSET: u64 = hyper_abi::HYPER_NATIVE_NATIVE_BLOCK_AVAILABLE_OFFSET;
 pub const USED_OFFSET: u64 = hyper_abi::HYPER_NATIVE_NATIVE_BLOCK_USED_OFFSET;
 
-/// One disjoint complete-sector write in a bounded synchronous batch.
+/// One disjoint complete-sector write in a bounded submission batch.
 #[derive(Clone, Copy)]
 pub struct WriteRequest<'a> {
     pub first: u64,
@@ -110,6 +115,12 @@ impl NativeBlock {
     }
     pub fn into_handle(self) -> OwnedHandle<NativeBlockObject> {
         self.handle
+    }
+    /// Creates an independently owned logical queue with bounded retained requests.
+    /// The queue inherits only the parent rights allowed for block queues;
+    /// closing this parent does not close an independently held derived queue.
+    pub fn create_queue(&self, config: QueueConfig) -> Result<BlockQueue> {
+        BlockQueue::create(self.as_handle_ref(), config)
     }
     pub fn read_sectors(&self, first: u64, bytes: &mut [u8]) -> Result<()> {
         self.transfer(0, first, bytes.as_mut_ptr(), bytes.len())

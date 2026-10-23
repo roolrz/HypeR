@@ -366,6 +366,10 @@ mod guest_io;
 mod native_block_wire;
 
 #[cfg(test)]
+#[path = "../../../src/kernel/block/plan.rs"]
+mod native_block_plan;
+
+#[cfg(test)]
 #[path = "../../../src/kernel/vm/memory/extent_index.rs"]
 mod guest_extent_index;
 

@@ -1,9 +1,13 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Synchronous, sleepable access to an exclusively owned logical block volume.
+//! Sleepable block access with operation-scoped asynchronous write submission.
 
 pub const SECTOR_SIZE: usize = 512;
+/// Maximum descriptors in one admission. Larger drains stream several batches.
+pub const WRITE_BATCH_REQUESTS: usize = 16;
+/// Maximum payload in one atomic queue admission.
+pub const WRITE_BATCH_BYTES: usize = 512 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -49,6 +53,20 @@ pub trait BlockDevice {
                 self.write_sectors(request.first, request.bytes)?;
             }
         }
+        Ok(())
+    }
+    /// Accept disjoint writes without requiring device completion. Implementors
+    /// must copy the input before returning and bound outstanding resources.
+    /// Later overlapping reads/writes observe submission order; independent
+    /// requests may complete in any order. Backpressure may sleep to reap prior
+    /// submissions. A failed admission can leave earlier batches outstanding.
+    fn submit_writes(&mut self, requests: &[WriteRequest<'_>]) -> Result<(), Error> {
+        self.write_batch(requests)
+    }
+    /// Join every accepted write, including after another operation failed.
+    /// This is a completion boundary, not a physical durability barrier. Return
+    /// the first failure only after retiring all outstanding completion tokens.
+    fn complete_writes(&mut self) -> Result<(), Error> {
         Ok(())
     }
     fn flush(&mut self) -> Result<(), Error>;
